@@ -15,7 +15,7 @@ LIB_SRCS	= usim.cpp memory.cpp \
 		  mc6850.cpp
 
 OBJS		= $(LIB_SRCS:.cpp=.o)
-BIN		= usim09 usim02 tests/test6502 tests/test6809
+BIN		= usim09 usim02 usim09batch tests/test6809
 
 LIB		= libusim.a
 
@@ -31,12 +31,6 @@ usim09:	$(LIB) main09.o term.o
 usim02:	$(LIB) main02.o term.o
 	$(CXX) $(CCFLAGS) $(LDFLAGS) main02.o term.o -L. -lusim -o $(@)
 
-tests/test6502: $(LIB) tests/test6502.o
-	$(CXX) $(CCFLAGS) $(LDFLAGS) tests/test6502.o -L. -lusim -o $(@)
-
-tests/test6502.o: tests/test6502.cpp
-	$(CXX) $(CPPFLAGS) $(CCFLAGS) -c tests/test6502.cpp -o $(@)
-
 tests/test6809: $(LIB) tests/test6809.o
 	$(CXX) $(CCFLAGS) $(LDFLAGS) tests/test6809.o -L. -lusim -o $(@)
 
@@ -47,9 +41,11 @@ tests/test6809.bin: tests/test6809.asm
 	asm6809 -B -o $(@) $(<)
 
 .PHONY: test
-test: tests/test6502 tests/test6809 tests/test6809.bin
-	tests/test6502
+test: tests/test6809 tests/test6809.bin
 	tests/test6809
+
+usim09batch: $(LIB) main09batch.o batchterm.o
+	$(CXX) $(CCFLAGS) $(LDFLAGS) main09batch.o batchterm.o -L. -lusim -o $(@)
 
 .SUFFIXES: .cpp
 
@@ -82,6 +78,10 @@ main.o: mc6809.h wiring.h usim.h device.h
 main.o: typedefs.h memory.h bits.h mc6850.h
 main.o: term.h
 term.o: term.h mc6850.h device.h typedefs.h wiring.h
+batchterm.o: batchterm.h mc6850.h device.h typedefs.h wiring.h
+main09batch.o: mc6809.h wiring.h usim.h device.h
+main09batch.o: typedefs.h memory.h bits.h mc6850.h
+main09batch.o: batchterm.h haltdev.h
 
 # DO NOT DELETE THIS LINE -- make depend depends on it.
 
