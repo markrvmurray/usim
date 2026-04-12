@@ -100,5 +100,5 @@ int main(int argc, char *argv[])
 		cpu.run();
 	}
 
-	return EXIT_SUCCESS;
+	return halt->getExitCode();
 }

@@ -14,6 +14,7 @@ class HaltDevice : public MappedDevice {
 
 	USim&			cpu;
 	bool*			flag;
+	Byte			exit_code = 0;
 
 public:
 	virtual Byte		read(Word offset) {
@@ -23,10 +24,12 @@ public:
 
 	virtual void		write(Word offset, Byte val) {
 					(void)offset;
-					(void)val;
+					exit_code = val;
 					cpu.halt();
 					if (flag) *flag = true;
 				}
+
+	Byte			getExitCode() const { return exit_code; }
 
 				HaltDevice(USim& cpu, bool* flag = nullptr)
 					: cpu(cpu), flag(flag) {}
