@@ -4,10 +4,15 @@
 //
 //	vim: ts=8 sw=8 noet:
 //
-//	Same memory map as main09.cpp but with:
-//	- BatchTerminal (unbuffered stdio, no termios)
-//	- HaltDevice at 0xbf00 (write to halt CPU)
-//	- --timeout=N instruction count limit
+//	Memory map:
+//	  0x0000-0xBFFF  RAM (48 KB)
+//	  0xC000-0xC002  IO devices (overlay ROM):
+//	    0xC000-0xC001  ACIA (status/data)
+//	    0xC002         Halt/exit device (written value = exit code)
+//	  0xC003-0xFFFF  ROM (code + vectors)
+//
+//	BatchTerminal (unbuffered stdio, no termios)
+//	--timeout=N instruction count limit
 //
 
 #include <cstdlib>
@@ -50,12 +55,6 @@ int main(int argc, char *argv[])
 		usage(argv[0]);
 	}
 
-	const Word ram_size = 0x8000;
-	// ROM region: 16 KiB, from 0xC000 up to and including the
-	// vector table at 0xFFF0-0xFFFF. The picolibc execution tests
-	// outgrew the original 8 KiB region as more stdlib functions
-	// were added. ACIA was moved out of the ROM range (was at
-	// 0xC000-0xC001) to keep the ROM contiguous.
 	const Word rom_base = 0xc000;
 	const Word rom_size = 0x10000 - rom_base;
 
@@ -63,19 +62,21 @@ int main(int argc, char *argv[])
 	mc6809			cpu;
 	BatchTerminal		term;
 
-	auto ram = std::make_shared<RAM>(ram_size);
+	// 64 KB RAM as fallback (covers 0x0000-0xFFFF).
+	// ROM and IO devices are attached first so they take priority
+	// in the 0xC000+ range. RAM is only reached for 0x0000-0xBFFF
+	// (48 KB effective).
+	auto ram = std::make_shared<RAM>(0x10000);
 	auto rom = std::make_shared<ROM>(rom_size);
 	auto acia = std::make_shared<mc6850>(term);
 	auto halt = std::make_shared<HaltDevice>(cpu, &halted);
 
-	// IO map (in the unmapped 0x8000-0xBFFF gap between RAM and ROM):
-	//   0xBF00-0xBF01  ACIA (status/data) — moved here from
-	//                  0xC000-0xC001 when ROM was extended down
-	//   0xBF02         halt device
-	cpu.attach(ram, 0x0000, ~(ram_size - 1));
-	cpu.attach(rom, rom_base, ~(rom_size - 1));
-	cpu.attach(acia, 0xbf00, 0xfffe);
-	cpu.attach(halt, 0xbf02, 0xffff);
+	// Attach order matters: first match wins in USim's device scan.
+	// IO devices first (overlay 0xC000-0xC002), then ROM, then RAM.
+	cpu.attach(acia, 0xc000, 0xfffe);
+	cpu.attach(halt, 0xc002, 0xffff);
+	cpu.attach(rom, rom_base, (Word)~(rom_size - 1));
+	cpu.attach(ram, 0x0000, 0x0000);	// mask=0: matches all addresses (fallback)
 
 	cpu.FIRQ.bind([&]() {
 		return acia->IRQ;
