@@ -91,7 +91,12 @@ int main(int argc, char *argv[])
 		return acia->IRQ;
 	});
 
+	// Load the same HEX file into both devices. Each silently drops
+	// records outside its mapped range; together they cover all 64 K.
+	// Required for picolibc no-flash binaries whose .text lives in RAM
+	// at $0100 while .init (with the reset entry) lives in ROM at $C100.
 	rom->load_intelhex(hexfile, rom_base);
+	ram->load_intelhex(hexfile, 0x0000);
 
 	cpu.reset();
 	if (trace) cpu.tron();

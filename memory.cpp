@@ -33,7 +33,7 @@ Word fread_hex_word(FILE *fp)
 	return ret;
 }
 
-void ROM::load_intelhex(const char *filename, Word base)
+void GenericMemory::load_intelhex(const char *filename, Word base)
 {
 	FILE		*fp;
 	int		done = 0;

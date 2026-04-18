@@ -31,6 +31,13 @@ public:
 						memory[offset] = val;
 					}
 				};
+
+	// Load an Intel HEX file, dropping records outside [base, base+size).
+	// Lives on GenericMemory so both RAM and ROM can call it: a single
+	// HEX file containing records for two address ranges (e.g. picolibc
+	// no-flash binaries with .text in RAM and .init in ROM) is loaded by
+	// invoking this on each device with that device's base.
+	void			load_intelhex(const char *filename, Word base);
 };
 
 /*
@@ -56,10 +63,6 @@ public:
 					(void)offset;
 					(void)val;
 				}
-
-public:
-		void		load_intelhex(const char *filename, Word base);
-
 };
 
 /*
