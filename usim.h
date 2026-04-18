@@ -27,6 +27,7 @@ protected:
 		bool		m_trace = false;
 		bool		halted = true;
 		uint8_t		cycles = 0;
+		uint64_t	total_cycles = 0;
 
 // Generic internal registers that we assume all CPUs have
 
@@ -71,6 +72,9 @@ public:
 // Debugging
 		void		tron() { m_trace = true; };
 		void		troff() { m_trace = false; };
+
+// Canonical cycle counter (accumulated across every tick).
+		uint64_t	get_total_cycles() const { return total_cycles; }
 
 };
 

@@ -27,7 +27,7 @@
 
 static void usage(const char *prog)
 {
-	fprintf(stderr, "usage: %s [--timeout=N] <hexfile>\n", prog);
+	fprintf(stderr, "usage: %s [--timeout=N] [--cycles] <hexfile>\n", prog);
 	exit(EXIT_FAILURE);
 }
 
@@ -35,6 +35,7 @@ int main(int argc, char *argv[])
 {
 	unsigned long timeout = 0;
 	bool trace = false;
+	bool report_cycles = false;
 	const char *hexfile = nullptr;
 
 	Word watch_addr = 0;
@@ -46,6 +47,8 @@ int main(int argc, char *argv[])
 			timeout = strtoul(argv[i] + 10, nullptr, 10);
 		} else if (strcmp(argv[i], "--trace") == 0) {
 			trace = true;
+		} else if (strcmp(argv[i], "--cycles") == 0) {
+			report_cycles = true;
 		} else if (strncmp(argv[i], "--watch=", 8) == 0) {
 			watch_addr = (Word)strtoul(argv[i] + 8, nullptr, 0);
 			watching = true;
@@ -125,6 +128,10 @@ int main(int argc, char *argv[])
 			++count;
 		}
 		if (!halted) {
+			if (report_cycles) {
+				fprintf(stderr, "cycles=%llu\n",
+					(unsigned long long)cpu.get_total_cycles());
+			}
 			fprintf(stderr, "usim09batch: timeout after %lu instructions\n", timeout);
 			return EXIT_FAILURE;
 		}
@@ -132,5 +139,9 @@ int main(int argc, char *argv[])
 		cpu.run();
 	}
 
+	if (report_cycles) {
+		fprintf(stderr, "cycles=%llu\n",
+			(unsigned long long)cpu.get_total_cycles());
+	}
 	return halt->getExitCode();
 }

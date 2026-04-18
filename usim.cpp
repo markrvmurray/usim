@@ -31,7 +31,8 @@ void USim::tick()
 		d.device->tick(cycles);
 	}
 
-	// reset the cycle counter
+	// accumulate canonical cycle count then reset the per-tick counter
+	total_cycles += cycles;
 	cycles = 0;
 }
 
