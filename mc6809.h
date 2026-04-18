@@ -222,6 +222,16 @@ public:
 
 	virtual void		print_regs();
 
+	// Register accessors for debugging (watchpoints, etc.)
+	Word			get_pc() const { return pc; }
+	Word			get_insn_pc() const { return insn_pc; }
+	Byte			get_a() const { return a; }
+	Byte			get_b() const { return b; }
+	Word			get_x() const { return x; }
+	Word			get_y() const { return y; }
+	Word			get_u() const { return u; }
+	Word			get_s() const { return s; }
+
 	Byte&			byterefreg(int);
 	Word&			wordrefreg(int);
 

@@ -37,12 +37,18 @@ int main(int argc, char *argv[])
 	bool trace = false;
 	const char *hexfile = nullptr;
 
+	Word watch_addr = 0;
+	bool watching = false;
+
 	// Parse arguments
 	for (int i = 1; i < argc; ++i) {
 		if (strncmp(argv[i], "--timeout=", 10) == 0) {
 			timeout = strtoul(argv[i] + 10, nullptr, 10);
 		} else if (strcmp(argv[i], "--trace") == 0) {
 			trace = true;
+		} else if (strncmp(argv[i], "--watch=", 8) == 0) {
+			watch_addr = (Word)strtoul(argv[i] + 8, nullptr, 0);
+			watching = true;
 		} else if (argv[i][0] == '-') {
 			usage(argv[0]);
 		} else {
@@ -87,10 +93,35 @@ int main(int argc, char *argv[])
 	cpu.reset();
 	if (trace) cpu.tron();
 
+	// Memory watchpoint: monitor writes to a specific address.
+	// When the watched byte changes, print the new value and
+	// instruction count. Use --trace alongside for full CPU state.
+	Byte watch_prev = 0;
+	if (watching) {
+		watch_prev = cpu.read(watch_addr);
+		fprintf(stderr, "WATCH: $%04X initial=%02X\n", watch_addr, watch_prev);
+	}
+
 	if (timeout > 0) {
 		unsigned long count = 0;
 		while (!halted && count < timeout) {
 			cpu.tick();
+			if (watching) {
+				Byte cur = cpu.read(watch_addr);
+				if (cur != watch_prev) {
+					Byte next = cpu.read(watch_addr + 1);
+					fprintf(stderr, "WATCH: $%04X %02X->%02X (word=%02X%02X) "
+						"PC=$%04X A=%02X B=%02X X=%04X Y=%04X U=%04X S=%04X "
+						"[insn#%lu]\n",
+						watch_addr, watch_prev, cur, cur, next,
+						(unsigned)cpu.get_insn_pc(),
+						(unsigned)cpu.get_a(), (unsigned)cpu.get_b(),
+						(unsigned)cpu.get_x(), (unsigned)cpu.get_y(),
+						(unsigned)cpu.get_u(), (unsigned)cpu.get_s(),
+						count);
+					watch_prev = cur;
+				}
+			}
 			++count;
 		}
 		if (!halted) {
