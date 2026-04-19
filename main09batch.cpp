@@ -138,7 +138,10 @@ int main(int argc, char *argv[])
 					(unsigned long long)cpu.get_total_cycles());
 			}
 			fprintf(stderr, "usim09batch: timeout after %lu instructions\n", timeout);
-			return EXIT_FAILURE;
+			// rc 124 follows GNU `timeout(1)` convention so test
+			// harnesses can distinguish a cap-hit from a real
+			// non-zero exit set by the simulated program.
+			return 124;
 		}
 	} else {
 		cpu.run();
