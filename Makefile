@@ -2,7 +2,11 @@
 # usim (C) R.P.Bellis 1993 -
 # vim: set ts=8 sw=8 noet:
 #
-DEBUG		= -g
+# Cycle counts are produced by the simulated CPU model, so host
+# optimisation level cannot change them — only the wall-clock cost
+# of the simulator itself. -O2 + -g typically gives a 4-8x wall-clock
+# speedup vs unoptimised, with full debug symbols retained.
+DEBUG		= -g -O2
 CXX		= g++ --std=c++20 -Wall -Wextra -Werror
 CC		= gcc --std=c9x -Wall -Werror
 CCFLAGS		= $(DEBUG)
