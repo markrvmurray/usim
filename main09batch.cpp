@@ -4,12 +4,27 @@
 //
 //	vim: ts=8 sw=8 noet:
 //
-//	Memory map:
-//	  0x0000-0xBFFF  RAM (48 KB)
-//	  0xC000-0xC002  IO devices (overlay ROM):
-//	    0xC000-0xC001  ACIA (status/data)
-//	    0xC002         Halt/exit device (written value = exit code)
-//	  0xC003-0xFFFF  ROM (code + vectors)
+//	Memory map (top-to-bottom; $0000 is at the top, $FFFF at the
+//	bottom):
+//	  0x0000-0xFFCF  RAM (continuous, ~64 KB)
+//	  0xFFD0-0xFFEF  IO slab (just above the vectors):
+//	    0xFFD0-0xFFD1  ACIA (status/data)
+//	    0xFFD2         Halt/exit device (written value = exit code)
+//	    0xFFD3         TraceCtl (--brk-gated toggle, --trace toggle)
+//	    0xFFD4-0xFFEF  reserved for future IO
+//	  0xFFF0-0xFFFF  vector ROM (16 bytes; reset vector at $FFFE
+//	                 injected into the hex file by the run-mc6809
+//	                 wrapper, loaded at startup, write-protected
+//	                 thereafter so a runaway program can't overwrite
+//	                 the reset entry)
+//
+//	The previous large $C100-$FFFF ROM region and the $C000-region
+//	IO overlay are gone — there is no longer a real ROM/RAM
+//	distinction in the emulated machine. A single unified RAM with
+//	the IO devices and a tiny vector ROM parked at the bottom
+//	gives picolibc ~64 KB of contiguous address space without an
+//	IO wedge in the middle, while still preserving the "vectors
+//	can't be clobbered" semantic of a real machine.
 //
 //	BatchTerminal (unbuffered stdio, no termios)
 //	--timeout=N instruction count limit
@@ -81,17 +96,10 @@ int main(int argc, char *argv[])
 		usage(argv[0]);
 	}
 
-	const Word rom_base = 0xc000;
-	const Word rom_size = 0x10000 - rom_base;
-
 	bool			halted = false;
 	mc6809			cpu;
 	BatchTerminal		term;
 
-	// 64 KB RAM as fallback (covers 0x0000-0xFFFF).
-	// ROM and IO devices are attached first so they take priority
-	// in the 0xC000+ range. RAM is only reached for 0x0000-0xBFFF
-	// (48 KB effective).
 	// BRK output is always-on unless --brk-gated is set, in which case
 	// it starts disabled and is toggled by program-side writes to the
 	// TraceCtl device (see tracectl.h). Lets a layout-sensitive test
@@ -100,28 +108,35 @@ int main(int argc, char *argv[])
 	bool brk_enabled = !brk_gated;
 
 	auto ram = std::make_shared<RAM>(0x10000);
-	auto rom = std::make_shared<ROM>(rom_size);
+	auto vrom = std::make_shared<ROM>(0x10);    // 16-byte vector ROM at $FFF0-$FFFF
 	auto acia = std::make_shared<mc6850>(term);
 	auto halt = std::make_shared<HaltDevice>(cpu, &halted);
 	auto tracectl = std::make_shared<TraceCtl>(cpu, &brk_enabled);
 
 	// Attach order matters: first match wins in USim's device scan.
-	// IO devices first (overlay 0xC000-0xC003), then ROM, then RAM.
-	cpu.attach(acia, 0xc000, 0xfffe);
-	cpu.attach(halt, 0xc002, 0xffff);
-	cpu.attach(tracectl, 0xc003, 0xffff);
-	cpu.attach(rom, rom_base, (Word)~(rom_size - 1));
-	cpu.attach(ram, 0x0000, 0x0000);	// mask=0: matches all addresses (fallback)
+	// Vector ROM and IO devices first, RAM as fallback.
+	//   $FFF0-$FFFF  vector ROM (mask 0xFFF0 catches all 16 bytes)
+	//   $FFD0-$FFD1  ACIA (status, data)
+	//   $FFD2        Halt
+	//   $FFD3        TraceCtl
+	// RAM covers everything that hasn't been claimed above.
+	cpu.attach(vrom,     0xfff0, 0xfff0); // vector ROM: $FFF0-$FFFF
+	cpu.attach(acia,     0xffd0, 0xfffe); // ACIA: $FFD0 (status), $FFD1 (data)
+	cpu.attach(halt,     0xffd2, 0xffff); // Halt: $FFD2
+	cpu.attach(tracectl, 0xffd3, 0xffff); // TraceCtl: $FFD3
+	cpu.attach(ram,      0x0000, 0x0000); // mask=0: matches all addresses (fallback)
 
 	cpu.FIRQ.bind([&]() {
 		return acia->IRQ;
 	});
 
-	// Load the same HEX file into both devices. Each silently drops
-	// records outside its mapped range; together they cover all 64 K.
-	// Required for picolibc no-flash binaries whose .text lives in RAM
-	// at $0100 while .init (with the reset entry) lives in ROM at $C100.
-	rom->load_intelhex(hexfile, rom_base);
+	// Load the HEX file into both the RAM and the vector ROM.
+	// Each silently drops records outside its mapped range, so the
+	// vector ROM picks up only the $FFF0-$FFFF records (the reset
+	// vector at $FFFE injected by the run-mc6809 wrapper) and RAM
+	// picks up everything else. After this, the vector ROM is
+	// write-protected — programs can't clobber the reset entry.
+	vrom->load_intelhex(hexfile, 0xfff0);
 	ram->load_intelhex(hexfile, 0x0000);
 
 	cpu.reset();
