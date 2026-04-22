@@ -231,6 +231,8 @@ public:
 	Word			get_y() const { return y; }
 	Word			get_u() const { return u; }
 	Word			get_s() const { return s; }
+	Byte			get_cc() const { return (Byte)cc.value; }
+	Byte			get_dp() const { return dp; }
 
 	Byte&			byterefreg(int);
 	Word&			wordrefreg(int);
