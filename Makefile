@@ -15,11 +15,10 @@ LDFLAGS		=
 
 LIB_SRCS	= usim.cpp memory.cpp \
 		  mc6809.cpp mc6809in.cpp \
-		  mos6502.cpp mos6502in.cpp \
 		  mc6850.cpp
 
 OBJS		= $(LIB_SRCS:.cpp=.o)
-BIN		= usim09 usim02 usim09batch tests/test6809
+BIN		= usim09 usim09batch tests/test6809
 
 LIB		= libusim.a
 
@@ -72,10 +71,6 @@ mc6809.o: mc6809.h wiring.h usim.h device.h typedefs.h
 mc6809.o: memory.h bits.h
 mc6809in.o: mc6809.h wiring.h usim.h device.h typedefs.h
 mc6809in.o: memory.h bits.h
-mos6502.o: mos6502.h wiring.h usim.h device.h typedefs.h
-mos6502.o: memory.h bits.h
-mos6502in.o: mos6502.h wiring.h usim.h device.h typedefs.h
-mos6502in.o: memory.h bits.h
 mc6850.o: mc6850.h device.h typedefs.h wiring.h bits.h
 memory.o: memory.h device.h typedefs.h
 main.o: mc6809.h wiring.h usim.h device.h
