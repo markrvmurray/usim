@@ -16,7 +16,8 @@ LDFLAGS		=
 LIB_SRCS	= usim.cpp memory.cpp \
 		  mc6809.cpp mc6809in.cpp \
 		  mc6850.cpp \
-		  picotick.cpp picoide.cpp picofram.cpp
+		  picotick.cpp picoide.cpp picofram.cpp \
+		  system_watchpoint.cpp
 
 OBJS		= $(LIB_SRCS:.cpp=.o)
 BIN		= usim09 usim09batch usim09pt tests/test6809
@@ -60,15 +61,19 @@ usim09pt: $(LIB) main_picothing.o term.o
 	$(CXX) $(CPPFLAGS) $(CCFLAGS) -c $<
 
 .PHONY: test
-test: tests/test_mmu_tick
+test: tests/test_mmu_tick tests/test_system_watchpoint
 	./tests/test_mmu_tick
+	./tests/test_system_watchpoint
 
 tests/test_mmu_tick: tests/test_mmu_tick.cpp $(LIB)
 	$(CXX) $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_mmu_tick.cpp -L. -lusim -o $(@)
 
+tests/test_system_watchpoint: tests/test_system_watchpoint.cpp $(LIB)
+	$(CXX) $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_system_watchpoint.cpp -L. -lusim -o $(@)
+
 .PHONY: clean
 clean:
-	$(RM) $(BIN) $(LIB) *.o tests/test_mmu_tick tests/*.o tests/test6809.bin
+	$(RM) $(BIN) $(LIB) *.o tests/test_mmu_tick tests/*.o tests/test6809.bin tests/test_system_watchpoint
 
 .PHONY: depend
 depend:
@@ -87,18 +92,22 @@ memory.o: memory.h device.h typedefs.h
 picotick.o: picotick.h device.h typedefs.h wiring.h bits.h
 picoide.o: picoide.h device.h typedefs.h
 picofram.o: picofram.h device.h typedefs.h
+system_watchpoint.o: system_watchpoint.h device.h typedefs.h wiring.h mc6809.h
 main.o: mc6809.h wiring.h usim.h device.h
 main.o: typedefs.h memory.h bits.h mc6850.h
 main.o: term.h
+main09.o: mc6809.h wiring.h usim.h device.h
+main09.o: typedefs.h memory.h bits.h mc6850.h
+main09.o: term.h system_watchpoint.h
 term.o: term.h mc6850.h device.h typedefs.h wiring.h
 batchterm.o: batchterm.h mc6850.h device.h typedefs.h wiring.h
 main09batch.o: mc6809.h wiring.h usim.h device.h
 main09batch.o: typedefs.h memory.h bits.h mc6850.h
-main09batch.o: batchterm.h haltdev.h
+main09batch.o: batchterm.h haltdev.h system_watchpoint.h
 main_picothing.o: mc6809.h wiring.h usim.h device.h
 main_picothing.o: typedefs.h memory.h bits.h mc6850.h
 main_picothing.o: term.h picotask.h picotick.h picoide.h picofram.h
-main_picothing.o: tracectl.h
+main_picothing.o: tracectl.h system_watchpoint.h
 
 # DO NOT DELETE THIS LINE -- make depend depends on it.
 

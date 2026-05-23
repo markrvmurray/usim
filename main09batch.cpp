@@ -6,17 +6,21 @@
 //
 //	Memory map (top-to-bottom; $0000 is at the top, $FFFF at the
 //	bottom):
-//	  0x0000-0xFFCF  RAM (continuous, ~64 KB)
-//	  0xFFD0-0xFFEF  IO slab (just above the vectors):
+//	  0x0000-0xFFC9  RAM (continuous, ~64 KB)
+//	  0xFFCA         SystemWatchpoint control register
+//	  0xFFCB-0xFFCF  RAM
+//	  0xFFD0-0xFFEF  IO slab:
 //	    0xFFD0-0xFFD1  ACIA (status/data)
 //	    0xFFD2         Halt/exit device (written value = exit code)
 //	    0xFFD3         TraceCtl (--brk-gated toggle, --trace toggle)
-//	    0xFFD4-0xFFEF  reserved for future IO
-//	  0xFFF0-0xFFFF  vector ROM (16 bytes; reset vector at $FFFE
-//	                 injected into the hex file by the run-mc6809
-//	                 wrapper, loaded at startup, write-protected
-//	                 thereafter so a runaway program can't overwrite
-//	                 the reset entry)
+//	    0xFFD4-0xFFDF  RAM (no devices wired here)
+//	  0xFFE0-0xFFFF  SystemWatchpoint vector + snippet shadow.
+//	                 Replaces the older write-protected vector ROM:
+//	                 the 32-byte window is now writable by default
+//	                 (watchpoint starts disarmed). To recover the old
+//	                 "vectors can't be clobbered" behaviour, a test
+//	                 firmware can arm the watchpoint by writing
+//	                 non-zero to $FFCA at startup.
 //
 //	The previous large $C100-$FFFF ROM region and the $C000-region
 //	IO overlay are gone — there is no longer a real ROM/RAM
@@ -41,6 +45,7 @@
 #include "haltdev.h"
 #include "tracectl.h"
 #include "memory.h"
+#include "system_watchpoint.h"
 
 static void usage(const char *prog)
 {
@@ -107,37 +112,54 @@ int main(int argc, char *argv[])
 	// otherwise disturbing codegen.
 	bool brk_enabled = !brk_gated;
 
-	auto ram = std::make_shared<RAM>(0x10000);
-	auto vrom = std::make_shared<ROM>(0x10);    // 16-byte vector ROM at $FFF0-$FFFF
-	auto acia = std::make_shared<mc6850>(term);
-	auto halt = std::make_shared<HaltDevice>(cpu, &halted);
-	auto tracectl = std::make_shared<TraceCtl>(cpu, &brk_enabled);
+	auto ram        = std::make_shared<RAM>(0x10000);
+	auto acia       = std::make_shared<mc6850>(term);
+	auto halt       = std::make_shared<HaltDevice>(cpu, &halted);
+	auto tracectl   = std::make_shared<TraceCtl>(cpu, &brk_enabled);
+	auto watch      = std::make_shared<SystemWatchpoint>(cpu);
+	auto watch_ctrl = std::make_shared<SystemWatchpointCtrl>(*watch);
+	auto watch_vec  = std::make_shared<SystemWatchpointVec>(*watch);
 
 	// Attach order matters: first match wins in USim's device scan.
-	// Vector ROM and IO devices first, RAM as fallback.
-	//   $FFF0-$FFFF  vector ROM (mask 0xFFF0 catches all 16 bytes)
+	// IO devices and the watchpoint first, RAM as fallback.
+	//   $FFCA        SystemWatchpoint control (arm/disarm via guest poke)
 	//   $FFD0-$FFD1  ACIA (status, data)
 	//   $FFD2        Halt
 	//   $FFD3        TraceCtl
+	//   $FFE0-$FFFF  SystemWatchpoint vector + snippet shadow
 	// RAM covers everything that hasn't been claimed above.
-	cpu.attach(vrom,     0xfff0, 0xfff0); // vector ROM: $FFF0-$FFFF
-	cpu.attach(acia,     0xffd0, 0xfffe); // ACIA: $FFD0 (status), $FFD1 (data)
-	cpu.attach(halt,     0xffd2, 0xffff); // Halt: $FFD2
-	cpu.attach(tracectl, 0xffd3, 0xffff); // TraceCtl: $FFD3
-	cpu.attach(ram,      0x0000, 0x0000); // mask=0: matches all addresses (fallback)
+	cpu.attach(watch);				   // ActiveDevice: reset disarms
+	cpu.attach_range(watch_ctrl, 0xffca, 0x0001);      // $FFCA
+	cpu.attach(acia,       0xffd0, 0xfffe);            // ACIA: $FFD0-$FFD1
+	cpu.attach(halt,       0xffd2, 0xffff);            // Halt: $FFD2
+	cpu.attach(tracectl,   0xffd3, 0xffff);            // TraceCtl: $FFD3
+	cpu.attach_range(watch_vec,  0xffe0, 0x0020);      // $FFE0-$FFFF
+	cpu.attach(ram,        0x0000, 0x0000);            // mask=0: fallback
 
 	cpu.FIRQ.bind([&]() {
 		return acia->IRQ;
 	});
+	cpu.NMI.bind([&]() {
+		return (bool)watch->NMI;
+	});
 
-	// Load the HEX file into both the RAM and the vector ROM.
-	// Each silently drops records outside its mapped range, so the
-	// vector ROM picks up only the $FFF0-$FFFF records (the reset
-	// vector at $FFFE injected by the run-mc6809 wrapper) and RAM
-	// picks up everything else. After this, the vector ROM is
-	// write-protected — programs can't clobber the reset entry.
-	vrom->load_intelhex(hexfile, 0xfff0);
+	// Load the HEX file into both the RAM and the SystemWatchpoint
+	// vector shadow. load_intelhex silently drops records outside
+	// the RAM's mapped range; the watchpoint is seeded byte-by-byte
+	// from a temporary 64K loader so its 32-byte window picks up
+	// only the $FFE0-$FFFF records (notably the reset vector at
+	// $FFFE injected by the run-mc6809 wrapper). The vector shadow
+	// is now writable when the watchpoint is disarmed — the older
+	// "always-write-protected vector ROM" behaviour is gone; arm
+	// the watchpoint via $FFCA to get it back.
 	ram->load_intelhex(hexfile, 0x0000);
+	{
+		auto loader = std::make_shared<RAM>(0x10000);
+		loader->load_intelhex(hexfile, 0x0000);
+		for (unsigned addr = 0xFFE0; addr <= 0xFFFF; addr++) {
+			watch->load((Word)addr, loader->read(addr));
+		}
+	}
 
 	cpu.reset();
 	if (trace) cpu.tron();

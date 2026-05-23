@@ -10,10 +10,16 @@
 //	  $FFC3-$FFC4   Console ACIA (MC6850)
 //	  $FFC5-$FFC6   Auxiliary ACIA (MC6850)
 //	  $FFC8-$FFC9   50Hz tick timer
+//	  $FFCA         SystemWatchpoint control register (hardware-faithful)
 //	  $FFCB         TraceCtl (emulator-only; debug builds may poke
 //	                this to gate --brk/--trace from the guest side —
 //	                see tracectl.h. Real hardware has nothing here)
-//	  $FFD0-$FFFF   Persistent RAM (FRAM, file-backed; includes vectors)
+//	  $FFD0-$FFDF   Persistent RAM (FRAM, file-backed; SHARED area)
+//	  $FFE0-$FFFF   SystemWatchpoint vector + snippet shadow (includes
+//	                the 6809 vectors at $FFF0-$FFFF). Behaves as plain
+//	                memory when disarmed; arming via $FFCA copies the
+//	                BREAK snippet to $FFE0-$FFEF and swaps the NMI
+//	                vector. See system_watchpoint.h.
 //
 //	CLI mirrors usim09batch where it makes sense:
 //	  --timeout=N        cap at N instructions (rc 124 on hit, GNU timeout(1))
@@ -50,6 +56,7 @@
 #include "picoide.h"
 #include "picofram.h"
 #include "tracectl.h"
+#include "system_watchpoint.h"
 
 //
 // Null terminal for auxiliary ACIA — discards output, never has input
@@ -160,25 +167,35 @@ int main(int argc, char* argv[])
 	auto ide        = std::make_shared<PicoIDE>(disk_path);
 	auto fram       = std::make_shared<PicoFRAM>(fram_path);
 	auto tracectl   = std::make_shared<TraceCtl>(cpu, &brk_enabled);
+	auto watch      = std::make_shared<SystemWatchpoint>(cpu);
+	auto watch_ctrl = std::make_shared<SystemWatchpointCtrl>(*watch);
+	auto watch_vec  = std::make_shared<SystemWatchpointVec>(*watch);
 
 	// IO devices first (scanned in order, first match wins).
 	// Pico-thing peripherals don't sit on power-of-2 boundaries, so
 	// they attach by (base, size) range rather than (base, mask).
+	cpu.attach(watch);				// ActiveDevice: reset disarms
 	cpu.attach_range(ide,        0xFF00, 0x000A);	// $FF00-$FF09
 	cpu.attach_range(taskreg,    0xFFC0, 0x0001);	// $FFC0
 	cpu.attach_range(console,    0xFFC3, 0x0002);	// $FFC3-$FFC4
 	cpu.attach_range(aux_acia,   0xFFC5, 0x0002);	// $FFC5-$FFC6
 	cpu.attach_range(tick,       0xFFC8, 0x0002);	// $FFC8-$FFC9
+	cpu.attach_range(watch_ctrl, 0xFFCA, 0x0001);	// $FFCA (hardware-faithful)
 	cpu.attach_range(tracectl,   0xFFCB, 0x0001);	// $FFCB (emulator-only)
-	cpu.attach_range(fram,       0xFFD0, 0x0030);	// $FFD0-$FFFF
+	cpu.attach_range(fram,       0xFFD0, 0x0010);	// $FFD0-$FFDF (SHARED area)
+	cpu.attach_range(watch_vec,  0xFFE0, 0x0020);	// $FFE0-$FFFF (vectors + snippet)
 	cpu.attach_range(datram,     0x0000, 0xFF00);	// $0000-$FEFF
 
-	// Console ACIA -> FIRQ (shared with aux); tick timer -> IRQ.
+	// Console ACIA -> FIRQ (shared with aux); tick timer -> IRQ;
+	// SystemWatchpoint -> NMI.
 	cpu.FIRQ.bind([&]() {
 		return (bool)console->IRQ || (bool)aux_acia->IRQ;
 	});
 	cpu.IRQ.bind([&]() {
 		return (bool)tick->IRQ;
+	});
+	cpu.NMI.bind([&]() {
+		return (bool)watch->NMI;
 	});
 
 	// Load firmware via a temporary 64K loader so the same HEX/SREC
@@ -200,9 +217,20 @@ int main(int argc, char* argv[])
 				datram->write_physical(addr, b);
 		}
 
-		for (unsigned addr = 0xFFD0; addr <= 0xFFFF; addr++) {
+		// SHARED area (16 bytes) into FRAM persistence.
+		for (unsigned addr = 0xFFD0; addr <= 0xFFDF; addr++) {
 			Byte b = loader->read(addr);
 			fram->write(addr - 0xFFD0, b);
+		}
+
+		// Vector + snippet area (32 bytes) into the SystemWatchpoint
+		// shadow. Note: this is not currently persisted to FRAM — a
+		// run that updates a vector won't survive a host restart. The
+		// hardware writes through to FRAM in place; emulating that
+		// requires giving the watchpoint a reference to the FRAM
+		// device (deferred — see CLAUDE.md).
+		for (unsigned addr = 0xFFE0; addr <= 0xFFFF; addr++) {
+			watch->load((Word)addr, loader->read(addr));
 		}
 	}
 
