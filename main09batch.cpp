@@ -6,14 +6,18 @@
 //
 //	Memory map (top-to-bottom; $0000 is at the top, $FFFF at the
 //	bottom):
-//	  0x0000-0xFFC9  RAM (continuous, ~64 KB)
+//	IO devices live in the $FFCx zone matching pico-thing's hardware
+//	layout, so a debug-build firmware can target both this driver and
+//	usim09pt with the same MMIO addresses:
+//
+//	  0x0000-0xFFC2  RAM (continuous)
+//	  0xFFC3-0xFFC4  ACIA (status/data) — PT's "console ACIA" slot
+//	  0xFFC5-0xFFC9  RAM (no devices wired)
 //	  0xFFCA         SystemWatchpoint control register
-//	  0xFFCB-0xFFCF  RAM
-//	  0xFFD0-0xFFEF  IO slab:
-//	    0xFFD0-0xFFD1  ACIA (status/data)
-//	    0xFFD2         Halt/exit device (written value = exit code)
-//	    0xFFD3         TraceCtl (--brk-gated toggle, --trace toggle)
-//	    0xFFD4-0xFFDF  RAM (no devices wired here)
+//	  0xFFCB         TraceCtl (--brk-gated toggle, --trace toggle)
+//	  0xFFCC         Halt/exit device (written value = exit code) —
+//	                 emulator-only; PT has nothing here
+//	  0xFFCD-0xFFDF  RAM
 //	  0xFFE0-0xFFFF  SystemWatchpoint vector + snippet shadow.
 //	                 Replaces the older write-protected vector ROM:
 //	                 the 32-byte window is now writable by default
@@ -122,17 +126,17 @@ int main(int argc, char *argv[])
 
 	// Attach order matters: first match wins in USim's device scan.
 	// IO devices and the watchpoint first, RAM as fallback.
-	//   $FFCA        SystemWatchpoint control (arm/disarm via guest poke)
-	//   $FFD0-$FFD1  ACIA (status, data)
-	//   $FFD2        Halt
-	//   $FFD3        TraceCtl
+	//   $FFC3-$FFC4  ACIA (status, data) — matches PT console ACIA
+	//   $FFCA        SystemWatchpoint control
+	//   $FFCB        TraceCtl
+	//   $FFCC        Halt
 	//   $FFE0-$FFFF  SystemWatchpoint vector + snippet shadow
 	// RAM covers everything that hasn't been claimed above.
 	cpu.attach(watch);				   // ActiveDevice: reset disarms
+	cpu.attach_range(acia,       0xffc3, 0x0002);      // $FFC3-$FFC4
 	cpu.attach_range(watch_ctrl, 0xffca, 0x0001);      // $FFCA
-	cpu.attach(acia,       0xffd0, 0xfffe);            // ACIA: $FFD0-$FFD1
-	cpu.attach(halt,       0xffd2, 0xffff);            // Halt: $FFD2
-	cpu.attach(tracectl,   0xffd3, 0xffff);            // TraceCtl: $FFD3
+	cpu.attach_range(tracectl,   0xffcb, 0x0001);      // $FFCB
+	cpu.attach_range(halt,       0xffcc, 0x0001);      // $FFCC
 	cpu.attach_range(watch_vec,  0xffe0, 0x0020);      // $FFE0-$FFFF
 	cpu.attach(ram,        0x0000, 0x0000);            // mask=0: fallback
 
