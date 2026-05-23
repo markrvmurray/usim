@@ -15,10 +15,11 @@ LDFLAGS		=
 
 LIB_SRCS	= usim.cpp memory.cpp \
 		  mc6809.cpp mc6809in.cpp \
-		  mc6850.cpp
+		  mc6850.cpp \
+		  picotick.cpp picoide.cpp picofram.cpp
 
 OBJS		= $(LIB_SRCS:.cpp=.o)
-BIN		= usim09 usim09batch tests/test6809
+BIN		= usim09 usim09batch usim09pt tests/test6809
 
 LIB		= libusim.a
 
@@ -50,14 +51,24 @@ test: tests/test6809 tests/test6809.bin
 usim09batch: $(LIB) main09batch.o batchterm.o
 	$(CXX) $(CCFLAGS) $(LDFLAGS) main09batch.o batchterm.o -L. -lusim -o $(@)
 
+usim09pt: $(LIB) main_picothing.o term.o
+	$(CXX) $(CCFLAGS) $(LDFLAGS) main_picothing.o term.o -L. -lusim -o $(@)
+
 .SUFFIXES: .cpp
 
 .cpp.o:
 	$(CXX) $(CPPFLAGS) $(CCFLAGS) -c $<
 
+.PHONY: test
+test: tests/test_mmu_tick
+	./tests/test_mmu_tick
+
+tests/test_mmu_tick: tests/test_mmu_tick.cpp $(LIB)
+	$(CXX) $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_mmu_tick.cpp -L. -lusim -o $(@)
+
 .PHONY: clean
 clean:
-	$(RM) $(BIN) $(LIB) *.o tests/*.o tests/test6809.bin
+	$(RM) $(BIN) $(LIB) *.o tests/test_mmu_tick tests/*.o tests/test6809.bin
 
 .PHONY: depend
 depend:
@@ -73,6 +84,9 @@ mc6809in.o: mc6809.h wiring.h usim.h device.h typedefs.h
 mc6809in.o: memory.h bits.h
 mc6850.o: mc6850.h device.h typedefs.h wiring.h bits.h
 memory.o: memory.h device.h typedefs.h
+picotick.o: picotick.h device.h typedefs.h wiring.h bits.h
+picoide.o: picoide.h device.h typedefs.h
+picofram.o: picofram.h device.h typedefs.h
 main.o: mc6809.h wiring.h usim.h device.h
 main.o: typedefs.h memory.h bits.h mc6850.h
 main.o: term.h
@@ -81,6 +95,10 @@ batchterm.o: batchterm.h mc6850.h device.h typedefs.h wiring.h
 main09batch.o: mc6809.h wiring.h usim.h device.h
 main09batch.o: typedefs.h memory.h bits.h mc6850.h
 main09batch.o: batchterm.h haltdev.h
+main_picothing.o: mc6809.h wiring.h usim.h device.h
+main_picothing.o: typedefs.h memory.h bits.h mc6850.h
+main_picothing.o: term.h picotask.h picotick.h picoide.h picofram.h
+main_picothing.o: tracectl.h
 
 # DO NOT DELETE THIS LINE -- make depend depends on it.
 

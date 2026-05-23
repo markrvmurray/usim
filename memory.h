@@ -38,6 +38,11 @@ public:
 	// no-flash binaries with .text in RAM and .init in ROM) is loaded by
 	// invoking this on each device with that device's base.
 	void			load_intelhex(const char *filename, Word base);
+
+	// Same semantics as load_intelhex but for Motorola S-record files.
+	// Recognises S1 (data) and S9 (end) record types; other types are
+	// silently ignored.
+	void			load_srec(const char *filename, Word base);
 };
 
 /*
@@ -48,6 +53,75 @@ class RAM : public GenericMemory {
 public:
 				RAM(size_t size) : GenericMemory(size) {};
 
+};
+
+/*
+ * DATRAM: paged RAM with a Dynamic Address Translator.
+ *
+ * The 64K guest address space below `size` (typically $0000-$FDFF) is
+ * divided into 8KB pages. The DAT page table holds `datsize` entries
+ * (256 bytes — 32 tasks * 8 pages); the currently-selected task picks
+ * 8 entries, each mapping a guest 8KB window to one of up to 256
+ * physical 8KB pages out of `totalsize` (typically 2MB).
+ *
+ * The page table itself is exposed at offsets [size, size + datsize)
+ * so the guest can read/write it directly (typically $FE00-$FEFF).
+ *
+ * The active task is selected via `set_task` (5 bits, 0-31), wired up
+ * by the PicoTask register at $FFC0.
+ *
+ * Direct physical access (write_physical / load_physical) bypasses
+ * translation and is used by the host to populate the backing store
+ * before the guest starts running.
+ */
+class DATRAM : public GenericMemory {
+
+	size_t size, datsize;
+	std::vector<Byte>	datram;
+	Byte			task;
+
+	size_t			ext_offset(Word offset) {
+					return ((size_t)datram[(Byte)(task << 3) | (Byte)(offset >> 13)] << 13) | (offset & 0x1FFF);
+				}
+
+public:
+				DATRAM(size_t size, size_t totalsize, size_t datsize)
+					 : GenericMemory(totalsize), size(size), datsize(datsize), datram(datsize), task(0) {
+						for (unsigned i = 0; i < datsize; i++) datram[i] = i;
+					 }
+
+	void			set_task(Byte t) { task = t & 0x1F; }
+	Byte			get_task() const { return task; }
+
+	// Direct physical memory access (bypasses DAT translation).
+	void			write_physical(size_t addr, Byte val) {
+					if (addr < memory.size()) memory[addr] = val;
+				}
+	Byte			read_physical(size_t addr) const {
+					return (addr < memory.size()) ? memory[addr] : 0xFF;
+				}
+	void			load_physical(const uint8_t* data, size_t len, size_t offset) {
+					for (size_t i = 0; i < len && offset + i < memory.size(); i++)
+						memory[offset + i] = data[i];
+				}
+
+	virtual Byte		read(Word offset) {
+					if (offset < size) {
+						return memory[ext_offset(offset)];
+					} else if (offset < size + datsize) {
+						return datram[offset - size];
+					} else {
+						return (Byte)0xFFu;
+					}
+				}
+
+	virtual void		write(Word offset, Byte val) {
+					if (offset < size) {
+						memory[ext_offset(offset)] = val;
+					} else if (offset < size + datsize) {
+						datram[offset - size] = val;
+					}
+				}
 };
 
 /*

@@ -51,12 +51,23 @@ protected:
 	virtual void		attach(const MappedDevice::shared_ptr& dev, Word base, Word mask, rank<0>);
 	virtual void		attach(const ActiveMappedDevice::shared_ptr& dev, Word base, Word mask, rank<1>);
 
+	virtual void		attach_range(const MappedDevice::shared_ptr& dev, Word base, Word size, rank<0>);
+	virtual void		attach_range(const ActiveMappedDevice::shared_ptr& dev, Word base, Word size, rank<1>);
+
 public:
 	virtual void		attach(const ActiveDevice::shared_ptr& dev);
 
 	template<typename T>
 		void		attach(const std::shared_ptr<T>& dev, Word base, Word mask) {
 					attach(dev, base, mask, rank<2>{});
+				};
+
+	// Like attach() but matches the half-open range [base, base+size).
+	// Use this when the device's address span isn't power-of-2 aligned
+	// (e.g. pico-thing's console ACIA at $FFC3-$FFC4).
+	template<typename T>
+		void		attach_range(const std::shared_ptr<T>& dev, Word base, Word size) {
+					attach_range(dev, base, size, rank<2>{});
 				};
 
 // Functions to start and stop the virtual processor

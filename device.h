@@ -53,12 +53,25 @@ public:
 };
 
 /*
- * a container for mapping from memory locations to MappedDevices
+ * a container for mapping from memory locations to MappedDevices.
+ *
+ * Two matching styles are supported:
+ *   - mask-mode: hit when (offset & mask) == base. Cheap and natural
+ *     for power-of-2-aligned devices (vector ROM, RAM fallback, etc.).
+ *     `size` is 0 when this mode is in use.
+ *   - range-mode: hit when offset ∈ [base, base+size). Used by devices
+ *     whose address span isn't power-of-2 aligned — e.g. pico-thing's
+ *     console ACIA at $FFC3-$FFC4. `size` is nonzero in this mode and
+ *     `mask` is unused.
+ *
+ * USim::read / USim::write check `size > 0` to pick the mode. The two
+ * fields are mutually exclusive.
  */
 struct MappedDeviceEntry {
 	MappedDevice::shared_ptr	device;
 	Word				base;
 	Word				mask;
+	Word				size;
 };
 
 /*
