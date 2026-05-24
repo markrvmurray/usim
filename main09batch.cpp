@@ -10,9 +10,9 @@
 //	layout, so a debug-build firmware can target both this driver and
 //	usim09pt with the same MMIO addresses:
 //
-//	  0x0000-0xFFC2  RAM (continuous)
-//	  0xFFC3-0xFFC4  ACIA (status/data) — PT's "console ACIA" slot
-//	  0xFFC5-0xFFC9  RAM (no devices wired)
+//	  0x0000-0xFFC3  RAM (continuous)
+//	  0xFFC4-0xFFC5  ACIA (status/data) — PT's "console ACIA" slot
+//	  0xFFC6-0xFFC9  RAM (no devices wired)
 //	  0xFFCA         SystemWatchpoint control register
 //	  0xFFCB         TraceCtl (--brk-gated toggle, --trace toggle)
 //	  0xFFCC         Halt/exit device (written value = exit code) —
@@ -126,21 +126,21 @@ int main(int argc, char *argv[])
 
 	// Attach order matters: first match wins in USim's device scan.
 	// IO devices and the watchpoint first, RAM as fallback.
-	//   $FFC3-$FFC4  ACIA (status, data) — matches PT console ACIA
+	//   $FFC4-$FFC5  ACIA (status, data) — matches PT console ACIA
 	//   $FFCA        SystemWatchpoint control
 	//   $FFCB        TraceCtl
 	//   $FFCC        Halt
 	//   $FFE0-$FFFF  SystemWatchpoint vector + snippet shadow
 	// RAM covers everything that hasn't been claimed above.
 	cpu.attach(watch);				   // ActiveDevice: reset disarms
-	cpu.attach_range(acia,       0xffc3, 0x0002);      // $FFC3-$FFC4
+	cpu.attach_range(acia,       0xffc4, 0x0002);      // $FFC4-$FFC5
 	cpu.attach_range(watch_ctrl, 0xffca, 0x0001);      // $FFCA
 	cpu.attach_range(tracectl,   0xffcb, 0x0001);      // $FFCB
 	cpu.attach_range(halt,       0xffcc, 0x0001);      // $FFCC
 	cpu.attach_range(watch_vec,  0xffe0, 0x0020);      // $FFE0-$FFFF
 	cpu.attach(ram,        0x0000, 0x0000);            // mask=0: fallback
 
-	cpu.FIRQ.bind([&]() {
+	cpu.IRQ.bind([&]() {
 		return acia->IRQ;
 	});
 	cpu.NMI.bind([&]() {

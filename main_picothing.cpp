@@ -7,8 +7,8 @@
 //	  $FE00-$FEFF   DAT RAM (256 bytes — 32 tasks * 8 pages)
 //	  $FF00-$FF09   PATA IDE controller
 //	  $FFC0         DAT task register
-//	  $FFC3-$FFC4   Console ACIA (MC6850)
-//	  $FFC5-$FFC6   Auxiliary ACIA (MC6850)
+//	  $FFC4-$FFC5   Console ACIA (MC6850)
+//	  $FFC6-$FFC7   Auxiliary ACIA (MC6850)
 //	  $FFC8-$FFC9   50Hz tick timer
 //	  $FFCA         SystemWatchpoint control register (hardware-faithful)
 //	  $FFCB         TraceCtl (emulator-only; debug builds may poke
@@ -177,8 +177,8 @@ int main(int argc, char* argv[])
 	cpu.attach(watch);				// ActiveDevice: reset disarms
 	cpu.attach_range(ide,        0xFF00, 0x000A);	// $FF00-$FF09
 	cpu.attach_range(taskreg,    0xFFC0, 0x0001);	// $FFC0
-	cpu.attach_range(console,    0xFFC3, 0x0002);	// $FFC3-$FFC4
-	cpu.attach_range(aux_acia,   0xFFC5, 0x0002);	// $FFC5-$FFC6
+	cpu.attach_range(console,    0xFFC4, 0x0002);	// $FFC4-$FFC5
+	cpu.attach_range(aux_acia,   0xFFC6, 0x0002);	// $FFC6-$FFC7
 	cpu.attach_range(tick,       0xFFC8, 0x0002);	// $FFC8-$FFC9
 	cpu.attach_range(watch_ctrl, 0xFFCA, 0x0001);	// $FFCA (hardware-faithful)
 	cpu.attach_range(tracectl,   0xFFCB, 0x0001);	// $FFCB (emulator-only)
@@ -186,13 +186,17 @@ int main(int argc, char* argv[])
 	cpu.attach_range(watch_vec,  0xFFE0, 0x0020);	// $FFE0-$FFFF (vectors + snippet)
 	cpu.attach_range(datram,     0x0000, 0xFF00);	// $0000-$FEFF
 
-	// Console ACIA -> FIRQ (shared with aux); tick timer -> IRQ;
-	// SystemWatchpoint -> NMI.
-	cpu.FIRQ.bind([&]() {
-		return (bool)console->IRQ || (bool)aux_acia->IRQ;
-	});
+	// Console ACIA + aux ACIA + tick timer all share the IRQ line
+	// (matches real pico-thing hardware routing); SystemWatchpoint
+	// drives NMI. FIRQ is unused.
+	//
+	// OutputPinReg uses invert=true for each ~IRQ pin, so the bool
+	// reads false when the source has its IRQ status bit set. To
+	// model the wired-OR (open-collector) ~IRQ line on the bus, AND
+	// the pins: if any one asserts (false), the AND chain is false,
+	// the CPU's c_irq is false, and !c_irq triggers do_irq.
 	cpu.IRQ.bind([&]() {
-		return (bool)tick->IRQ;
+		return (bool)console->IRQ && (bool)aux_acia->IRQ && (bool)tick->IRQ;
 	});
 	cpu.NMI.bind([&]() {
 		return (bool)watch->NMI;

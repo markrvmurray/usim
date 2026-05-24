@@ -61,7 +61,7 @@ public:
  *     `size` is 0 when this mode is in use.
  *   - range-mode: hit when offset ∈ [base, base+size). Used by devices
  *     whose address span isn't power-of-2 aligned — e.g. pico-thing's
- *     console ACIA at $FFC3-$FFC4. `size` is nonzero in this mode and
+ *     console ACIA at $FFC4-$FFC5. `size` is nonzero in this mode and
  *     `mask` is unused.
  *
  * USim::read / USim::write check `size > 0` to pick the mode. The two

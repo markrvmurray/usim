@@ -7,7 +7,7 @@
 //	Example of a simple MC6809 system with:
 //	  $0000-$7FFF  32 KB RAM
 //	  $E000-$FFFF  8 KB ROM
-//	  $FFC3-$FFC4  ACIA (status/data) — pico-thing console ACIA slot
+//	  $FFC4-$FFC5  ACIA (status/data) — pico-thing console ACIA slot
 //	  $FFCA        SystemWatchpoint control
 //	  $FFE0-$FFFF  SystemWatchpoint vector + snippet shadow (overlays ROM)
 //
@@ -50,17 +50,17 @@ int main(int argc, char *argv[])
 	auto watch_vec  = std::make_shared<SystemWatchpointVec>(*watch);
 
 	// Attach ACIA + SystemWatchpoint ahead of the ROM so they win
-	// for their addresses. ACIA at $FFC3-$FFC4 matches pico-thing's
+	// for their addresses. ACIA at $FFC4-$FFC5 matches pico-thing's
 	// console ACIA slot so a debug-build firmware can target both
 	// drivers with the same MMIO addresses.
 	cpu.attach(watch);					// ActiveDevice: reset disarms
-	cpu.attach_range(acia,       0xffc3, 0x0002);		// $FFC3-$FFC4
+	cpu.attach_range(acia,       0xffc4, 0x0002);		// $FFC4-$FFC5
 	cpu.attach_range(watch_ctrl, 0xffca, 0x0001);		// $FFCA
 	cpu.attach_range(watch_vec,  0xffe0, 0x0020);		// $FFE0-$FFFF
 	cpu.attach(ram,  0x0000, ~(ram_size - 1));
 	cpu.attach(rom,  rom_base, ~(rom_size - 1));
 
-	cpu.FIRQ.bind([&]() {
+	cpu.IRQ.bind([&]() {
 		return acia->IRQ;
 	});
 	cpu.NMI.bind([&]() {

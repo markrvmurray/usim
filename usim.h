@@ -64,7 +64,7 @@ public:
 
 	// Like attach() but matches the half-open range [base, base+size).
 	// Use this when the device's address span isn't power-of-2 aligned
-	// (e.g. pico-thing's console ACIA at $FFC3-$FFC4).
+	// (e.g. pico-thing's console ACIA at $FFC4-$FFC5).
 	template<typename T>
 		void		attach_range(const std::shared_ptr<T>& dev, Word base, Word size) {
 					attach_range(dev, base, size, rank<2>{});
