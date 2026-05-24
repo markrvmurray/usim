@@ -198,7 +198,8 @@ static inline uint32_t elf_rd32_be(const uint8_t *p) {
 	     |  (uint32_t)p[3];
 }
 
-void GenericMemory::load_elf(const char *filename, Word base, Word start_vector_addr)
+void GenericMemory::load_elf(const char *filename, Word base,
+			     Word start_vector_addr, Word swi3_vector_addr)
 {
 	FILE *fp = fopen(filename, "rb");
 	if (!fp) {
@@ -300,18 +301,41 @@ void GenericMemory::load_elf(const char *filename, Word base, Word start_vector_
 			    hi - lo);
 	}
 
-	// Reset-vector fallback. If the vector address is in our range and
-	// no PT_LOAD covered it, look for `_start` in the symbol table and
-	// write its address there as a big-endian word.
-	if (start_vector_addr == 0)
-		return;
-	uint32_t vec_lo = (uint32_t)start_vector_addr;
+	// Vector-slot fallbacks. For each (vec_addr, symbol) pair, if the
+	// vector lies in our range AND is still zero after the segment
+	// copy (no PT_LOAD covered it), look up the symbol in the symbol
+	// table and write its address there as a big-endian word. A single
+	// symtab walk resolves every active pair.
+	struct VectorFallback {
+		Word        vec_addr;       // 0 = disabled by caller
+		const char *symbol;
+		bool        need_lookup;    // vec in range, slot still zero
+		uint32_t    found_value;    // 0xFFFFFFFF until resolved
+	};
+	VectorFallback fallbacks[] = {
+		{ start_vector_addr, "_start",      false, 0xFFFFFFFFu },
+		{ swi3_vector_addr,  "__swi3_trap", false, 0xFFFFFFFFu },
+	};
+	const size_t Nfb = sizeof(fallbacks) / sizeof(fallbacks[0]);
+
 	uint32_t win_lo = (uint32_t)base;
 	uint32_t win_hi = (uint32_t)base + (uint32_t)size;
-	if (vec_lo + 1 < win_lo || vec_lo + 1 >= win_hi)
+
+	bool any_need_lookup = false;
+	for (size_t i = 0; i < Nfb; i++) {
+		if (fallbacks[i].vec_addr == 0)
+			continue;
+		uint32_t vec_lo = (uint32_t)fallbacks[i].vec_addr;
+		if (vec_lo + 1 < win_lo || vec_lo + 1 >= win_hi)
+			continue;
+		if (memory[vec_lo - win_lo] != 0 ||
+		    memory[vec_lo + 1 - win_lo] != 0)
+			continue;	// PT_LOAD already populated the vector
+		fallbacks[i].need_lookup = true;
+		any_need_lookup = true;
+	}
+	if (!any_need_lookup)
 		return;
-	if (memory[vec_lo - win_lo] != 0 || memory[vec_lo + 1 - win_lo] != 0)
-		return;	// PT_LOAD already populated the vector
 
 	if (e_shoff == 0 || e_shnum == 0 || e_shentsize < 40)
 		return;
@@ -351,12 +375,29 @@ void GenericMemory::load_elf(const char *filename, Word base, Word start_vector_
 		uint32_t st_value = rd32(sym + 4);
 		if (st_name == 0 || st_name >= strtab_size)
 			continue;
-		if (std::strcmp(strtab + st_name, "_start") != 0)
-			continue;
 		if (st_value >= 0x10000)
-			break;
-		memory[vec_lo     - win_lo] = (Byte)((st_value >> 8) & 0xFF);
-		memory[vec_lo + 1 - win_lo] = (Byte)(st_value & 0xFF);
-		break;
+			continue;
+		const char *name = strtab + st_name;
+		for (size_t i = 0; i < Nfb; i++) {
+			if (!fallbacks[i].need_lookup)
+				continue;
+			if (fallbacks[i].found_value != 0xFFFFFFFFu)
+				continue;	// already resolved
+			if (std::strcmp(name, fallbacks[i].symbol) == 0) {
+				fallbacks[i].found_value = st_value;
+				break;
+			}
+		}
+	}
+
+	for (size_t i = 0; i < Nfb; i++) {
+		if (!fallbacks[i].need_lookup)
+			continue;
+		if (fallbacks[i].found_value == 0xFFFFFFFFu)
+			continue;
+		uint32_t vec_lo = (uint32_t)fallbacks[i].vec_addr;
+		uint32_t val    = fallbacks[i].found_value;
+		memory[vec_lo     - win_lo] = (Byte)((val >> 8) & 0xFF);
+		memory[vec_lo + 1 - win_lo] = (Byte)(val & 0xFF);
 	}
 }

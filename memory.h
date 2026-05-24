@@ -50,15 +50,26 @@ public:
 	// dropping any segment that falls outside this device's mapped
 	// range. Both ELFDATA2MSB and ELFDATA2LSB are accepted.
 	//
-	// If the byte at the absolute address `start_vector_addr` (default
-	// $FFFE — the 6809 reset vector) lies in this device's range and
-	// is still zero after the segment copy, falls back to scanning the
-	// symbol table for `_start` and writing that address there as a
-	// big-endian word. Matches the MAME llvm6309 driver's behaviour and
-	// lets picolibc/llvm-mc6809 builds without a `.vectors` PT_LOAD run
-	// unmodified. Pass `start_vector_addr = 0` to disable the fallback.
+	// After the segment copy, two vector slots get symbol-table
+	// fallbacks (a single symtab walk resolves both):
+	//
+	//   start_vector_addr (default $FFFE — reset) ← `_start`
+	//   swi3_vector_addr  (default $FFF2 — SWI3)  ← `__swi3_trap`
+	//
+	// Each fallback fires only when its vector lies in this device's
+	// range AND is still zero after the segment copy (no PT_LOAD
+	// covered it). Pass either address as 0 to disable that fallback.
+	//
+	// The reset-vector fallback matches the MAME llvm6309 driver and
+	// lets picolibc/llvm-mc6809 builds without a `.vectors` PT_LOAD
+	// run unmodified. The SWI3 fallback supports llvm-mc6809's Bug
+	// #273 diagnostic sentinel: if `__swi3_trap` is in the ELF symbol
+	// table, an unexpected SWI3 executes through a known handler that
+	// writes a distinctive sentinel to the halt port at $FFD2 rather
+	// than dispatching to a wild PC.
 	void			load_elf(const char *filename, Word base,
-					 Word start_vector_addr = 0xFFFE);
+					 Word start_vector_addr = 0xFFFE,
+					 Word swi3_vector_addr  = 0xFFF2);
 };
 
 /*
