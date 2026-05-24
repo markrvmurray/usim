@@ -43,6 +43,22 @@ public:
 	// Recognises S1 (data) and S9 (end) record types; other types are
 	// silently ignored.
 	void			load_srec(const char *filename, Word base);
+
+	// Same semantics as the above for ELF32 (the natural output of
+	// llvm-mc6809's lld). Walks PT_LOAD program headers; each segment
+	// with FileSiz > 0 is copied to memory[p_vaddr - base], silently
+	// dropping any segment that falls outside this device's mapped
+	// range. Both ELFDATA2MSB and ELFDATA2LSB are accepted.
+	//
+	// If the byte at the absolute address `start_vector_addr` (default
+	// $FFFE — the 6809 reset vector) lies in this device's range and
+	// is still zero after the segment copy, falls back to scanning the
+	// symbol table for `_start` and writing that address there as a
+	// big-endian word. Matches the MAME llvm6309 driver's behaviour and
+	// lets picolibc/llvm-mc6809 builds without a `.vectors` PT_LOAD run
+	// unmodified. Pass `start_vector_addr = 0` to disable the fallback.
+	void			load_elf(const char *filename, Word base,
+					 Word start_vector_addr = 0xFFFE);
 };
 
 /*

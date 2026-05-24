@@ -202,14 +202,25 @@ int main(int argc, char* argv[])
 		return (bool)watch->NMI;
 	});
 
-	// Load firmware via a temporary 64K loader so the same HEX/SREC
-	// can populate two physically separate devices: identity-mapped
-	// $0000-$FEFF into DATRAM's backing store, and $FFD0-$FFFF into
-	// FRAM (vectors + persistent scratch).
+	// Load firmware via a temporary 64K loader so the same image can
+	// populate physically separate devices: identity-mapped $0000-$FEFF
+	// into DATRAM's backing store, $FFD0-$FFDF into FRAM, and
+	// $FFE0-$FFFF into the SystemWatchpoint shadow.
+	//
+	// Format is sniffed from the first byte rather than the extension:
+	//   $7F  → ELF32 (llvm-mc6809 / lld output)
+	//   'S'  → Motorola S-record
+	//   ':'  → Intel HEX
 	{
 		auto loader = std::make_shared<RAM>(0x10000);
-		const char* ext = strrchr(firmware_path, '.');
-		if (ext && (strcasecmp(ext, ".s19") == 0 || strcasecmp(ext, ".srec") == 0)) {
+		FILE *probe = fopen(firmware_path, "rb");
+		if (!probe) { perror(firmware_path); return EXIT_FAILURE; }
+		unsigned char magic[4] = {0};
+		(void)fread(magic, 1, 4, probe);
+		fclose(probe);
+		if (magic[0] == 0x7F && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F') {
+			loader->load_elf(firmware_path, 0x0000);
+		} else if (magic[0] == 'S') {
 			loader->load_srec(firmware_path, 0x0000);
 		} else {
 			loader->load_intelhex(firmware_path, 0x0000);

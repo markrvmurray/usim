@@ -67,7 +67,24 @@ int main(int argc, char *argv[])
 		return (bool)watch->NMI;
 	});
 
-	rom->load_intelhex(argv[1], rom_base);
+	// Load firmware (format sniffed from magic):
+	//   $7F  → ELF32 (llvm-mc6809 / lld output)
+	//   'S'  → Motorola S-record
+	//   ':'  → Intel HEX (the historical default)
+	{
+		FILE *probe = fopen(argv[1], "rb");
+		if (!probe) { perror(argv[1]); return EXIT_FAILURE; }
+		unsigned char magic[4] = {0};
+		(void)fread(magic, 1, 4, probe);
+		fclose(probe);
+		if (magic[0] == 0x7F && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F') {
+			rom->load_elf(argv[1], rom_base);
+		} else if (magic[0] == 'S') {
+			rom->load_srec(argv[1], rom_base);
+		} else {
+			rom->load_intelhex(argv[1], rom_base);
+		}
+	}
 
 	// Seed the watchpoint shadow from the ROM image so reads to
 	// $FFE0-$FFFF (including the reset vector at $FFFE) reach the

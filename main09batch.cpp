@@ -147,19 +147,39 @@ int main(int argc, char *argv[])
 		return (bool)watch->NMI;
 	});
 
-	// Load the HEX file into both the RAM and the SystemWatchpoint
-	// vector shadow. load_intelhex silently drops records outside
-	// the RAM's mapped range; the watchpoint is seeded byte-by-byte
+	// Load the firmware into both the RAM and the SystemWatchpoint
+	// vector shadow. Each loader silently drops records outside the
+	// target's mapped range; the watchpoint is seeded byte-by-byte
 	// from a temporary 64K loader so its 32-byte window picks up
 	// only the $FFE0-$FFFF records (notably the reset vector at
-	// $FFFE injected by the run-mc6809 wrapper). The vector shadow
-	// is now writable when the watchpoint is disarmed — the older
-	// "always-write-protected vector ROM" behaviour is gone; arm
-	// the watchpoint via $FFCA to get it back.
-	ram->load_intelhex(hexfile, 0x0000);
+	// $FFFE injected by the run-mc6809 wrapper, or filled in from
+	// the ELF symbol `_start` if no PT_LOAD covers $FFFE).
+	//
+	// Format is sniffed from the first byte rather than the extension:
+	//   $7F  → ELF32 (llvm-mc6809 / lld output)
+	//   'S'  → Motorola S-record
+	//   ':'  → Intel HEX
 	{
+		FILE *probe = fopen(hexfile, "rb");
+		if (!probe) { perror(hexfile); return EXIT_FAILURE; }
+		unsigned char magic[4] = {0};
+		(void)fread(magic, 1, 4, probe);
+		fclose(probe);
+		bool is_elf = magic[0] == 0x7F && magic[1] == 'E'
+		           && magic[2] == 'L' && magic[3] == 'F';
+		bool is_srec = magic[0] == 'S';
+
 		auto loader = std::make_shared<RAM>(0x10000);
-		loader->load_intelhex(hexfile, 0x0000);
+		if (is_elf) {
+			ram->load_elf(hexfile, 0x0000);
+			loader->load_elf(hexfile, 0x0000);
+		} else if (is_srec) {
+			ram->load_srec(hexfile, 0x0000);
+			loader->load_srec(hexfile, 0x0000);
+		} else {
+			ram->load_intelhex(hexfile, 0x0000);
+			loader->load_intelhex(hexfile, 0x0000);
+		}
 		for (unsigned addr = 0xFFE0; addr <= 0xFFFF; addr++) {
 			watch->load((Word)addr, loader->read(addr));
 		}
