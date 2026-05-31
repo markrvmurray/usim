@@ -81,9 +81,13 @@ bool Terminal::real_poll_read()
 	return FD_ISSET(input_fd, &fds);
 }
 
-Byte Terminal::real_read()
+int Terminal::real_read()
 {
-	return fgetc(input);
+	int ch = fgetc(input);
+	if (ch == EOF) {
+		at_eof = true;
+	}
+	return ch;
 }
 
 void Terminal::write(Byte ch)
@@ -109,7 +113,7 @@ bool Terminal::real_poll_read()
 	return kbhit();
 }
 
-Byte Terminal::real_read()
+int Terminal::real_read()
 {
 	return getch();
 }
@@ -150,13 +154,21 @@ bool Terminal::poll_read()
 		return true;
 	}
 
+	if (at_eof) {
+		return false;
+	}
+
 	bool ready = real_poll_read();
 	if (!ready) {
 		read_data_available = false;
 		return read_data_available;
 	}
 
-	Byte ch = read_data = real_read();
+	int raw = real_read();
+	if (raw == EOF) {
+		return false;
+	}
+	Byte ch = read_data = (Byte)raw;
 	read_data_available = true;
 
 	switch (tilde_state) {

@@ -21,6 +21,7 @@ protected:
 	USim&			sys;
 	Byte			read_data;
 	bool			read_data_available = false;
+	bool			at_eof = false;
 
         enum tilde_escape_state {
                 normal,
@@ -33,7 +34,7 @@ protected:
 	virtual void		tilde_escape_help_other();
 	virtual void 		tilde_escape_do_other(char ch);
 	bool			real_poll_read();
-	Byte			real_read();
+	int			real_read();
 
 #ifdef _POSIX_SOURCE
 	FILE*			input;
