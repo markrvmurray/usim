@@ -2,24 +2,39 @@
 //	main_picothing.cpp
 //	Pico-Thing MC6809 System Emulator
 //
-//	Memory map:
-//	  $0000-$FDFF   DAT-translated RAM (2MB, 8KB pages)
-//	  $FE00-$FEFF   DAT RAM (256 bytes — 32 tasks * 8 pages)
-//	  $FF00-$FF09   PATA IDE controller
-//	  $FFC0         DAT task register
-//	  $FFC4-$FFC5   Console ACIA (MC6850)
-//	  $FFC6-$FFC7   Auxiliary ACIA (MC6850)
-//	  $FFC8-$FFC9   50Hz tick timer
-//	  $FFCA         SystemWatchpoint control register (hardware-faithful)
-//	  $FFCB         TraceCtl (emulator-only; debug builds may poke
-//	                this to gate --brk/--trace from the guest side —
-//	                see tracectl.h. Real hardware has nothing here)
-//	  $FFD0-$FFDF   Persistent RAM (FRAM, file-backed; SHARED area)
-//	  $FFE0-$FFFF   SystemWatchpoint vector + snippet shadow (includes
-//	                the 6809 vectors at $FFF0-$FFFF). Behaves as plain
-//	                memory when disarmed; arming via $FFCA copies the
-//	                BREAK snippet to $FFE0-$FFEF and swaps the NMI
-//	                vector. See system_watchpoint.h.
+//	Logical memory map (as the CPU sees it):
+//	  $0000-$DFFF   DAT-remappable RAM. 7 × 8KB pages translated
+//	                through the active task's DAT entries. A DAT
+//	                entry of $FF marks the page unavailable: any
+//	                access traps NMI (reads return $FF, writes are
+//	                dropped) — matches the pT board's bad-page trap.
+//	  $E000-$FDFF   Never-remapped RAM, hardwired to physical
+//	                $1E000-$1FDFF. Independent of DAT settings; the
+//	                board logic forces this mapping.
+//	  $FE00-$FEFF   DAT RAM (256 bytes — 32 tasks × 8 pages). Slots
+//	                where N % 8 == 7 are unused because guest page 7
+//	                is never-remapped; identity init leaves $FF in
+//	                slot $FF (= $FEFF) but the board's fixed mapping
+//	                already covers what that slot would have meant.
+//	  $FF00-$FFBF   I/O space (currently only IDE at $FF00-$FF09;
+//	                $FF0A-$FFBF unmapped, reads return $FF).
+//	  $FFC0-$FFFF   Pi Pico supervisory region — everything from the
+//	                DAT task register through ACIAs, tick timer,
+//	                SystemWatchpoint, TraceCtl, FRAM (SHARED) and the
+//	                6809 vector table.
+//	      $FFC0    DAT task register
+//	      $FFC4-5  Console ACIA (MC6850)
+//	      $FFC6-7  Auxiliary ACIA (MC6850)
+//	      $FFC8-9  50Hz tick timer
+//	      $FFCA    SystemWatchpoint control (hardware-faithful)
+//	      $FFCB    TraceCtl (emulator-only; pT hardware has nothing
+//	               here. Debug-build firmware may poke it to gate
+//	               --brk / --trace — see tracectl.h.)
+//	      $FFD0-DF FRAM (file-backed; SHARED area)
+//	      $FFE0-FF SystemWatchpoint vector + snippet shadow (holds
+//	               the 6809 vectors at $FFF0-$FFFF; arming via $FFCA
+//	               copies the BREAK snippet to $FFE0-$FFEF and swaps
+//	               the NMI vector — see system_watchpoint.h)
 //
 //	CLI mirrors usim09batch where it makes sense:
 //	  --timeout=N        cap at N instructions (rc 124 on hit, GNU timeout(1))
@@ -68,6 +83,33 @@ public:
 	void	write(Byte) override { }
 };
 
+//
+// Watch / dump address spec.
+//
+//   phys=false : a 16-bit CPU (logical) address. Read via cpu.read(),
+//                so it goes through the active task's DAT exactly as the
+//                guest sees it — valid for the whole $0000-$FFFF space
+//                INCLUDING the DAT page table at $FE00-$FEFF, the fixed
+//                window $E000-$FDFF, and I/O. The catch: a translated
+//                address ($0000-$DFFF) follows whichever task is current,
+//                so it can't pin one physical page across a task switch.
+//   phys=true  : a physical backing-store address (0 .. 2MB-1), read via
+//                DATRAM::read_physical(), bypassing the DAT entirely. Use
+//                this to watch/dump a specific physical page regardless of
+//                which task is mapped — e.g. one task's user block.
+//
+struct WatchSpec {
+	bool		phys;
+	unsigned long	addr;
+	Byte		prev;
+};
+
+struct DumpSpec {
+	bool		phys;
+	unsigned long	addr;
+	unsigned long	len;
+};
+
 static void usage(const char* prog)
 {
 	fprintf(stderr,
@@ -77,7 +119,15 @@ static void usage(const char* prog)
 		"  --timeout=N         cap at N instructions (rc 124 on hit)\n"
 		"  --cycles            print total cycles to stderr on exit\n"
 		"  --trace             per-instruction CPU trace\n"
-		"  --watch=ADDR        watch byte at ADDR for changes\n"
+		"  --watch=[p:]ADDR    watch a byte for changes (repeatable).\n"
+		"                      ADDR is a 16-bit CPU address (DAT-translated\n"
+		"                      as the guest sees it, incl. DAT RAM $FE00-\n"
+		"                      $FEFF). Prefix p: for a physical backing-\n"
+		"                      store address (bypasses the DAT), e.g.\n"
+		"                      --watch=p:0x15F55 to watch one task's page.\n"
+		"  --dump=[p:]ADDR[,LEN]  hex+ASCII dump (repeatable). Same address\n"
+		"                      forms as --watch (LEN default 256). Dumped at\n"
+		"                      every --brk hit and once at exit/timeout.\n"
 		"  --brk=ADDR[,...]    dump registers before listed PCs\n"
 		"  --brk-gated         start with --brk output disabled; guest\n"
 		"                      pokes $FFCB to toggle (0x00 off, 0x01 brk,\n"
@@ -98,8 +148,8 @@ int main(int argc, char* argv[])
 	unsigned long		timeout = 0;
 	bool			report_cycles = false;
 	bool			trace = false;
-	Word			watch_addr = 0;
-	bool			watching = false;
+	std::vector<WatchSpec>	watches;
+	std::vector<DumpSpec>	dumps;
 	std::vector<Word>	brk_addrs;
 	bool			brk_gated = false;
 
@@ -111,8 +161,18 @@ int main(int argc, char* argv[])
 		} else if (strcmp(argv[i], "--trace") == 0) {
 			trace = true;
 		} else if (strncmp(argv[i], "--watch=", 8) == 0) {
-			watch_addr = (Word)strtoul(argv[i] + 8, nullptr, 0);
-			watching = true;
+			const char* v = argv[i] + 8;
+			bool phys = false;
+			if (strncmp(v, "p:", 2) == 0) { phys = true; v += 2; }
+			watches.push_back({ phys, strtoul(v, nullptr, 0), 0 });
+		} else if (strncmp(argv[i], "--dump=", 7) == 0) {
+			const char* v = argv[i] + 7;
+			bool phys = false;
+			if (strncmp(v, "p:", 2) == 0) { phys = true; v += 2; }
+			char* end;
+			unsigned long a = strtoul(v, &end, 0);
+			unsigned long len = (*end == ',') ? strtoul(end + 1, nullptr, 0) : 256;
+			dumps.push_back({ phys, a, len });
 		} else if (strncmp(argv[i], "--brk=", 6) == 0) {
 			char *p = argv[i] + 6;
 			while (*p) {
@@ -144,8 +204,14 @@ int main(int argc, char* argv[])
 
 	(void)signal(SIGINT, SIG_IGN);
 
-	// Pico-Thing constants
-	const Word	dat_translated_size = 0xFE00;		// $0000-$FDFF
+	// Pico-Thing constants. Logical map:
+	//   $0000-$DFFF  DAT-translated (7 pages × 8KB)
+	//   $E000-$FDFF  Never-remapped, fixed at physical $1E000-$1FDFF
+	//   $FE00-$FEFF  DAT page table
+	const Word	dat_addr_space_end  = 0xFE00;		// where DAT table starts
+	const Word	fixed_window_start  = 0xE000;		// $E000-$FDFF
+	const Word	fixed_window_size   = 0xFE00 - 0xE000;	// $1E00 bytes
+	const size_t	fixed_window_phys   = 0x1E000;		// physical $1E000-$1FDFF
 	const size_t	physical_ram_size   = 2 * 1024 * 1024;	// 2MB
 	const Word	dat_ram_size        = 0x0100;		// 256 bytes
 
@@ -159,7 +225,9 @@ int main(int argc, char* argv[])
 	// to repurpose for an emulator-only debugger backdoor.
 	bool brk_enabled = !brk_gated;
 
-	auto datram     = std::make_shared<DATRAM>(dat_translated_size, physical_ram_size, dat_ram_size);
+	auto datram     = std::make_shared<DATRAM>(dat_addr_space_end, physical_ram_size, dat_ram_size);
+	datram->set_fixed_window(fixed_window_start, fixed_window_size, fixed_window_phys);
+	auto datram_tk  = std::make_shared<DATRAMTicker>(*datram);
 	auto taskreg    = std::make_shared<PicoTask>(*datram);
 	auto console    = std::make_shared<mc6850>(console_term);
 	auto aux_acia   = std::make_shared<mc6850>(aux_term);
@@ -175,6 +243,7 @@ int main(int argc, char* argv[])
 	// Pico-thing peripherals don't sit on power-of-2 boundaries, so
 	// they attach by (base, size) range rather than (base, mask).
 	cpu.attach(watch);				// ActiveDevice: reset disarms
+	cpu.attach(datram_tk);				// ActiveDevice: advances DATRAM NMI pulse
 	cpu.attach_range(ide,        0xFF00, 0x000A);	// $FF00-$FF09
 	cpu.attach_range(taskreg,    0xFFC0, 0x0001);	// $FFC0
 	cpu.attach_range(console,    0xFFC4, 0x0002);	// $FFC4-$FFC5
@@ -198,14 +267,21 @@ int main(int argc, char* argv[])
 	cpu.IRQ.bind([&]() {
 		return (bool)console->IRQ && (bool)aux_acia->IRQ && (bool)tick->IRQ;
 	});
+	// NMI is wired-OR (active-low) between the SystemWatchpoint and
+	// DATRAM's "page-unavailable" trap. Each OutputPin reads false
+	// when its source asserts; AND-ing the pins gives false → CPU
+	// sees NMI asserted whenever either source trips.
 	cpu.NMI.bind([&]() {
-		return (bool)watch->NMI;
+		return (bool)watch->NMI && (bool)datram->NMI;
 	});
 
 	// Load firmware via a temporary 64K loader so the same image can
-	// populate physically separate devices: identity-mapped $0000-$FEFF
-	// into DATRAM's backing store, $FFD0-$FFDF into FRAM, and
-	// $FFE0-$FFFF into the SystemWatchpoint shadow.
+	// populate physically separate devices: guest $0000-$FDFF into
+	// DATRAM (translated zone identity-mapped to physical $0-$DFFF,
+	// fixed zone $E000-$FDFF routed to physical $1E000-$1FDFF by
+	// DATRAM's own write()), $FFD0-$FFDF into FRAM, and $FFE0-$FFFF
+	// into the SystemWatchpoint shadow. Skipping zero bytes preserves
+	// the zero-init of unwritten backing store and saves a load pass.
 	//
 	// Format is sniffed from the first byte rather than the extension:
 	//   $7F  → ELF32 (llvm-mc6809 / lld output)
@@ -226,10 +302,17 @@ int main(int argc, char* argv[])
 			loader->load_intelhex(firmware_path, 0x0000);
 		}
 
-		for (unsigned addr = 0; addr < 0xFF00; addr++) {
+		// Route load through datram->write() so the fixed-window
+		// translation ($E000-$FDFF → $1E000-$1FDFF) is honoured. DAT
+		// is in identity-init state at load time, so the translated
+		// zone resolves to identity physical addresses for task 0.
+		// Range stops at $FE00 to avoid clobbering the DAT page
+		// table; the SHARED + vector regions are loaded separately
+		// into FRAM and the watchpoint shadow below.
+		for (unsigned addr = 0; addr < dat_addr_space_end; addr++) {
 			Byte b = loader->read(addr);
 			if (b != 0x00)
-				datram->write_physical(addr, b);
+				datram->write((Word)addr, b);
 		}
 
 		// SHARED area (16 bytes) into FRAM persistence.
@@ -252,16 +335,46 @@ int main(int argc, char* argv[])
 	cpu.reset();
 	if (trace) cpu.tron();
 
-	// Step loop is engaged when any of --timeout, --watch, --brk are
-	// active. --brk-gated implies --brk semantics even without --brk
+	// Read one byte either physically (bypassing the DAT) or as the
+	// CPU sees it (DAT-translated). A physical read past the backing
+	// store, or a CPU read, both fall back to $FF on miss.
+	auto read_byte = [&](bool phys, unsigned long a) -> Byte {
+		return phys ? datram->read_physical((size_t)a)
+			    : cpu.read((Word)a);
+	};
+
+	// Hex + ASCII dump of every --dump spec. Called at each --brk hit
+	// and once at exit, so a dump pinned to a physical page shows that
+	// page's state at the moment of interest.
+	auto do_dumps = [&]() {
+		for (const auto& ds : dumps) {
+			for (unsigned long off = 0; off < ds.len; off += 16) {
+				fprintf(stderr, "%s $%06lX:",
+					ds.phys ? "PHYS" : "MEM ", ds.addr + off);
+				char ascii[17];
+				int n = 0;
+				for (int i = 0; i < 16 && off + i < ds.len; i++) {
+					Byte b = read_byte(ds.phys, ds.addr + off + i);
+					fprintf(stderr, " %02X", (unsigned)b);
+					ascii[n++] = (b >= 0x20 && b < 0x7F) ? (char)b : '.';
+				}
+				ascii[n] = '\0';
+				fprintf(stderr, "  |%s|\n", ascii);
+			}
+		}
+	};
+
+	// Step loop is engaged when any of --timeout, --watch, --dump, --brk
+	// are active. --brk-gated implies --brk semantics even without --brk
 	// addresses, but on its own it's a no-op until the guest pokes
 	// $FFCB and there are addresses to fire on.
-	bool stepping = (timeout > 0) || watching || !brk_addrs.empty();
+	bool stepping = (timeout > 0) || !watches.empty()
+		     || !dumps.empty() || !brk_addrs.empty();
 
-	Byte watch_prev = 0;
-	if (watching) {
-		watch_prev = cpu.read(watch_addr);
-		fprintf(stderr, "WATCH: $%04X initial=%02X\n", watch_addr, watch_prev);
+	for (auto& w : watches) {
+		w.prev = read_byte(w.phys, w.addr);
+		fprintf(stderr, "WATCH: %s$%0*lX initial=%02X\n",
+			w.phys ? "p:" : "", w.phys ? 6 : 4, w.addr, (unsigned)w.prev);
 	}
 
 	if (stepping) {
@@ -281,29 +394,32 @@ int main(int argc, char* argv[])
 							(unsigned)cpu.get_u(), (unsigned)cpu.get_s(),
 							(unsigned)cpu.get_cc(),
 							count);
+						do_dumps();
 						break;
 					}
 				}
 			}
 			cpu.tick();
-			if (watching) {
-				Byte cur = cpu.read(watch_addr);
-				if (cur != watch_prev) {
-					Byte next = cpu.read(watch_addr + 1);
-					fprintf(stderr, "WATCH: $%04X %02X->%02X (word=%02X%02X) "
+			for (auto& w : watches) {
+				Byte cur = read_byte(w.phys, w.addr);
+				if (cur != w.prev) {
+					Byte next = read_byte(w.phys, w.addr + 1);
+					fprintf(stderr, "WATCH: %s$%0*lX %02X->%02X (word=%02X%02X) "
 						"PC=$%04X A=%02X B=%02X X=%04X Y=%04X U=%04X S=%04X "
 						"[insn#%lu]\n",
-						watch_addr, watch_prev, cur, cur, next,
+						w.phys ? "p:" : "", w.phys ? 6 : 4, w.addr,
+						(unsigned)w.prev, (unsigned)cur, (unsigned)cur, (unsigned)next,
 						(unsigned)cpu.get_insn_pc(),
 						(unsigned)cpu.get_a(), (unsigned)cpu.get_b(),
 						(unsigned)cpu.get_x(), (unsigned)cpu.get_y(),
 						(unsigned)cpu.get_u(), (unsigned)cpu.get_s(),
 						count);
-					watch_prev = cur;
+					w.prev = cur;
 				}
 			}
 			++count;
 		}
+		do_dumps();
 		if (timeout > 0) {
 			if (report_cycles) {
 				fprintf(stderr, "cycles=%llu\n",
