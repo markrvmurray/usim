@@ -61,9 +61,10 @@ usim09pt: $(LIB) main_picothing.o term.o
 	$(CXX) $(CPPFLAGS) $(CCFLAGS) -c $<
 
 .PHONY: test
-test: tests/test_mmu_tick tests/test_system_watchpoint
+test: tests/test_mmu_tick tests/test_system_watchpoint tests/test_picoide
 	./tests/test_mmu_tick
 	./tests/test_system_watchpoint
+	./tests/test_picoide
 
 tests/test_mmu_tick: tests/test_mmu_tick.cpp $(LIB)
 	$(CXX) $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_mmu_tick.cpp -L. -lusim -o $(@)
@@ -71,9 +72,12 @@ tests/test_mmu_tick: tests/test_mmu_tick.cpp $(LIB)
 tests/test_system_watchpoint: tests/test_system_watchpoint.cpp $(LIB)
 	$(CXX) $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_system_watchpoint.cpp -L. -lusim -o $(@)
 
+tests/test_picoide: tests/test_picoide.cpp $(LIB)
+	$(CXX) $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_picoide.cpp -L. -lusim -o $(@)
+
 .PHONY: clean
 clean:
-	$(RM) $(BIN) $(LIB) *.o tests/test_mmu_tick tests/*.o tests/test6809.bin tests/test_system_watchpoint
+	$(RM) $(BIN) $(LIB) *.o tests/test_mmu_tick tests/*.o tests/test6809.bin tests/test_system_watchpoint tests/test_picoide
 
 .PHONY: depend
 depend:

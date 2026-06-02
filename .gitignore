@@ -9,4 +9,5 @@ usim09batch
 usim09pt
 tests/test_mmu_tick
 tests/test_system_watchpoint
+tests/test_picoide
 **/*.dSYM

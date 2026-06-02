@@ -41,6 +41,16 @@ class PicoIDE : public MappedDevice {
 	uint16_t	buf_ptr;	// byte index into buffer
 	bool		writing;	// true during write data transfer
 
+	// Multi-sector transfer state. A single READ/WRITE command can
+	// move up to 256 sectors (sector_count register, with 0 meaning
+	// 256 per ATA convention). `sectors_remaining` counts sectors not
+	// yet transferred to/from the host *including* the one in the
+	// buffer; it drops to zero when DRQ goes low. `current_lba` is
+	// the LBA of the sector currently in the buffer (or about to be
+	// fetched/written), bumped per sector across the command.
+	uint16_t	sectors_remaining;
+	uint32_t	current_lba;
+
 	Byte		error_reg;
 	Byte		features;
 	Byte		sector_count;
@@ -56,6 +66,7 @@ class PicoIDE : public MappedDevice {
 	void		do_write_sectors();
 	void		do_identify();
 	void		complete_write();
+	void		load_sector_at_current_lba();	// read 512 bytes into buffer
 
 public:
 			PicoIDE(const char* image_path);

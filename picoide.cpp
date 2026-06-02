@@ -11,6 +11,7 @@
 
 PicoIDE::PicoIDE(const char* image_path)
 	: disk(nullptr), buf_ptr(0), writing(false),
+	  sectors_remaining(0), current_lba(0),
 	  error_reg(0), features(0), sector_count(1),
 	  lba_low(0), lba_mid(0), lba_high(0),
 	  drive_head(0xA0), status(SR_DRDY), device_control(0)
@@ -42,29 +43,46 @@ uint32_t PicoIDE::get_lba()
 	       (uint32_t)lba_low;
 }
 
+void PicoIDE::load_sector_at_current_lba()
+{
+	long offset = (long)current_lba * 512;
+	fseek(disk, offset, SEEK_SET);
+	size_t n = fread(buffer, 1, 512, disk);
+	if (n < 512)
+		memset(buffer + n, 0, 512 - n);	// zero-pad short reads
+	buf_ptr = 0;
+	status = SR_DRDY | SR_DRQ;
+}
+
 void PicoIDE::do_read_sectors()
 {
 	if (!disk) {
 		status = SR_DRDY | SR_ERR;
 		error_reg = 0x04;	// abort
+		sectors_remaining = 0;
+		sector_count = 0;
 		return;
 	}
 
-	uint32_t lba = get_lba();
-	long offset = (long)lba * 512;
-
-	fseek(disk, offset, SEEK_SET);
-	size_t n = fread(buffer, 1, 512, disk);
-	if (n < 512)
-		memset(buffer + n, 0, 512 - n);	// zero-pad short reads
-
-	buf_ptr = 0;
+	current_lba = get_lba();
+	// ATA convention: sector_count == 0 means 256 sectors.
+	sectors_remaining = (sector_count == 0) ? 256 : sector_count;
 	writing = false;
-	status = SR_DRDY | SR_DRQ;
+	load_sector_at_current_lba();
 }
 
 void PicoIDE::do_write_sectors()
 {
+	if (!disk) {
+		status = SR_DRDY | SR_ERR;
+		error_reg = 0x04;
+		sectors_remaining = 0;
+		sector_count = 0;
+		return;
+	}
+
+	current_lba = get_lba();
+	sectors_remaining = (sector_count == 0) ? 256 : sector_count;
 	memset(buffer, 0, sizeof(buffer));
 	buf_ptr = 0;
 	writing = true;
@@ -76,18 +94,34 @@ void PicoIDE::complete_write()
 	if (!disk) {
 		status = SR_DRDY | SR_ERR;
 		error_reg = 0x04;
+		writing = false;
+		sectors_remaining = 0;
+		sector_count = 0;
 		return;
 	}
 
-	uint32_t lba = get_lba();
-	long offset = (long)lba * 512;
-
+	long offset = (long)current_lba * 512;
 	fseek(disk, offset, SEEK_SET);
 	(void)fwrite(buffer, 1, 512, disk);
 	fflush(disk);
 
-	writing = false;
-	status = SR_DRDY;
+	// Sector successfully transferred. Advance LBA, decrement remaining,
+	// mirror to the sector_count register (per ATA: the register tracks
+	// "sectors not yet transferred"; truncates to low 8 bits when the
+	// remaining count is >255 mid-command, hits 0 on completion).
+	++current_lba;
+	if (sectors_remaining > 0) --sectors_remaining;
+	sector_count = (Byte)sectors_remaining;
+
+	if (sectors_remaining > 0) {
+		// More sectors to take from the host — keep DRQ, reset buffer.
+		memset(buffer, 0, sizeof(buffer));
+		buf_ptr = 0;
+		// status stays SR_DRDY | SR_DRQ from do_write_sectors
+	} else {
+		writing = false;
+		status = SR_DRDY;
+	}
 }
 
 void PicoIDE::do_identify()
@@ -118,6 +152,10 @@ void PicoIDE::do_identify()
 
 	buf_ptr = 0;
 	writing = false;
+	// IDENTIFY is a single-sector pseudo-transfer (the identify
+	// response is exactly one 512-byte block). When the host has
+	// drained the buffer, DRQ drops with no follow-on sector fetch.
+	sectors_remaining = 1;
 	status = SR_DRDY | SR_DRQ;
 }
 
@@ -135,8 +173,21 @@ Byte PicoIDE::read(Word offset)
 			Byte val = buffer[buf_ptr + 1];
 			buf_ptr += 2;
 			if (buf_ptr >= 512) {
-				status &= ~SR_DRQ;
-				status |= SR_DRDY;
+				// Current sector fully transferred to host.
+				// Advance for multi-sector commands; for the
+				// IDENTIFY pseudo-transfer and single-sector
+				// reads, sectors_remaining drops to 0 here
+				// and DRQ is released.
+				if (sectors_remaining > 0)
+					--sectors_remaining;
+				sector_count = (Byte)sectors_remaining;
+				if (sectors_remaining > 0 && !writing && disk) {
+					++current_lba;
+					load_sector_at_current_lba();
+				} else {
+					status &= ~SR_DRQ;
+					status |= SR_DRDY;
+				}
 			}
 			return val;
 		}
