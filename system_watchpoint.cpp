@@ -39,8 +39,9 @@ void SystemWatchpoint::reset()
 {
 	if (m_armed) {
 		// Restore NMI vector before clearing armed state.
-		m_shadow[NMI_VEC_ADDR - WINDOW_BASE]     = m_saved_nmi_hi;
-		m_shadow[NMI_VEC_ADDR - WINDOW_BASE + 1] = m_saved_nmi_lo;
+		const Word nmi_off = NMI_VEC_ADDR - WINDOW_BASE;
+		store_shadow(nmi_off,     m_saved_nmi_hi);
+		store_shadow(nmi_off + 1, m_saved_nmi_lo);
 	}
 	m_armed = false;
 	m_nmi_request = false;
@@ -53,7 +54,19 @@ void SystemWatchpoint::load(Word abs_addr, Byte val)
 	// as a Word and silently no-op every load.
 	if (abs_addr >= WINDOW_BASE &&
 	    (uint32_t)abs_addr < (uint32_t)WINDOW_BASE + (uint32_t)WINDOW_SIZE) {
-		m_shadow[abs_addr - WINDOW_BASE] = val;
+		store_shadow((Word)(abs_addr - WINDOW_BASE), val);
+	}
+}
+
+void SystemWatchpoint::set_backing(WatchpointBacking* backing)
+{
+	m_backing = backing;
+	if (!backing) return;
+
+	// Seed the shadow from the backing without re-storing each byte
+	// back through it — bulk-mirror only, no write-back round trip.
+	for (Word i = 0; i < WINDOW_SIZE; i++) {
+		m_shadow[i] = backing->load_byte(i);
 	}
 }
 
@@ -88,7 +101,7 @@ void SystemWatchpoint::vec_write(Word offset_in_window, Byte val)
 		return;
 	}
 
-	m_shadow[offset_in_window] = val;
+	store_shadow(offset_in_window, val);
 }
 
 void SystemWatchpoint::arm()
@@ -102,12 +115,13 @@ void SystemWatchpoint::arm()
 
 	// Copy the BREAK snippet over $FFE0-$FFEF.
 	for (Word i = 0; i < SNIPPET_LEN; i++) {
-		m_shadow[(SNIPPET_BASE - WINDOW_BASE) + i] = BREAK_SNIPPET[i];
+		store_shadow((Word)((SNIPPET_BASE - WINDOW_BASE) + i),
+			     BREAK_SNIPPET[i]);
 	}
 
 	// Repoint the NMI vector to $FFE0.
-	m_shadow[nmi_off]     = (Byte)(SNIPPET_BASE >> 8);
-	m_shadow[nmi_off + 1] = (Byte)(SNIPPET_BASE & 0xFF);
+	store_shadow(nmi_off,     (Byte)(SNIPPET_BASE >> 8));
+	store_shadow(nmi_off + 1, (Byte)(SNIPPET_BASE & 0xFF));
 
 	m_armed = true;
 }
@@ -120,8 +134,8 @@ void SystemWatchpoint::disarm()
 	// left in place to match hardware semantics (the Pico's BREAK
 	// snippet stays resident until the next firmware-load cycle).
 	const Word nmi_off = NMI_VEC_ADDR - WINDOW_BASE;
-	m_shadow[nmi_off]     = m_saved_nmi_hi;
-	m_shadow[nmi_off + 1] = m_saved_nmi_lo;
+	store_shadow(nmi_off,     m_saved_nmi_hi);
+	store_shadow(nmi_off + 1, m_saved_nmi_lo);
 
 	m_armed = false;
 	m_nmi_request = false;	// release NMI

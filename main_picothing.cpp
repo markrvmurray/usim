@@ -84,6 +84,22 @@ public:
 };
 
 //
+// FRAMBacking — adapts PicoFRAM as a persistent backing for the
+// SystemWatchpoint shadow. The watchpoint window is $FFE0-$FFFF
+// (32 bytes); PicoFRAM holds 48 bytes spanning $FFD0-$FFFF, so window
+// offset N maps to FRAM offset N + 16. The SHARED area at $FFD0-$FFDF
+// is read/written through the FRAM device directly and isn't touched
+// here.
+//
+class FRAMBacking : public WatchpointBacking {
+	PicoFRAM&	fram;
+public:
+			FRAMBacking(PicoFRAM& f) : fram(f) {}
+	void		store(Word off, Byte val) override   { fram.write(off + 16, val); }
+	Byte		load_byte(Word off) override         { return fram.read(off + 16); }
+};
+
+//
 // Watch / dump address spec.
 //
 //   phys=false : a 16-bit CPU (logical) address. Read via cpu.read(),
@@ -238,6 +254,18 @@ int main(int argc, char* argv[])
 	auto watch      = std::make_shared<SystemWatchpoint>(cpu);
 	auto watch_ctrl = std::make_shared<SystemWatchpointCtrl>(*watch);
 	auto watch_vec  = std::make_shared<SystemWatchpointVec>(*watch);
+	auto fram_back  = std::make_shared<FRAMBacking>(*fram);
+
+	// Wire FRAM as the watchpoint's persistent backing. set_backing
+	// seeds the shadow from FRAM (sensible default if firmware load
+	// is empty or skipped), and from this point every shadow mutation
+	// — load(), disarmed vec_write(), arm()/disarm()/reset() vector
+	// management — mirrors through to the .fram file. The firmware
+	// load below then unconditionally writes $FFD0-$FFFF byte-for-
+	// byte, matching the destructive DMA the Pico does on real boot.
+	// Net effect: writes during the run are persisted; reload from
+	// the same firmware wipes them, exactly like the hardware.
+	watch->set_backing(fram_back.get());
 
 	// IO devices first (scanned in order, first match wins).
 	// Pico-thing peripherals don't sit on power-of-2 boundaries, so
@@ -315,18 +343,20 @@ int main(int argc, char* argv[])
 				datram->write((Word)addr, b);
 		}
 
-		// SHARED area (16 bytes) into FRAM persistence.
+		// SHARED area (16 bytes) and vector/snippet area (32 bytes)
+		// are loaded destructively, byte for byte — same as the Pico
+		// DMA does on real hardware. The previous run's persisted
+		// state is overwritten unconditionally by the firmware image
+		// (zero bytes for uncovered addresses included; we have no
+		// way to distinguish "firmware wrote 0" from "firmware didn't
+		// touch this byte" without per-byte coverage tracking in the
+		// loaders). Intra-run persistence is what FRAMBacking buys:
+		// any guest write to $FFD0-$FFFF during the run tees through
+		// to .fram immediately, so the file reflects current state at
+		// host shutdown.
 		for (unsigned addr = 0xFFD0; addr <= 0xFFDF; addr++) {
-			Byte b = loader->read(addr);
-			fram->write(addr - 0xFFD0, b);
+			fram->write(addr - 0xFFD0, loader->read(addr));
 		}
-
-		// Vector + snippet area (32 bytes) into the SystemWatchpoint
-		// shadow. Note: this is not currently persisted to FRAM — a
-		// run that updates a vector won't survive a host restart. The
-		// hardware writes through to FRAM in place; emulating that
-		// requires giving the watchpoint a reference to the FRAM
-		// device (deferred — see CLAUDE.md).
 		for (unsigned addr = 0xFFE0; addr <= 0xFFFF; addr++) {
 			watch->load((Word)addr, loader->read(addr));
 		}

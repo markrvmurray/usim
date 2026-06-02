@@ -43,6 +43,28 @@
 #include "wiring.h"
 #include "mc6809.h"
 
+//
+// Persistent backing for the 32-byte watchpoint shadow.
+//
+// On real pico-thing the Pico co-processor's DMA path makes the shadow
+// AND FRAM the same physical bytes — a write to the NMI vector survives
+// a power cycle because FRAM is non-volatile and the Pico's DMA writes
+// straight through. usim09pt models this by tee-ing every shadow
+// mutation through this interface to a PicoFRAM device (see
+// main_picothing.cpp's FRAMBacking adapter). `usim09` / `usim09batch`
+// have no FRAM and leave the backing pointer null; the watchpoint
+// then keeps state in its own m_shadow only, which is the right
+// "no persistence" behaviour for those drivers.
+//
+// offset_in_window is 0..WINDOW_SIZE-1, i.e. 0 → $FFE0, 31 → $FFFF.
+//
+class WatchpointBacking {
+public:
+	virtual			~WatchpointBacking() = default;
+	virtual void		store(Word offset_in_window, Byte val) = 0;
+	virtual Byte		load_byte(Word offset_in_window) = 0;
+};
+
 class SystemWatchpoint : public ActiveDevice {
 
 public:
@@ -60,8 +82,16 @@ private:
 	Byte			m_shadow[WINDOW_SIZE];	// $FFE0-$FFFF
 	Byte			m_saved_nmi_hi = 0xFF;
 	Byte			m_saved_nmi_lo = 0xFF;
+	WatchpointBacking*	m_backing = nullptr;
 
 	static const Byte	BREAK_SNIPPET[SNIPPET_LEN];
+
+	// Every mutation of m_shadow goes through here so persistent
+	// backings (FRAM on usim09pt) stay in lock-step with the shadow.
+	void			store_shadow(Word offset_in_window, Byte val) {
+					m_shadow[offset_in_window] = val;
+					if (m_backing) m_backing->store(offset_in_window, val);
+				}
 
 public:
 	// NMI is active-low. m_nmi_request=true → pin reads false.
@@ -78,7 +108,16 @@ public:
 	void			reset() override;
 
 	// Loader-side: seed the vector shadow from a firmware image.
+	// Mirrors through the backing, so firmware bytes written during
+	// load are persisted.
 	void			load(Word abs_addr, Byte val);
+
+	// Wire a persistent backing (typically a PicoFRAM adapter). The
+	// shadow is immediately re-seeded from the backing — so on
+	// usim09pt the watchpoint starts each run with whatever vectors
+	// the previous run left in the .fram file. Pass nullptr to detach.
+	// Call once after construction, BEFORE firmware load.
+	void			set_backing(WatchpointBacking* backing);
 
 	// Adapter-callable surfaces:
 	Byte			ctrl_read() const { return 0; }

@@ -10,6 +10,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include "mc6809.h"
 #include "system_watchpoint.h"
@@ -178,6 +179,84 @@ static void test_ctrl_read_is_zero()
 	CHECK(w.ctrl_read() == 0);		// write-only — read returns 0
 }
 
+// In-memory fake backing for the persistence tests.
+class FakeBacking : public WatchpointBacking {
+public:
+	Byte mem[SystemWatchpoint::WINDOW_SIZE];
+	int  stores = 0;
+
+	FakeBacking() { std::memset(mem, 0xAA, sizeof(mem)); }
+	void store(Word off, Byte val) override {
+		if (off < SystemWatchpoint::WINDOW_SIZE) mem[off] = val;
+		++stores;
+	}
+	Byte load_byte(Word off) override {
+		return (off < SystemWatchpoint::WINDOW_SIZE) ? mem[off] : (Byte)0xFF;
+	}
+};
+
+static void test_backing_seeds_shadow_and_mirrors_writes()
+{
+	mc6809 cpu;
+	SystemWatchpoint w(cpu);
+	FakeBacking back;
+
+	// Pre-seed the backing with a non-trivial pattern so we can
+	// prove the shadow was sourced from it. Cover both the NMI
+	// vector (offsets $1C/$1D = $FFFC/$FFFD) and the reset vector
+	// (offsets $1E/$1F = $FFFE/$FFFF).
+	back.mem[0x1C] = 0x12;	// $FFFC (NMI vec hi)
+	back.mem[0x1D] = 0x34;	// $FFFD (NMI vec lo)
+	back.mem[0x1E] = 0x56;	// $FFFE (reset vec hi)
+	back.mem[0x1F] = 0x78;	// $FFFF (reset vec lo)
+
+	w.set_backing(&back);
+
+	// Shadow now reflects the backing. set_backing must NOT round-trip
+	// stores back through the backing (no extra writes on seed).
+	CHECK(w.vec_read(0x1C) == 0x12);
+	CHECK(w.vec_read(0x1D) == 0x34);
+	CHECK(w.vec_read(0x1E) == 0x56);
+	CHECK(w.vec_read(0x1F) == 0x78);
+	CHECK(back.stores == 0);
+
+	// load() (used by firmware loaders) mirrors through the backing.
+	w.load(0xFFFE, 0x9A);
+	CHECK(w.vec_read(0x1E) == 0x9A);
+	CHECK(back.mem[0x1E] == 0x9A);
+	CHECK(back.stores == 1);
+
+	// Disarmed vec_write mirrors too.
+	w.vec_write(0x00, 0x78);
+	CHECK(w.vec_read(0x00) == 0x78);
+	CHECK(back.mem[0x00] == 0x78);
+	CHECK(back.stores == 2);
+
+	// Arming overwrites the snippet and NMI vector; every byte
+	// touched by arm() must land in the backing too — that's how
+	// real pT keeps FRAM in sync via the Pico's DMA.
+	int before = back.stores;
+	w.ctrl_write(0x01);
+	// 16 snippet bytes + 2 NMI-vector bytes = 18 stores.
+	CHECK(back.stores - before == 18);
+	CHECK(back.mem[0x00] == 0x30);	// LEAX 0,S
+	CHECK(back.mem[0x1C] == 0xFF);	// NMI vec hi
+	CHECK(back.mem[0x1D] == 0xE0);	// NMI vec lo
+
+	// Armed write is blocked — backing must NOT be touched.
+	before = back.stores;
+	w.vec_write(0x1E, 0x99);
+	CHECK(back.stores == before);
+	CHECK(back.mem[0x1E] == 0x9A);	// unchanged from earlier load()
+
+	// Disarm restores the saved NMI vector through the backing.
+	before = back.stores;
+	w.ctrl_write(0x00);
+	CHECK(back.stores - before == 2);
+	CHECK(back.mem[0x1C] == 0x12);	// pre-seeded saved hi
+	CHECK(back.mem[0x1D] == 0x34);	// pre-seeded saved lo
+}
+
 static void test_adapter_devices_route_correctly()
 {
 	mc6809 cpu;
@@ -207,6 +286,7 @@ int main()
 	test_disarmed_writes_still_work_after_trigger();
 	test_reset_disarms();
 	test_ctrl_read_is_zero();
+	test_backing_seeds_shadow_and_mirrors_writes();
 	test_adapter_devices_route_correctly();
 
 	if (failures) {
