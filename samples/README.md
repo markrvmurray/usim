@@ -1,5 +1,39 @@
 # Test files
 
+## Cycle-count regression gate
+
+`make cycles` runs `usim09batch --timeout=1000000 --cycles
+tests/test_main.hex` and verifies that the simulator reports the
+expected canonical cycle count on stderr. `make test` invokes the
+gate after the C++ unit tests; it can also be run standalone.
+
+The expected count is set in the `Makefile` as `EXPECTED_CYCLES`.
+
+The number is produced by the simulated CPU model — per-instruction
+cycle counts the `mc6809` core emits — and is independent of the
+host compiler, optimisation level, and platform. The only things
+that can move it are:
+
+- a real behavioural change to the CPU model (a fix to an instruction's
+  timing, or to an interrupt-acknowledgement sequence);
+- a change in active-device tick ordering or per-tick cycle accounting
+  (`USim::tick` / `mc6809::tick`); or
+- a change to a device whose state machine consumes bus cycles during
+  the run (the ACIA poll cadence, etc.).
+
+Any drift is a **breaking change for downstream consumers** that keep
+their own per-test cycle ledgers — the UniFLEX port, the picolibc test
+harness, and the llvm-mc6809 codegen tally all depend on these numbers
+being stable. Coordinate before bumping `EXPECTED_CYCLES`; don't
+silently absorb a drift just because the gate failed.
+
+The cap (`--timeout=1000000` instructions) is the conventional
+checkpoint. `test_main.hex` runs much longer than 1M instructions, so
+the timeout fires deterministically and gives a fixed cycle count at
+that point; the simulator exits with rc 124 (GNU `timeout(1)`
+convention), which is expected and not an error here — the gate only
+cares about the `cycles=...` line.
+
 ## MC6809
 
 The test files are for use with `usim09` which demonstrates a simple

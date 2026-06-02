@@ -65,6 +65,7 @@ test: tests/test_mmu_tick tests/test_system_watchpoint tests/test_picoide
 	./tests/test_mmu_tick
 	./tests/test_system_watchpoint
 	./tests/test_picoide
+	@$(MAKE) --no-print-directory cycles
 
 tests/test_mmu_tick: tests/test_mmu_tick.cpp $(LIB)
 	$(CXX) $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_mmu_tick.cpp -L. -lusim -o $(@)
@@ -74,6 +75,33 @@ tests/test_system_watchpoint: tests/test_system_watchpoint.cpp $(LIB)
 
 tests/test_picoide: tests/test_picoide.cpp $(LIB)
 	$(CXX) $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_picoide.cpp -L. -lusim -o $(@)
+
+# Cycle-count regression gate.
+#
+# `usim09batch --timeout=1000000 --cycles tests/test_main.hex` is
+# expected to report exactly EXPECTED_CYCLES on stderr. The number
+# comes from the simulated CPU model (per-instruction cycle counts
+# the mc6809 emits), so host compiler / optimisation level can't
+# affect it — only a real behavioural change to the CPU model or
+# device-tick ordering will. Any drift is a breaking change for
+# downstream consumers (UniFLEX port, picolibc test harness, llvm-
+# mc6809 codegen tally) that maintain their own per-test cycle
+# ledgers, so it must be coordinated rather than silently absorbed.
+#
+# `make cycles` runs the gate standalone (exits non-zero on drift,
+# prints expected vs actual); `make test` invokes it after the unit
+# tests.
+EXPECTED_CYCLES = 3333356
+
+.PHONY: cycles
+cycles: usim09batch tests/test_main.hex
+	@actual=$$(./usim09batch --timeout=1000000 --cycles tests/test_main.hex 2>&1 | sed -n 's/^cycles=//p'); \
+	if [ "$$actual" = "$(EXPECTED_CYCLES)" ]; then \
+		echo "cycles: OK ($(EXPECTED_CYCLES))"; \
+	else \
+		echo "cycles: DRIFT — expected $(EXPECTED_CYCLES), got $$actual"; \
+		exit 1; \
+	fi
 
 .PHONY: clean
 clean:
