@@ -8,6 +8,7 @@
 #pragma once
 
 #include "device.h"
+#include "wiring.h"
 
 /*
  * generic memory interface, dynamically assigned space
@@ -85,13 +86,19 @@ public:
 /*
  * DATRAM: paged RAM with a Dynamic Address Translator.
  *
- * The 64K guest address space below `size` (typically $0000-$FDFF) is
- * divided into 8KB pages. The DAT page table holds `datsize` entries
- * (256 bytes — 32 tasks * 8 pages); the currently-selected task picks
- * 8 entries, each mapping a guest 8KB window to one of up to 256
- * physical 8KB pages out of `totalsize` (typically 2MB).
+ * The guest address space below `size` is split into two zones:
  *
- * The page table itself is exposed at offsets [size, size + datsize)
+ *   - Translated zone [0, fixed_start): mapped through the DAT page
+ *     table. Each 8KB guest page consults one entry from the active
+ *     task's row; the entry's value indexes an 8KB physical page in
+ *     the backing store (`totalsize` bytes, typically 2MB).
+ *   - Fixed zone [fixed_start, size): never DAT-translated. Maps
+ *     directly to memory[fixed_phys_base + (offset - fixed_start)].
+ *     `fixed_size = size - fixed_start`. When no fixed window has
+ *     been configured (default), `fixed_size == 0` and the entire
+ *     range [0, size) is translated.
+ *
+ * The DAT page table is exposed at offsets [size, size + datsize)
  * so the guest can read/write it directly (typically $FE00-$FEFF).
  *
  * The active task is selected via `set_task` (5 bits, 0-31), wired up
@@ -100,6 +107,30 @@ public:
  * Direct physical access (write_physical / load_physical) bypasses
  * translation and is used by the host to populate the backing store
  * before the guest starts running.
+ *
+ * Pico-thing logical map (the call site in main_picothing.cpp):
+ *   $0000-$DFFF   translated (7 × 8KB pages via DAT)
+ *   $E000-$FDFF   fixed → physical $1E000-$1FDFF (never remapped)
+ *   $FE00-$FEFF   DAT page table
+ * The board's never-remapped block is hardware-fixed; this class
+ * models it via the fixed zone so the guest sees the same address
+ * map as real pico-thing.
+ *
+ * "Page unavailable" sentinel: a DAT entry value of $FF marks the
+ * page as unavailable — any guest read or write through that entry
+ * asserts NMI (reads return $FF, writes are dropped). Identity
+ * initialisation puts $FF in DAT slot index $FF (= $FEFF, task 31's
+ * eighth entry), which for pico-thing is in the unused-page-7 column
+ * — the fixed zone covers guest page 7, so that slot is never
+ * actually consulted. The sentinel still applies in slots 0-6 of
+ * every task.
+ *
+ * NMI is falling-edge sensitive on the 6809, so the assertion is
+ * pulsed (held for one tick after the bad access, then released) to
+ * allow subsequent bad accesses to re-trigger. The pulse state is
+ * advanced by the DATRAMTicker adapter — DATRAM itself stays a plain
+ * MappedDevice via GenericMemory to avoid a diamond through
+ * MappedDevice.
  */
 class DATRAM : public GenericMemory {
 
@@ -107,15 +138,48 @@ class DATRAM : public GenericMemory {
 	std::vector<Byte>	datram;
 	Byte			task;
 
+	// Fixed never-remapped window inside [0, size). When fixed_size==0
+	// (default), no fixed window — the whole range is translated.
+	size_t			fixed_start     = 0;
+	size_t			fixed_size      = 0;
+	size_t			fixed_phys_base = 0;
+
+	// Active-low NMI pulse state.
+	bool			m_nmi_request   = false;
+	bool			m_clear_pending = false;
+
+	Byte			dat_entry(Word offset) const {
+					return datram[(Byte)(task << 3) | (Byte)(offset >> 13)];
+				}
 	size_t			ext_offset(Word offset) {
 					return ((size_t)datram[(Byte)(task << 3) | (Byte)(offset >> 13)] << 13) | (offset & 0x1FFF);
 				}
+	bool			in_fixed_window(Word offset) const {
+					return fixed_size > 0
+					    && offset >= fixed_start
+					    && offset < fixed_start + fixed_size;
+				}
 
 public:
+	// m_nmi_request=true → pin reads false (active-low asserted).
+	OutputPin		NMI;
+
 				DATRAM(size_t size, size_t totalsize, size_t datsize)
-					 : GenericMemory(totalsize), size(size), datsize(datsize), datram(datsize), task(0) {
+					 : GenericMemory(totalsize), size(size), datsize(datsize),
+					   datram(datsize), task(0),
+					   NMI(m_nmi_request, /*invert=*/true) {
 						for (unsigned i = 0; i < datsize; i++) datram[i] = i;
 					 }
+
+	// Configure the fixed never-remapped window. Call once after
+	// construction (before reset/run). `fixed_start + fixed_size`
+	// must equal `size` — the fixed window directly precedes the
+	// DAT page table.
+	void			set_fixed_window(size_t start, size_t window_size, size_t phys_base) {
+					fixed_start     = start;
+					fixed_size      = window_size;
+					fixed_phys_base = phys_base;
+				}
 
 	void			set_task(Byte t) { task = t & 0x1F; }
 	Byte			get_task() const { return task; }
@@ -132,8 +196,35 @@ public:
 						memory[offset + i] = data[i];
 				}
 
+	// Driven by DATRAMTicker. Pulse: tick(N) where the bad access
+	// landed sees m_nmi_request=true and arms m_clear_pending; tick(N+1)
+	// releases the line. The CPU samples NMI between active-device
+	// ticks and instruction execute, so the assertion is visible for
+	// exactly one sample before release — long enough to edge-trigger
+	// once, short enough to allow the next bad access to re-trigger.
+	void			on_tick() {
+					if (m_clear_pending) {
+						m_nmi_request = false;
+						m_clear_pending = false;
+					} else if (m_nmi_request) {
+						m_clear_pending = true;
+					}
+				}
+	void			on_reset() {
+					m_nmi_request = false;
+					m_clear_pending = false;
+				}
+
 	virtual Byte		read(Word offset) {
 					if (offset < size) {
+						if (in_fixed_window(offset)) {
+							size_t phys = fixed_phys_base + (offset - fixed_start);
+							return (phys < memory.size()) ? memory[phys] : (Byte)0xFFu;
+						}
+						if (dat_entry(offset) == 0xFF) {
+							m_nmi_request = true;
+							return (Byte)0xFFu;
+						}
 						return memory[ext_offset(offset)];
 					} else if (offset < size + datsize) {
 						return datram[offset - size];
@@ -144,11 +235,35 @@ public:
 
 	virtual void		write(Word offset, Byte val) {
 					if (offset < size) {
+						if (in_fixed_window(offset)) {
+							size_t phys = fixed_phys_base + (offset - fixed_start);
+							if (phys < memory.size()) memory[phys] = val;
+							return;
+						}
+						if (dat_entry(offset) == 0xFF) {
+							m_nmi_request = true;
+							return;
+						}
 						memory[ext_offset(offset)] = val;
 					} else if (offset < size + datsize) {
 						datram[offset - size] = val;
 					}
 				}
+};
+
+/*
+ * DATRAMTicker: ActiveDevice adapter that lets DATRAM participate in
+ * the CPU's active-device tick (for its NMI pulse) and reset chain.
+ * DATRAM itself is a MappedDevice via GenericMemory; routing
+ * tick/reset through this adapter avoids making MappedDevice a virtual
+ * base of GenericMemory.
+ */
+class DATRAMTicker : public ActiveDevice {
+	DATRAM&			d;
+public:
+				DATRAMTicker(DATRAM& d) : d(d) {}
+	void			tick(uint8_t /*cycles*/) override { d.on_tick(); }
+	void			reset() override { d.on_reset(); }
 };
 
 /*
