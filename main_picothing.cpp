@@ -135,6 +135,8 @@ static void usage(const char* prog)
 		"  --timeout=N         cap at N instructions (rc 124 on hit)\n"
 		"  --cycles            print total cycles to stderr on exit\n"
 		"  --trace             per-instruction CPU trace\n"
+		"  --trace-from=N      enable trace at instruction N (windowed)\n"
+		"  --trace-to=N        disable trace at instruction N\n"
 		"  --watch=[p:]ADDR    watch a byte for changes (repeatable).\n"
 		"                      ADDR is a 16-bit CPU address (DAT-translated\n"
 		"                      as the guest sees it, incl. DAT RAM $FE00-\n"
@@ -164,6 +166,8 @@ int main(int argc, char* argv[])
 	unsigned long		timeout = 0;
 	bool			report_cycles = false;
 	bool			trace = false;
+	unsigned long		trace_from = 0;		// 0 = unset
+	unsigned long		trace_to = 0;		// 0 = unset
 	std::vector<WatchSpec>	watches;
 	std::vector<DumpSpec>	dumps;
 	std::vector<Word>	brk_addrs;
@@ -176,6 +180,10 @@ int main(int argc, char* argv[])
 			report_cycles = true;
 		} else if (strcmp(argv[i], "--trace") == 0) {
 			trace = true;
+		} else if (strncmp(argv[i], "--trace-from=", 13) == 0) {
+			trace_from = strtoul(argv[i] + 13, nullptr, 0);
+		} else if (strncmp(argv[i], "--trace-to=", 11) == 0) {
+			trace_to = strtoul(argv[i] + 11, nullptr, 0);
 		} else if (strncmp(argv[i], "--watch=", 8) == 0) {
 			const char* v = argv[i] + 8;
 			bool phys = false;
@@ -399,7 +407,8 @@ int main(int argc, char* argv[])
 	// addresses, but on its own it's a no-op until the guest pokes
 	// $FFCB and there are addresses to fire on.
 	bool stepping = (timeout > 0) || !watches.empty()
-		     || !dumps.empty() || !brk_addrs.empty();
+		     || !dumps.empty() || !brk_addrs.empty()
+		     || trace_from || trace_to;
 
 	for (auto& w : watches) {
 		w.prev = read_byte(w.phys, w.addr);
@@ -410,6 +419,12 @@ int main(int argc, char* argv[])
 	if (stepping) {
 		unsigned long count = 0;
 		while (timeout == 0 || count < timeout) {
+			// Windowed trace: enable per-instruction trace for the
+			// instruction-count window [trace_from, trace_to). Lets a
+			// long multitasking run be traced in a tight window without
+			// the whole-run volume (U-058 diagnosis).
+			if (trace_from && count == trace_from) cpu.tron();
+			if (trace_to && count == trace_to) cpu.troff();
 			if (!brk_addrs.empty() && brk_enabled) {
 				Word cur_pc = cpu.get_pc();
 				for (Word a : brk_addrs) {
