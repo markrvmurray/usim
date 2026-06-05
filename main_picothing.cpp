@@ -44,7 +44,11 @@
 //	  --brk=ADDR[,ADDR,...]  register dump before any listed PC
 //	  --brk-gated        --brk output starts disabled; guest pokes $FFCB
 //	                     to toggle (0x00 off, 0x01 brk-on, 0x02 brk+trace)
-//	  -d <disk.img>      Disk image file for IDE
+//	  -d <disk.img>      Master disk image file for IDE
+//	  -D <disk.img>      Slave disk image file for IDE (must exist; not
+//	                     auto-created — a stray flag mustn't spawn a 0-
+//	                     byte image). If omitted, the slave slot reads
+//	                     status $00 ("no device") as on a one-drive bus.
 //	  -f <fram.dat>      FRAM persistence file (default: picothing.fram)
 //	  <firmware>         .hex / .s19 / .srec — autodetected by extension
 //
@@ -150,7 +154,9 @@ static void usage(const char* prog)
 		"  --brk-gated         start with --brk output disabled; guest\n"
 		"                      pokes $FFCB to toggle (0x00 off, 0x01 brk,\n"
 		"                      0x02 brk+trace)\n"
-		"  -d <disk.img>       disk image for IDE\n"
+		"  -d <disk.img>       master disk image for IDE\n"
+		"  -D <disk.img>       slave  disk image for IDE (must exist;\n"
+		"                      not auto-created. Omit for a one-drive bus.)\n"
 		"  -f <fram.dat>       FRAM persistence file (default: picothing.fram)\n"
 		"\n"
 		"Firmware may be Intel HEX (.hex) or Motorola S-record (.s19/.srec).\n",
@@ -161,6 +167,7 @@ int main(int argc, char* argv[])
 {
 	const char*		firmware_path = nullptr;
 	const char*		disk_path = nullptr;
+	const char*		slave_path = nullptr;
 	const char*		fram_path = "picothing.fram";
 
 	unsigned long		timeout = 0;
@@ -211,6 +218,8 @@ int main(int argc, char* argv[])
 			brk_gated = true;
 		} else if (strcmp(argv[i], "-d") == 0 && i + 1 < argc) {
 			disk_path = argv[++i];
+		} else if (strcmp(argv[i], "-D") == 0 && i + 1 < argc) {
+			slave_path = argv[++i];
 		} else if (strcmp(argv[i], "-f") == 0 && i + 1 < argc) {
 			fram_path = argv[++i];
 		} else if (argv[i][0] == '-') {
@@ -256,7 +265,7 @@ int main(int argc, char* argv[])
 	auto console    = std::make_shared<mc6850>(console_term);
 	auto aux_acia   = std::make_shared<mc6850>(aux_term);
 	auto tick       = std::make_shared<PicoTick>(20000);	// 50Hz at ~1MHz
-	auto ide        = std::make_shared<PicoIDE>(disk_path);
+	auto ide        = std::make_shared<PicoIDE>(disk_path, slave_path);
 	auto fram       = std::make_shared<PicoFRAM>(fram_path);
 	auto tracectl   = std::make_shared<TraceCtl>(cpu, &brk_enabled);
 	auto watch      = std::make_shared<SystemWatchpoint>(cpu);

@@ -2,7 +2,7 @@
 //	picoide.h
 //	Pico-Thing PATA IDE Controller
 //
-//	10 bytes at $FF00-$FF09. File-backed disk image.
+//	10 bytes at $FF00-$FF09. File-backed disk image(s).
 //
 //	Register map (Pico-Thing layout, shifted +1 from standard ATA):
 //	  Offset 0-1: Data register (16-bit, big-endian on 6809 bus)
@@ -11,9 +11,17 @@
 //	  Offset 4:   LBA Low  (Sector Number)
 //	  Offset 5:   LBA Mid  (Cylinder Low)
 //	  Offset 6:   LBA High (Cylinder High)
-//	  Offset 7:   Drive/Head
+//	  Offset 7:   Drive/Head  (bit 4 = DEV: 0=master, 1=slave)
 //	  Offset 8:   Status (read) / Command (write)
 //	  Offset 9:   Alt Status (read) / Device Control (write)
+//
+//	Two drives share the bus, the standard ATA way: every taskfile
+//	write (features, seccnt, LBA bytes, drive/head shadow, device
+//	control) goes to BOTH drives' shadow registers, but only the
+//	selected drive responds to commands and presents data, status,
+//	and error. The selector is bit 4 of any value written to the
+//	Drive/Head register. A drive whose slot is unpopulated returns
+//	status $00 — that's how a host probe learns the slot is empty.
 //
 //	vim: ts=8 sw=8 noet:
 //
@@ -36,40 +44,43 @@ class PicoIDE : public MappedDevice {
 	static const Byte	CMD_WRITE   = 0x30;
 	static const Byte	CMD_IDENTIFY = 0xEC;
 
-	FILE*		disk;
-	uint8_t		buffer[512];
-	uint16_t	buf_ptr;	// byte index into buffer
-	bool		writing;	// true during write data transfer
+	// Per-drive state. Taskfile registers are duplicated rather than
+	// shared so that the (rarely-used but legal) sequence "set LBA on
+	// A, switch DEV to B, command B" doesn't accidentally smuggle A's
+	// LBA across — both shadows are updated by every taskfile write,
+	// so the registers track in lock-step under normal use anyway.
+	struct Drive {
+		FILE*		disk = nullptr;
+		bool		present = false;
+		uint8_t		buffer[512] = {};
+		uint16_t	buf_ptr = 0;
+		bool		writing = false;
+		uint16_t	sectors_remaining = 0;
+		uint32_t	current_lba = 0;
+		Byte		error_reg = 0;
+		Byte		features = 0;
+		Byte		sector_count = 1;
+		Byte		lba_low = 0;
+		Byte		lba_mid = 0;
+		Byte		lba_high = 0;
+		Byte		drive_head = 0xA0;
+		Byte		status = SR_DRDY;
+		Byte		device_control = 0;
+	};
 
-	// Multi-sector transfer state. A single READ/WRITE command can
-	// move up to 256 sectors (sector_count register, with 0 meaning
-	// 256 per ATA convention). `sectors_remaining` counts sectors not
-	// yet transferred to/from the host *including* the one in the
-	// buffer; it drops to zero when DRQ goes low. `current_lba` is
-	// the LBA of the sector currently in the buffer (or about to be
-	// fetched/written), bumped per sector across the command.
-	uint16_t	sectors_remaining;
-	uint32_t	current_lba;
+	Drive		drives[2];
+	int		selected = 0;	// 0 = master, 1 = slave
 
-	Byte		error_reg;
-	Byte		features;
-	Byte		sector_count;
-	Byte		lba_low;
-	Byte		lba_mid;
-	Byte		lba_high;
-	Byte		drive_head;
-	Byte		status;
-	Byte		device_control;
-
-	uint32_t	get_lba();
+	Drive&		sel()			{ return drives[selected]; }
+	uint32_t	get_lba(const Drive& d) const;
 	void		do_read_sectors();
 	void		do_write_sectors();
 	void		do_identify();
 	void		complete_write();
-	void		load_sector_at_current_lba();	// read 512 bytes into buffer
+	void		load_sector_at_current_lba();
 
 public:
-			PicoIDE(const char* image_path);
+			PicoIDE(const char* master_image, const char* slave_image = nullptr);
 	virtual		~PicoIDE();
 
 	Byte		read(Word offset) override;

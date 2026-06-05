@@ -76,7 +76,11 @@ static void set_lba(PicoIDE& ide, uint32_t lba)
 	ide.write(REG_LBA_LO,  (Byte)(lba & 0xFF));
 	ide.write(REG_LBA_MID, (Byte)((lba >> 8) & 0xFF));
 	ide.write(REG_LBA_HI,  (Byte)((lba >> 16) & 0xFF));
-	ide.write(REG_DRVHEAD, (Byte)(0xE0 | ((lba >> 24) & 0x0F)));	// LBA mode
+	// Preserve the current DEV bit (bit 4 of drive/head) so a test
+	// that called select_drive() earlier doesn't lose its selection
+	// when we rewrite drive/head with the LBA28 top nibble.
+	Byte dev_bit = ide.read(REG_DRVHEAD) & 0x10;
+	ide.write(REG_DRVHEAD, (Byte)(0xE0 | dev_bit | ((lba >> 24) & 0x0F)));
 }
 
 // Drain a full 512-byte sector from the data register (hi/lo pairing).
@@ -255,6 +259,147 @@ static void test_identify_drops_drq_after_one_sector()
 	unlink(path);
 }
 
+// Build a 1-sector-or-more image whose every sector is filled with `tag`,
+// with the LBA stamped into bytes 2-5 so reads can still distinguish
+// sectors within an image. Caller owns `path_out` (must be at least 64
+// bytes); we don't use the static-path helper above because two-drive
+// tests need two distinct image paths simultaneously.
+static void make_tagged_image(char* path_out, Byte tag, unsigned num_sectors)
+{
+	strcpy(path_out, "/tmp/picoide_test_XXXXXX");
+	int fd = mkstemp(path_out);
+	if (fd < 0) { perror("mkstemp"); exit(EXIT_FAILURE); }
+	uint8_t sector[512];
+	for (unsigned s = 0; s < num_sectors; s++) {
+		memset(sector, tag, sizeof(sector));
+		// LBA stamp in bytes 2-5 — bytes 0/1 stay as the tag so the
+		// per-drive "fill" is recognisable at offset 0 too.
+		sector[2] = (Byte)(s & 0xFF);
+		sector[3] = (Byte)((s >> 8) & 0xFF);
+		sector[4] = (Byte)((s >> 16) & 0xFF);
+		sector[5] = (Byte)((s >> 24) & 0xFF);
+		if (write(fd, sector, sizeof(sector)) != (ssize_t)sizeof(sector)) {
+			perror("write"); exit(EXIT_FAILURE);
+		}
+	}
+	close(fd);
+}
+
+// Select master (dev=0) or slave (dev=1) via Drive/Head bit 4, LBA mode.
+static void select_drive(PicoIDE& ide, int dev)
+{
+	ide.write(REG_DRVHEAD, (Byte)(0xE0 | (dev ? 0x10 : 0x00)));
+}
+
+static void test_drive_select_routes_to_correct_image()
+{
+	char master_path[64], slave_path[64];
+	make_tagged_image(master_path, 0xAA, 2);
+	make_tagged_image(slave_path,  0xBB, 2);
+
+	PicoIDE ide(master_path, slave_path);
+
+	// Read sector 0 from master → tag 0xAA.
+	select_drive(ide, 0);
+	set_lba(ide, 0);
+	ide.write(REG_SECCNT, 1);
+	ide.write(REG_CMD, CMD_READ);
+	CHECK((ide.read(REG_STATUS) & SR_DRQ) != 0);
+	uint8_t sec[512];
+	read_sector_bytes(ide, sec);
+	CHECK(sec[0] == 0xAA);
+	CHECK(sec[1] == 0xAA);
+	CHECK(sec[511] == 0xAA);
+
+	// Read sector 0 from slave → tag 0xBB.
+	select_drive(ide, 1);
+	set_lba(ide, 0);
+	ide.write(REG_SECCNT, 1);
+	ide.write(REG_CMD, CMD_READ);
+	CHECK((ide.read(REG_STATUS) & SR_DRQ) != 0);
+	read_sector_bytes(ide, sec);
+	CHECK(sec[0] == 0xBB);
+	CHECK(sec[1] == 0xBB);
+	CHECK(sec[511] == 0xBB);
+
+	// Swap back: master is still master.
+	select_drive(ide, 0);
+	set_lba(ide, 0);
+	ide.write(REG_SECCNT, 1);
+	ide.write(REG_CMD, CMD_READ);
+	read_sector_bytes(ide, sec);
+	CHECK(sec[0] == 0xAA);
+
+	unlink(master_path);
+	unlink(slave_path);
+}
+
+static void test_absent_slave_returns_zero_status()
+{
+	char master_path[64];
+	make_tagged_image(master_path, 0xAA, 1);
+	PicoIDE ide(master_path, nullptr);
+
+	// Master selected: status carries DRDY as usual.
+	select_drive(ide, 0);
+	CHECK((ide.read(REG_STATUS) & SR_DRDY) != 0);
+
+	// Slave selected with no slave image: status reads $00 — the
+	// standard ATA "no device" signature a host probe checks for.
+	// Both Status (offset 8) and Alt Status (offset 9) report it.
+	select_drive(ide, 1);
+	CHECK(ide.read(REG_STATUS) == 0x00);
+	CHECK(ide.read(9) == 0x00);
+
+	// Swapping back exposes the master again unchanged.
+	select_drive(ide, 0);
+	CHECK((ide.read(REG_STATUS) & SR_DRDY) != 0);
+
+	unlink(master_path);
+}
+
+static void test_slave_write_does_not_disturb_master()
+{
+	char master_path[64], slave_path[64];
+	make_tagged_image(master_path, 0xAA, 4);
+	make_tagged_image(slave_path,  0xBB, 4);
+
+	PicoIDE ide(master_path, slave_path);
+
+	// Write sector 1 on the slave with a sentinel pattern.
+	select_drive(ide, 1);
+	set_lba(ide, 1);
+	ide.write(REG_SECCNT, 1);
+	ide.write(REG_CMD, CMD_WRITE);
+	CHECK((ide.read(REG_STATUS) & SR_DRQ) != 0);
+	uint8_t sec[512];
+	memset(sec, 0xCC, sizeof(sec));
+	write_sector_bytes(ide, sec);
+	CHECK((ide.read(REG_STATUS) & SR_DRQ) == 0);
+
+	// Master sector 1 must still hold its original $AA fill — proves
+	// the slave-side write didn't bleed across drives.
+	select_drive(ide, 0);
+	set_lba(ide, 1);
+	ide.write(REG_SECCNT, 1);
+	ide.write(REG_CMD, CMD_READ);
+	read_sector_bytes(ide, sec);
+	CHECK(sec[0] == 0xAA);
+	CHECK(sec[511] == 0xAA);
+
+	// And slave sector 1 must reflect the sentinel that was written.
+	select_drive(ide, 1);
+	set_lba(ide, 1);
+	ide.write(REG_SECCNT, 1);
+	ide.write(REG_CMD, CMD_READ);
+	read_sector_bytes(ide, sec);
+	CHECK(sec[0] == 0xCC);
+	CHECK(sec[511] == 0xCC);
+
+	unlink(master_path);
+	unlink(slave_path);
+}
+
 static void test_no_disk_aborts_with_error()
 {
 	PicoIDE ide(nullptr);
@@ -276,6 +421,9 @@ int main()
 	test_seccnt_zero_means_256();
 	test_identify_drops_drq_after_one_sector();
 	test_no_disk_aborts_with_error();
+	test_drive_select_routes_to_correct_image();
+	test_absent_slave_returns_zero_status();
+	test_slave_write_does_not_disturb_master();
 
 	if (failures) {
 		fprintf(stderr, "FAILED: %d assertion(s)\n", failures);
