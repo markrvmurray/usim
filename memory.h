@@ -7,6 +7,9 @@
 
 #pragma once
 
+#include <functional>
+#include <vector>
+
 #include "device.h"
 #include "wiring.h"
 
@@ -148,6 +151,33 @@ class DATRAM : public GenericMemory {
 	bool			m_nmi_request   = false;
 	bool			m_clear_pending = false;
 
+	// Non-perturbing write-log state (see public add_wlog_range/peek).
+	struct WLogRange { bool phys; size_t lo, hi; };
+	std::vector<WLogRange>	m_wlog;
+	std::function<void(Word, size_t, Byte, Byte)> m_wlog_cb;
+	std::function<void(size_t)> m_shadow_cb;	// full last-writer shadow
+	// Per-store observer: (virtual offset, physical addr OR DAT index,
+	// value, is_dat). Lets the host catch stray writes into other tasks'
+	// pages and DAT-table corruption. is_dat=true => the 2nd arg is the
+	// DAT slot index (0-255), not a backing-store address.
+	std::function<void(Word, size_t, Byte, bool)> m_store_cb;
+
+	// Report a pending store at (virt, phys) if it falls in a watched
+	// range. Reads only host-side state; never touches the cycle counter
+	// or any device. No-op (one empty-vector test) when no range is set.
+	void			wlog_check(Word virt, size_t phys, Byte newv) const {
+					if (m_wlog.empty() || !m_wlog_cb) return;
+					for (const auto& r : m_wlog) {
+						size_t key = r.phys ? phys : (size_t)virt;
+						if (key >= r.lo && key < r.hi) {
+							Byte oldv = (phys < memory.size())
+								  ? memory[phys] : (Byte)0xFFu;
+							m_wlog_cb(virt, phys, oldv, newv);
+							return;
+						}
+					}
+				}
+
 	Byte			dat_entry(Word offset) const {
 					return datram[(Byte)(task << 3) | (Byte)(offset >> 13)];
 				}
@@ -196,6 +226,64 @@ public:
 						memory[offset + i] = data[i];
 				}
 
+	// --- Non-perturbing write-log (U-067 Heisenbug breaker) -------------
+	// A guest store whose target falls in a registered range is reported
+	// through m_wlog_cb BEFORE the store lands (so the callback can read
+	// the old byte). This path adds NO guest cycles and triggers NO device
+	// side-effects, so the deterministic crash is preserved while watched.
+	void			add_wlog_range(bool phys, size_t base, size_t len) {
+					m_wlog.push_back({ phys, base, base + (len ? len : 1) });
+				}
+	// Callback args: (virtual offset, physical addr, old byte, new byte).
+	void			set_wlog_cb(std::function<void(Word, size_t, Byte, Byte)> cb) {
+					m_wlog_cb = std::move(cb);
+				}
+
+	// --- Full last-writer shadow (debug dirty trick, U-067) -------------
+	// Called on EVERY guest store with the resolved physical address so the
+	// host can record who wrote each byte. Lets a post-mortem ask "which
+	// instruction last wrote this address?" -- robust to per-run page
+	// allocation variance (no fixed --wlog address needed).
+	void			set_shadow_cb(std::function<void(size_t)> cb) {
+					m_shadow_cb = std::move(cb);
+				}
+	void			set_store_cb(std::function<void(Word, size_t, Byte, bool)> cb) {
+					m_store_cb = std::move(cb);
+				}
+
+	// Translate a CPU (logical) address to its physical backing address
+	// under the CURRENT task's DAT. Returns (size_t)-1 if unmapped/out of
+	// the translated+fixed range. Pure (no side-effects).
+	size_t			virt_to_phys(Word offset) const {
+					if (offset < size) {
+						if (in_fixed_window(offset))
+							return fixed_phys_base + (offset - fixed_start);
+						Byte e = datram[(Byte)(task << 3) | (Byte)(offset >> 13)];
+						if (e == 0xFF) return (size_t)-1;
+						return ((size_t)e << 13) | (offset & 0x1FFF);
+					}
+					return (size_t)-1;
+				}
+
+	// DAT-translating read that is PURE: no cycle increment, no NMI
+	// side-effect. For host-side observation only (--watch/--dump/crash
+	// dump) so watching can't detune the cycle-based timer race.
+	Byte			peek(Word offset) const {
+					if (offset < size) {
+						if (in_fixed_window(offset)) {
+							size_t phys = fixed_phys_base + (offset - fixed_start);
+							return (phys < memory.size()) ? memory[phys] : (Byte)0xFFu;
+						}
+						Byte e = datram[(Byte)(task << 3) | (Byte)(offset >> 13)];
+						if (e == 0xFF) return (Byte)0xFFu;
+						size_t phys = ((size_t)e << 13) | (offset & 0x1FFF);
+						return (phys < memory.size()) ? memory[phys] : (Byte)0xFFu;
+					} else if (offset < size + datsize) {
+						return datram[offset - size];
+					}
+					return (Byte)0xFFu;
+				}
+
 	// Driven by DATRAMTicker. Pulse: tick(N) where the bad access
 	// landed sees m_nmi_request=true and arms m_clear_pending; tick(N+1)
 	// releases the line. The CPU samples NMI between active-device
@@ -237,6 +325,9 @@ public:
 					if (offset < size) {
 						if (in_fixed_window(offset)) {
 							size_t phys = fixed_phys_base + (offset - fixed_start);
+							wlog_check(offset, phys, val);
+							if (m_shadow_cb) m_shadow_cb(phys);
+							if (m_store_cb) m_store_cb(offset, phys, val, false);
 							if (phys < memory.size()) memory[phys] = val;
 							return;
 						}
@@ -244,8 +335,18 @@ public:
 							m_nmi_request = true;
 							return;
 						}
-						memory[ext_offset(offset)] = val;
+						size_t phys = ext_offset(offset);
+						wlog_check(offset, phys, val);
+						if (m_shadow_cb) m_shadow_cb(phys);
+						if (m_store_cb) m_store_cb(offset, phys, val, false);
+						memory[phys] = val;
 					} else if (offset < size + datsize) {
+						// DAT page-table store ($FE00-$FEFF). No backing-
+						// store phys; use a high pseudo-phys (> real 2MB) so
+						// p:-watches don't match but a virtual watch on
+						// $FE00+slot does — lets us catch DAT corruption.
+						wlog_check(offset, (size_t)0x1000000u + (offset - size), val);
+						if (m_store_cb) m_store_cb(offset, offset - size, val, true);
 						datram[offset - size] = val;
 					}
 				}

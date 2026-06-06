@@ -52,6 +52,7 @@ void USim::halt()
 void USim::invalid(const char *msg)
 {
 	fprintf(stderr, "error: %s [PC:$%04X IR:$%04X]\n", msg, pc, ir);
+	if (on_invalid) on_invalid(msg);
 	this->abort();
 }
 

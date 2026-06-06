@@ -74,6 +74,10 @@ public:
 public:
 
 	std::function<void()>	abort = ::abort;
+	// Optional host-side post-mortem hook: invoked by invalid() at the
+	// instant of a fatal abort (e.g. the U-067 $BF3D invalid-instruction),
+	// before abort() runs, so a crashing run can dump full state.
+	std::function<void(const char*)>	on_invalid;
 	virtual void		invalid(const char*);
 	virtual void		run();
 	virtual void		tick();
