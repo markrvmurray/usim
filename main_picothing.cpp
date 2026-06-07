@@ -216,6 +216,7 @@ int main(int argc, char* argv[])
 	bool			detect_stray = false;	// Detector B: stray write into another task / DAT
 	bool			detect_free = false;	// getpag/givpag of a live task page
 	bool			detect_iostk = false;	// U-067: I/O copy into the user-block/system-stack page
+	bool			detect_srise = false;	// U-067: user S rising into the system-stack zone
 	bool			track_shadow = false;	// full last-writer shadow (debug)
 	std::vector<WatchSpec>	watches;
 	std::vector<DumpSpec>	dumps;
@@ -253,6 +254,8 @@ int main(int argc, char* argv[])
 			detect_free = true;
 		} else if (strcmp(argv[i], "--detect-iostk") == 0) {
 			detect_iostk = true;
+		} else if (strcmp(argv[i], "--detect-srise") == 0) {
+			detect_srise = true;
 		} else if (strcmp(argv[i], "--shadow") == 0) {
 			track_shadow = true;
 		} else if (strncmp(argv[i], "--watch=", 8) == 0) {
@@ -901,6 +904,35 @@ int main(int argc, char* argv[])
 					}
 				}
 				prev_pc = ip;
+				// U-067: catch the instruction where USER-mode S first rises
+				// into the system-stack zone [$BE00,$BF40) -- the instruction
+				// that parks the Pascal stack on top of SYSSTK. Logs insn_pc
+				// (the user-program PC that just raised S), the S transition,
+				// and the task. Transition-only (prev<$BE00 -> now in zone) so
+				// it fires at the raise, not on every subsequent high store.
+				if (detect_srise) {
+					// Per-task: the upward transition where S jumps from below
+					// the designed top ($BE80) into the SYSSTK danger vicinity
+					// [$BF20,$BF40). insn_pc is the instruction that raised S
+					// (the Pascal stack being parked on top of SYSSTK).
+					static Word srise_prev[32] = {0};
+					static int srise_hits = 0;
+					Byte tk = datram->get_task() & 31;
+					Word ipx = cpu.get_insn_pc();
+					Word sp  = cpu.get_s();
+					bool kernel_text = (ipx >= 0x4000 && ipx <= 0x8D17);
+					if (!kernel_text && srise_prev[tk]
+					    && srise_prev[tk] < 0xBE80
+					    && sp >= 0xBF20 && sp < 0xBF40 && srise_hits < 24) {
+						srise_hits++;
+						fprintf(stderr, "SRISE#%d insn_pc=$%04X S:$%04X->$%04X "
+							"TRUSER=$%02X task=%u cyc=%llu\n", srise_hits,
+							(unsigned)ipx, (unsigned)srise_prev[tk], (unsigned)sp,
+							(unsigned)datram->peek(0xFDFA), (unsigned)tk,
+							(unsigned long long)cpu.get_total_cycles());
+					}
+					srise_prev[tk] = sp;
+				}
 				// Kernel-stack low-water: track min S while in kernel context
 				// (TRUSER @ $FDFA == 0). If it descends into the user frames,
 				// the kernel stack is overflowing into saved user state.
