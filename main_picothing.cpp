@@ -573,10 +573,38 @@ int main(int argc, char* argv[])
 	// genuine user-stack buffer (usp adjacent) or a stray pointer. peek() is
 	// non-perturbing. One-shot-ish (capped) to avoid flooding.
 	static int iostk_hits = 0;
+	// U-067 (a)-vs-(b): per physical user-block page, remember the LAST
+	// non-trampoline write to the usp field (ust offset 0 = page offset $1F40).
+	// fixarg sets it through slot 5 ($BF40); dupum's fork copy sets it through
+	// the SBUF window ($DF40) -- both land at physical offset $1F40, so we match
+	// on the PHYSICAL offset to catch either. The trampoline (PC>=$E000) saves
+	// the *running* S on every trap; we exclude it so this records only the
+	// exec/fork LAUNCH placement. At the crash we print the crashing page's
+	// launch usp + the PC that set it: a low value via fixarg => the process
+	// started low and raised S in user code (b); a high value (or a dupum-copy
+	// PC) => it was launched high via fork inheritance (a).
+	static unsigned init_usp[256]   = {0};
+	static unsigned init_usp_pc[256]= {0};
+	static unsigned long long init_usp_cyc[256] = {0};
+	static Byte     init_hi[256]    = {0};
 	if (detect_iostk) {
 		datram->set_store_cb([&](Word virt, size_t phys, Byte val,
 					 bool is_dat) {
 			if (is_dat) return;
+			unsigned pc = cpu.get_insn_pc();
+			// --- track launch placement of usp (phys offset $1F40/$1F41) ---
+			if (pc < 0xE000) {
+				unsigned poff = (unsigned)(phys & 0x1FFF);
+				size_t pg = phys >> 13;
+				if (pg < 256 && poff == 0x1F40) {
+					init_hi[pg] = val;
+				} else if (pg < 256 && poff == 0x1F41) {
+					init_usp[pg]    = (init_hi[pg] << 8) | val;
+					init_usp_pc[pg] = pc;
+					init_usp_cyc[pg]= cpu.get_total_cycles();
+				}
+			}
+			// --- the corrupting SBUF-window store into the stack zone ---
 			if (virt < 0xC000 || virt > 0xDFFF) return;	// SBUF copy window
 			Byte t = datram->get_task();
 			Byte slot5 = datram->peek((Word)(0xFE00 + (t << 3) + 5));
@@ -589,10 +617,13 @@ int main(int argc, char* argv[])
 			fprintf(stderr,
 			    "IOSTK#%d cyc=%llu PC=$%04X -> user-view $%04X (SBUF virt=$%04X "
 			    "phys=$%05zX) val=$%02X | task=%u slot5_page=$%02X | "
-			    "usp(@$BF40)=$%04X SYSSTK=$BF40 | ust $BFB0:",
+			    "usp(@$BF40)=$%04X SYSSTK=$BF40 | LAUNCH usp=$%04X by PC=$%04X "
+			    "cyc=%llu | ust $BFB0:",
 			    iostk_hits, (unsigned long long)cpu.get_total_cycles(),
-			    (unsigned)cpu.get_insn_pc(), uview, (unsigned)virt, phys,
-			    (unsigned)val, (unsigned)t, (unsigned)slot5, usp);
+			    pc, uview, (unsigned)virt, phys,
+			    (unsigned)val, (unsigned)t, (unsigned)slot5, usp,
+			    init_usp[slot5], init_usp_pc[slot5],
+			    (unsigned long long)init_usp_cyc[slot5]);
 			for (Word a = 0xBFB0; a <= 0xBFB7; a++)
 				fprintf(stderr, " %02X", (unsigned)datram->peek(a));
 			fprintf(stderr, "\n");
