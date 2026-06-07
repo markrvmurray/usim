@@ -215,6 +215,7 @@ int main(int argc, char* argv[])
 	bool			detect_dbl = false;	// U-067 Detector A: page double-allocation
 	bool			detect_stray = false;	// Detector B: stray write into another task / DAT
 	bool			detect_free = false;	// getpag/givpag of a live task page
+	bool			detect_iostk = false;	// U-067: I/O copy into the user-block/system-stack page
 	bool			track_shadow = false;	// full last-writer shadow (debug)
 	std::vector<WatchSpec>	watches;
 	std::vector<DumpSpec>	dumps;
@@ -250,6 +251,8 @@ int main(int argc, char* argv[])
 			detect_stray = true;
 		} else if (strcmp(argv[i], "--detect-free") == 0) {
 			detect_free = true;
+		} else if (strcmp(argv[i], "--detect-iostk") == 0) {
+			detect_iostk = true;
 		} else if (strcmp(argv[i], "--shadow") == 0) {
 			track_shadow = true;
 		} else if (strncmp(argv[i], "--watch=", 8) == 0) {
@@ -559,6 +562,40 @@ int main(int argc, char* argv[])
 					stray_page=p.page; stray_vtask=p.tslot; stray_pc=cpu.get_insn_pc();
 					return;
 				}
+		});
+	}
+	// U-067 Detector: a kernel store through the SBUF copy window ($C000-$DFFF)
+	// whose translated physical target is the CURRENT task's user-block page
+	// (slot 5) at an offset in the system-stack zone ($1F30-$1F40, just below
+	// SYSSTK=$BF40). Fires atomically AT the corrupting write and dumps the
+	// user stack pointer (usp @ $BF40, ust offset 0) and the I/O-target record
+	// (uiosp/uistrt/uicnt @ ~$BFB0) so we can see whether the destination is a
+	// genuine user-stack buffer (usp adjacent) or a stray pointer. peek() is
+	// non-perturbing. One-shot-ish (capped) to avoid flooding.
+	static int iostk_hits = 0;
+	if (detect_iostk) {
+		datram->set_store_cb([&](Word virt, size_t phys, Byte val,
+					 bool is_dat) {
+			if (is_dat) return;
+			if (virt < 0xC000 || virt > 0xDFFF) return;	// SBUF copy window
+			Byte t = datram->get_task();
+			Byte slot5 = datram->peek((Word)(0xFE00 + (t << 3) + 5));
+			if ((phys >> 13) != (size_t)slot5) return;	// not the slot-5 page
+			unsigned off = (unsigned)(phys & 0x1FFF);
+			if (off < 0x1F30 || off > 0x1F40) return;	// stack-overlap zone
+			if (iostk_hits++ >= 8) return;
+			unsigned uview = 0xA000u | off;			// user-view address
+			unsigned usp = (datram->peek(0xBF40) << 8) | datram->peek(0xBF41);
+			fprintf(stderr,
+			    "IOSTK#%d cyc=%llu PC=$%04X -> user-view $%04X (SBUF virt=$%04X "
+			    "phys=$%05zX) val=$%02X | task=%u slot5_page=$%02X | "
+			    "usp(@$BF40)=$%04X SYSSTK=$BF40 | ust $BFB0:",
+			    iostk_hits, (unsigned long long)cpu.get_total_cycles(),
+			    (unsigned)cpu.get_insn_pc(), uview, (unsigned)virt, phys,
+			    (unsigned)val, (unsigned)t, (unsigned)slot5, usp);
+			for (Word a = 0xBFB0; a <= 0xBFB7; a++)
+				fprintf(stderr, " %02X", (unsigned)datram->peek(a));
+			fprintf(stderr, "\n");
 		});
 	}
 	if (!wlogs.empty()) {
