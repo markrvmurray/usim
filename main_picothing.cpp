@@ -995,9 +995,14 @@ int main(int argc, char* argv[])
 				// address. Legit trap entries are $E400/$E42F/$E450/$E451; a
 				// jump/rti to anywhere else in the fixed page with a user bank
 				// mapped means corrupt control flow JUST reached the trampoline.
+				// U-069 added the task-1 bootstrap INTO the fixed page: strtup
+				// jmps to tr_uent ($E4AC) which rti's to ts1cnt ($E4B0), both run
+				// as user code in the user bank during init -- legit, exclude them
+				// (plus tr_irqk $E426, the kernel-context IRQ entry).
 				if (trap_sled && disc && datram->get_task() != 0
 				    && ip >= 0xE000 && ip <= 0xFDFF
-				    && ip != 0xE400 && ip != 0xE42F && ip != 0xE450 && ip != 0xE451) {
+				    && ip != 0xE400 && ip != 0xE42F && ip != 0xE450 && ip != 0xE451
+				    && ip != 0xE426 && ip != 0xE4AC && ip != 0xE4B0) {
 					fprintf(stderr, "FIRST-DOMINO: $%04X -> $%04X (task=%u)\n",
 						(unsigned)src_pc, (unsigned)ip, (unsigned)datram->get_task());
 					if (cpu.on_invalid) cpu.on_invalid("USER ENTERED TRAMPOLINE (first domino)");
