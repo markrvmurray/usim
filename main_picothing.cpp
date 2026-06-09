@@ -160,6 +160,9 @@ static void usage(const char* prog)
 		"  --trace             per-instruction CPU trace\n"
 		"  --trace-from=N      enable trace at instruction N (windowed)\n"
 		"  --trace-to=N        disable trace at instruction N\n"
+		"  --trace-task=ADDR   restrict trace+brk to instructions whose ACTIVE\n"
+		"                      task TCB == ADDR (utask at $BF5B). Cuts through\n"
+		"                      the relasmb/kernel PC overlap to trace one task.\n"
 		"  --tick=N            cycles per 50Hz timer tick (default 20000).\n"
 		"                      Lower = more frequent IRQs: an amplifier for\n"
 		"                      timer-IRQ-vs-kernel-window timing races.\n"
@@ -208,6 +211,7 @@ int main(int argc, char* argv[])
 	bool			trace = false;
 	unsigned long		trace_from = 0;		// 0 = unset
 	unsigned long		trace_to = 0;		// 0 = unset
+	long			trace_task = -1;	// -1 = unset; else restrict trace+brk to instructions whose ACTIVE task TCB == this addr (U-080)
 	unsigned long		tick_cycles = 20000;	// 50Hz at ~1MHz (default)
 	unsigned long long	ctrace_from = 0, ctrace_to = 0;	// cycle-windowed trace
 	bool			trap_sled = false;	// dump at first wild transfer onto a $00 sled
@@ -236,6 +240,8 @@ int main(int argc, char* argv[])
 			trace_from = strtoul(argv[i] + 13, nullptr, 0);
 		} else if (strncmp(argv[i], "--trace-to=", 11) == 0) {
 			trace_to = strtoul(argv[i] + 11, nullptr, 0);
+		} else if (strncmp(argv[i], "--trace-task=", 13) == 0) {
+			trace_task = (long)strtoul(argv[i] + 13, nullptr, 0);
 		} else if (strncmp(argv[i], "--tick=", 7) == 0) {
 			tick_cycles = strtoul(argv[i] + 7, nullptr, 0);
 			if (tick_cycles == 0) tick_cycles = 20000;
@@ -809,14 +815,40 @@ int main(int argc, char* argv[])
 			// instruction-count window [trace_from, trace_to). Lets a
 			// long multitasking run be traced in a tight window without
 			// the whole-run volume (U-058 diagnosis).
-			if (trace_from && count == trace_from) cpu.tron();
+			// U-080: optional ACTIVE-TASK filter. The current task's TCB
+			// pointer is utask in the mapped user block ($BF5B/$BF5C) -- the
+			// same source the U-067 detector uses. When --trace-task=<TCB> is
+			// given, trace + brk fire only while that task is current (which
+			// includes the kernel running on its behalf, until a context
+			// switch rewrites utask). This cuts through the relasmb/kernel PC
+			// overlap that otherwise makes single-task tracing ambiguous.
+			bool task_ok = true;
+			if (trace_task >= 0) {
+				unsigned cur = (datram->peek(0xBF5B) << 8)
+					     |  datram->peek(0xBF5C);
+				task_ok = (cur == (unsigned)trace_task);
+			}
+			if (trace_task >= 0) {
+				// Level-driven trace, gated by the active task. The window is
+				// --trace-from/to if given, else whole-run --trace, else off
+				// (so --trace-task with only --brk is a brk-only filter).
+				bool win;
+				if (trace_from || trace_to)
+					win = (!trace_from || count >= trace_from)
+					   && (!trace_to   || count <  trace_to);
+				else
+					win = trace;
+				if (win && task_ok) cpu.tron(); else cpu.troff();
+			} else {
+				if (trace_from && count == trace_from) cpu.tron();
+				if (trace_to && count == trace_to) cpu.troff();
+			}
 			if (ctrace_from) {
 				unsigned long long cyc = cpu.get_total_cycles();
 				if (cyc >= ctrace_from && (!ctrace_to || cyc < ctrace_to)) cpu.tron();
 				else cpu.troff();
 			}
-			if (trace_to && count == trace_to) cpu.troff();
-			if (!brk_addrs.empty() && brk_enabled) {
+			if (!brk_addrs.empty() && brk_enabled && task_ok) {
 				Word cur_pc = cpu.get_pc();
 				for (Word a : brk_addrs) {
 					if (cur_pc == a) {
