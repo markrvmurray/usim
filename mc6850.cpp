@@ -24,6 +24,7 @@ void mc6850::reset()
 {
 	cr = 0;		// Clear all control flags
 	sr = TDRE;	// Clear all status bits except TDRE
+	rts = true;	// cr=0 -> RTS asserted (host may send)
 	cycles = 0;
 }
 
@@ -41,8 +42,10 @@ void mc6850::tick(uint8_t ticks)
 	if (cycles < interval) return;
 	cycles = 0;
 
-	// Check for a received character if one isn't available
-	if ((sr & RDRF) == 0) {
+	// Check for a received character if one isn't available.
+	// Honour RTS flow control: while the guest has deasserted RTS we leave
+	// host input buffered (do not read it) so it cannot overrun (U-080).
+	if ((sr & RDRF) == 0 && rts) {
 		// If input is ready read a character
 		if (impl.poll_read()) {
 			rd = impl.read();
@@ -76,8 +79,10 @@ void mc6850::write(Word offset, Byte val)
 		case 0:	// control register
 			cr = val;
 			if ((cr & 0x03) == 0x03) {
-				reset();
+				reset();		// master reset clears cr -> RTS asserted
 			}
+			// RTS = deasserted iff transmit-control (CR6:CR5) == 10.
+			rts = ((cr & 0x60) != 0x40);
 			break;
 		case 1:	// data register
 			td = val;

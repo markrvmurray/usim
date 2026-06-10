@@ -43,6 +43,13 @@ protected:
 protected:
 
 	Byte			td, rd, cr, sr;
+	// RTS flow control (U-080). The guest deasserts RTS (CR6:CR5 = 10) to say
+	// "stop sending"; while deasserted we do NOT consume host input, so bytes
+	// stay buffered in the host pipe (no console RX overrun). On a real serial
+	// line RTS is a wire; here the console is stdin/stdout, so "honour RTS" =
+	// "pause reading stdin" -- the OS pipe (~64K on macOS) holds the held bytes
+	// and back-pressures the feeder, which is exactly the behaviour we want.
+	bool			rts = true;	// true = asserted (host may send)
 
 // Access to real IO device
 	mc6850_impl&		impl;

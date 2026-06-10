@@ -163,6 +163,8 @@ static void usage(const char* prog)
 		"  --trace-task=ADDR   restrict trace+brk to instructions whose ACTIVE\n"
 		"                      task TCB == ADDR (utask at $BF5B). Cuts through\n"
 		"                      the relasmb/kernel PC overlap to trace one task.\n"
+		"  --trace-procs       log kernel fork/exec/exit (TCB + exec'd fnumbr)\n"
+		"                      so the program-at-TCB is knowable over time.\n"
 		"  --tick=N            cycles per 50Hz timer tick (default 20000).\n"
 		"                      Lower = more frequent IRQs: an amplifier for\n"
 		"                      timer-IRQ-vs-kernel-window timing races.\n"
@@ -212,6 +214,7 @@ int main(int argc, char* argv[])
 	unsigned long		trace_from = 0;		// 0 = unset
 	unsigned long		trace_to = 0;		// 0 = unset
 	long			trace_task = -1;	// -1 = unset; else restrict trace+brk to instructions whose ACTIVE task TCB == this addr (U-080)
+	bool			trace_procs = false;	// U-080: log fork/exec/exit so program-at-TCB is knowable over time
 	unsigned long		tick_cycles = 20000;	// 50Hz at ~1MHz (default)
 	unsigned long long	ctrace_from = 0, ctrace_to = 0;	// cycle-windowed trace
 	bool			trap_sled = false;	// dump at first wild transfer onto a $00 sled
@@ -242,6 +245,8 @@ int main(int argc, char* argv[])
 			trace_to = strtoul(argv[i] + 11, nullptr, 0);
 		} else if (strncmp(argv[i], "--trace-task=", 13) == 0) {
 			trace_task = (long)strtoul(argv[i] + 13, nullptr, 0);
+		} else if (strcmp(argv[i], "--trace-procs") == 0) {
+			trace_procs = true;
 		} else if (strncmp(argv[i], "--tick=", 7) == 0) {
 			tick_cycles = strtoul(argv[i] + 7, nullptr, 0);
 			if (tick_cycles == 0) tick_cycles = 20000;
@@ -800,7 +805,7 @@ int main(int argc, char* argv[])
 	// $FFCB and there are addresses to fire on.
 	bool stepping = (timeout > 0) || !watches.empty()
 		     || !dumps.empty() || !brk_addrs.empty()
-		     || trace_from || trace_to;
+		     || trace_from || trace_to || trace_procs;
 
 	for (auto& w : watches) {
 		w.prev = read_byte(w.phys, w.addr);
@@ -865,6 +870,36 @@ int main(int argc, char* argv[])
 						do_dumps();
 						break;
 					}
+				}
+			}
+			// ---- U-080 process tracer: fork / exec / exit ----
+			// Makes "which program is at which TCB" knowable over time (a TCB is
+			// reused across fork/exec/exit, so trace-by-TCB alone is ambiguous).
+			// Kernel hook PCs (text base = kernel-file-off + $3FE8):
+			//   $789E fork  ldd utask/pshs d,y/lbsr lfork : D=parent TCB, Y=child slot
+			//   $75F0 exec  (right after ldx BHDSIZ,s)     : X=exec'd fdn, fnumbr@X+5;
+			//                                                utask($BF5B)=exec'ing TCB
+			//   $79AA exit  sta tsstat,y (=TTERM)          : Y=exiting TCB
+			// utask + the fdn are in page-0-identity / mapped-user-block RAM, so
+			// datram->peek() (current bank) reads them while the kernel runs.
+			if (trace_procs) {
+				Word pcnow = cpu.get_pc();
+				if (pcnow == 0x789E) {
+					unsigned parent = ((unsigned)cpu.get_a() << 8) | cpu.get_b();
+					unsigned child  = cpu.get_y();
+					fprintf(stderr, "PROC fork parent=$%04X child=$%04X [insn#%lu]\n",
+						parent, child, count);
+				} else if (pcnow == 0x75F0) {
+					unsigned fdn = cpu.get_x();
+					unsigned fnumbr = ((unsigned)datram->peek((Word)(fdn + 5)) << 8)
+							| datram->peek((Word)(fdn + 6));
+					unsigned utaskp = ((unsigned)datram->peek(0xBF5B) << 8)
+							| datram->peek(0xBF5C);
+					fprintf(stderr, "PROC exec task=$%04X fnumbr=%u (fdn=$%04X) [insn#%lu]\n",
+						utaskp, fnumbr, fdn, count);
+				} else if (pcnow == 0x79AA) {
+					fprintf(stderr, "PROC exit task=$%04X [insn#%lu]\n",
+						(unsigned)cpu.get_y(), count);
 				}
 			}
 			// ---- getpag/givpag live-page detector (U-067) ----
