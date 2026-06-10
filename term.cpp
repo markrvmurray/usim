@@ -182,6 +182,9 @@ bool Terminal::poll_read()
 			if (ch == '~') {
 				tilde_state = handling;
 				read_data_available = false;
+			} else if (ch == 0x0a || ch == 0x0d) {
+				// consecutive newlines stay at line-start, so
+				// <Enter>~. always re-arms the escape
 			} else {
 				tilde_state = normal;
 			}
