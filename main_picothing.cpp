@@ -9,7 +9,7 @@
 //	                access traps NMI (reads return $FF, writes are
 //	                dropped) — matches the pT board's bad-page trap.
 //	  $E000-$FDFF   Never-remapped RAM, hardwired to physical
-//	                $1E000-$1FDFF. Independent of DAT settings; the
+//	                $1FE000-$1FFDFF. Independent of DAT settings; the
 //	                board logic forces this mapping.
 //	  $FE00-$FEFF   DAT RAM (256 bytes — 32 tasks × 8 pages). Slots
 //	                where N % 8 == 7 are unused because guest page 7
@@ -357,12 +357,19 @@ int main(int argc, char* argv[])
 
 	// Pico-Thing constants. Logical map:
 	//   $0000-$DFFF  DAT-translated (7 pages × 8KB)
-	//   $E000-$FDFF  Never-remapped, fixed at physical $1E000-$1FDFF
+	//   $E000-$FDFF  Never-remapped, fixed into the LAST physical page
 	//   $FE00-$FEFF  DAT page table
+	// The board hardwires the fixed window to the very last 8KB of the
+	// 2MB RAM, $1FE000-$1FFFFF = physical page $FF.  That makes
+	// NitrOS-9's KrnBlk=$FF literally the kernel's physical page, and
+	// its block-map reservation of page $FF covers the kernel's backing.
+	// (Modelling this as $1E000/page $0F left the kernel's real page
+	// unreserved: F$AllRAM eventually handed it to the ramdisk, whose
+	// writes then shredded the live kernel — the dsave-to-/r0 hang.)
 	const Word	dat_addr_space_end  = 0xFE00;		// where DAT table starts
 	const Word	fixed_window_start  = 0xE000;		// $E000-$FDFF
 	const Word	fixed_window_size   = 0xFE00 - 0xE000;	// $1E00 bytes
-	const size_t	fixed_window_phys   = 0x1E000;		// physical $1E000-$1FDFF
+	const size_t	fixed_window_phys   = 0x1FE000;		// physical $1FE000-$1FFDFF
 	const size_t	physical_ram_size   = 2 * 1024 * 1024;	// 2MB
 	const Word	dat_ram_size        = 0x0100;		// 256 bytes
 
@@ -456,7 +463,7 @@ int main(int argc, char* argv[])
 	// Load firmware via a temporary 64K loader so the same image can
 	// populate physically separate devices: guest $0000-$FDFF into
 	// DATRAM (translated zone identity-mapped to physical $0-$DFFF,
-	// fixed zone $E000-$FDFF routed to physical $1E000-$1FDFF by
+	// fixed zone $E000-$FDFF routed to physical $1FE000-$1FFDFF by
 	// DATRAM's own write()), $FFD0-$FFDF into FRAM, and $FFE0-$FFFF
 	// into the SystemWatchpoint shadow. Skipping zero bytes preserves
 	// the zero-init of unwritten backing store and saves a load pass.
@@ -481,7 +488,7 @@ int main(int argc, char* argv[])
 		}
 
 		// Route load through datram->write() so the fixed-window
-		// translation ($E000-$FDFF → $1E000-$1FDFF) is honoured. DAT
+		// translation ($E000-$FDFF → $1FE000-$1FFDFF) is honoured. DAT
 		// is in identity-init state at load time, so the translated
 		// zone resolves to identity physical addresses for task 0.
 		// Range stops at $FE00 to avoid clobbering the DAT page

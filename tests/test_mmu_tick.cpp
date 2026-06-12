@@ -91,18 +91,19 @@ static void test_datram_set_task_and_paging()
 static void test_datram_fixed_window_routes_to_phys_base()
 {
 	// Pico-thing layout: translated $0000-$DFFF, fixed $E000-$FDFF
-	// mapped to physical $1E000-$1FDFF, DAT page table at $FE00.
+	// hardwired into the LAST physical page, $1FE000-$1FFDFF (page $FF
+	// = NitrOS-9's KrnBlk), DAT page table at $FE00.
 	DATRAM dat(0xFE00, 2 * 1024 * 1024, 0x100);
-	dat.set_fixed_window(0xE000, 0x1E00, 0x1E000);
+	dat.set_fixed_window(0xE000, 0x1E00, 0x1FE000);
 
 	// A write to the fixed window lands at the fixed physical base,
 	// NOT at the guest address.
 	dat.write(0xE000, 0xA5);
-	CHECK(dat.read_physical(0x1E000) == 0xA5);
-	CHECK(dat.read_physical(0xE000)  == 0x00);	// not at identity offset
+	CHECK(dat.read_physical(0x1FE000) == 0xA5);
+	CHECK(dat.read_physical(0xE000)   == 0x00);	// not at identity offset
 
 	dat.write(0xFDFF, 0x5A);
-	CHECK(dat.read_physical(0x1FDFF) == 0x5A);
+	CHECK(dat.read_physical(0x1FFDFF) == 0x5A);
 
 	// And the read path goes through the same translation.
 	dat.write_physical(0x1E100, 0x42);

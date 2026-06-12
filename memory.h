@@ -113,7 +113,7 @@ public:
  *
  * Pico-thing logical map (the call site in main_picothing.cpp):
  *   $0000-$DFFF   translated (7 × 8KB pages via DAT)
- *   $E000-$FDFF   fixed → physical $1E000-$1FDFF (never remapped)
+ *   $E000-$FDFF   fixed → physical $1FE000-$1FFDFF (never remapped)
  *   $FE00-$FEFF   DAT page table
  * The board's never-remapped block is hardware-fixed; this class
  * models it via the fixed zone so the guest sees the same address
