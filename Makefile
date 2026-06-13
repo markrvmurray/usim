@@ -52,8 +52,8 @@ test: tests/test6809 tests/test6809.bin
 usim09batch: $(LIB) main09batch.o batchterm.o
 	$(CXX) $(CCFLAGS) $(LDFLAGS) main09batch.o batchterm.o -L. -lusim -o $(@)
 
-usim09pt: $(LIB) main_picothing.o term.o
-	$(CXX) $(CCFLAGS) $(LDFLAGS) main_picothing.o term.o -L. -lusim -o $(@)
+usim09pt: $(LIB) main_picothing.o term.o ptyserial.o
+	$(CXX) $(CCFLAGS) $(LDFLAGS) main_picothing.o term.o ptyserial.o -L. -lusim -o $(@)
 
 .SUFFIXES: .cpp
 
@@ -132,13 +132,14 @@ main09.o: mc6809.h wiring.h usim.h device.h
 main09.o: typedefs.h memory.h bits.h mc6850.h
 main09.o: term.h system_watchpoint.h
 term.o: term.h mc6850.h device.h typedefs.h wiring.h
+ptyserial.o: ptyserial.h mc6850.h device.h typedefs.h wiring.h
 batchterm.o: batchterm.h mc6850.h device.h typedefs.h wiring.h
 main09batch.o: mc6809.h wiring.h usim.h device.h
 main09batch.o: typedefs.h memory.h bits.h mc6850.h
 main09batch.o: batchterm.h haltdev.h system_watchpoint.h
 main_picothing.o: mc6809.h wiring.h usim.h device.h
 main_picothing.o: typedefs.h memory.h bits.h mc6850.h
-main_picothing.o: term.h picotask.h picotick.h picoide.h picofram.h
+main_picothing.o: term.h ptyserial.h picotask.h picotick.h picoide.h picofram.h
 main_picothing.o: tracectl.h system_watchpoint.h
 
 # DO NOT DELETE THIS LINE -- make depend depends on it.

@@ -24,7 +24,10 @@
 //	                6809 vector table.
 //	      $FFC0    DAT task register
 //	      $FFC4-5  Console ACIA (MC6850)
-//	      $FFC6-7  Auxiliary ACIA (MC6850)
+//	      $FFC6-7  Auxiliary ACIA (MC6850). Null backend by default;
+//	               --aux-pty binds it to a host pseudo-terminal (for
+//	               DriveWire etc.) — the /dev/ttysNNN slave path is
+//	               printed to stderr at startup.
 //	      $FFC8-9  50Hz tick timer
 //	      $FFCA    SystemWatchpoint control (hardware-faithful)
 //	      $FFCB    TraceCtl (emulator-only; pT hardware has nothing
@@ -50,6 +53,10 @@
 //	                     byte image). If omitted, the slave slot reads
 //	                     status $00 ("no device") as on a one-drive bus.
 //	  -f <fram.dat>      FRAM persistence file (default: picothing.fram)
+//	  --aux-pty          back the auxiliary ACIA ($FFC6-7) with a host
+//	                     pseudo-terminal instead of the null device; the
+//	                     slave /dev/ttysNNN path is printed at startup so
+//	                     an external program (e.g. DriveWire) can attach.
 //	  <firmware>         .hex / .s19 / .srec — autodetected by extension
 //
 //	No HaltDevice: pico-thing firmware has no host-exit mechanism;
@@ -65,10 +72,12 @@
 #include <cstring>
 #include <strings.h>
 #include <vector>
+#include <memory>
 
 #include "mc6809.h"
 #include "mc6850.h"
 #include "term.h"
+#include "ptyserial.h"
 #include "memory.h"
 #include "picotask.h"
 #include "picotick.h"
@@ -196,6 +205,8 @@ static void usage(const char* prog)
 		"  -D <disk.img>       slave  disk image for IDE (must exist;\n"
 		"                      not auto-created. Omit for a one-drive bus.)\n"
 		"  -f <fram.dat>       FRAM persistence file (default: picothing.fram)\n"
+		"  --aux-pty           back the aux ACIA ($FFC6-7) with a host PTY\n"
+		"                      (prints the /dev/ttysNNN slave path at startup)\n"
 		"\n"
 		"Firmware may be Intel HEX (.hex) or Motorola S-record (.s19/.srec).\n",
 		prog);
@@ -231,6 +242,7 @@ int main(int argc, char* argv[])
 	std::vector<WlogSpec>	wlogs;
 	std::vector<Word>	brk_addrs;
 	bool			brk_gated = false;
+	bool			aux_pty_enable = false;	// --aux-pty: PTY-back the aux ACIA
 
 	for (int i = 1; i < argc; i++) {
 		if (strncmp(argv[i], "--timeout=", 10) == 0) {
@@ -309,6 +321,8 @@ int main(int argc, char* argv[])
 			disk_path = argv[++i];
 		} else if (strcmp(argv[i], "-D") == 0 && i + 1 < argc) {
 			slave_path = argv[++i];
+		} else if (strcmp(argv[i], "--aux-pty") == 0) {
+			aux_pty_enable = true;
 		} else if (strcmp(argv[i], "-f") == 0 && i + 1 < argc) {
 			fram_path = argv[++i];
 		} else if (argv[i][0] == '-') {
@@ -339,7 +353,22 @@ int main(int argc, char* argv[])
 
 	mc6809		cpu;
 	Terminal	console_term(cpu);
-	NullTerminal	aux_term;
+
+	// Auxiliary ACIA backend: null by default (discards TX, no RX), or a
+	// host pseudo-terminal with --aux-pty so an external program such as
+	// DriveWire can drive it. Either way the mc6850 below just sees an
+	// mc6850_impl&. If the PTY fails to open, fall back to the null device
+	// so the emulator still boots.
+	NullTerminal			aux_null;
+	std::unique_ptr<PtySerial>	aux_pty;
+	mc6850_impl*			aux_impl = &aux_null;
+	if (aux_pty_enable) {
+		aux_pty = std::make_unique<PtySerial>("DriveWire");
+		if (aux_pty->ok())
+			aux_impl = aux_pty.get();
+		else
+			fprintf(stderr, "ptyserial: falling back to null aux ACIA\n");
+	}
 
 	// --brk output is on by default; --brk-gated starts it disabled
 	// and lets the guest toggle it via TraceCtl pokes at $FFCB. Real
@@ -352,7 +381,7 @@ int main(int argc, char* argv[])
 	auto datram_tk  = std::make_shared<DATRAMTicker>(*datram);
 	auto taskreg    = std::make_shared<PicoTask>(*datram);
 	auto console    = std::make_shared<mc6850>(console_term);
-	auto aux_acia   = std::make_shared<mc6850>(aux_term);
+	auto aux_acia   = std::make_shared<mc6850>(*aux_impl);
 	auto tick       = std::make_shared<PicoTick>((uint32_t)tick_cycles);	// default 50Hz at ~1MHz; --tick to amplify IRQ-race pressure
 	auto ide        = std::make_shared<PicoIDE>(disk_path, slave_path);
 	auto fram       = std::make_shared<PicoFRAM>(fram_path);
