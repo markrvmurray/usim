@@ -73,6 +73,7 @@
 #include <strings.h>
 #include <vector>
 #include <memory>
+#include <algorithm>
 
 #include "mc6809.h"
 #include "mc6850.h"
@@ -201,6 +202,11 @@ static void usage(const char* prog)
 		"  --brk-gated         start with --brk output disabled; guest\n"
 		"                      pokes $FFCB to toggle (0x00 off, 0x01 brk,\n"
 		"                      0x02 brk+trace)\n"
+		"  --pc-hist[=N]       sample every instruction's PC; at exit print\n"
+		"                      the top N hot sites, with adjacent PCs merged\n"
+		"                      into clusters so a loop reads as one range\n"
+		"                      (default N=24)\n"
+		"  --pc-hist-from=M    start sampling at instruction M (skip boot)\n"
 		"  -d <disk.img>       master disk image for IDE\n"
 		"  -D <disk.img>       slave  disk image for IDE (must exist;\n"
 		"                      not auto-created. Omit for a one-drive bus.)\n"
@@ -243,6 +249,8 @@ int main(int argc, char* argv[])
 	std::vector<Word>	brk_addrs;
 	bool			brk_gated = false;
 	bool			aux_pty_enable = false;	// --aux-pty: PTY-back the aux ACIA
+	unsigned		pc_hist_top = 0;	// --pc-hist: top clusters to print (0 = disabled)
+	unsigned long		pc_hist_from = 0;	// --pc-hist-from: first sampled instruction
 
 	for (int i = 1; i < argc; i++) {
 		if (strncmp(argv[i], "--timeout=", 10) == 0) {
@@ -317,6 +325,13 @@ int main(int argc, char* argv[])
 			}
 		} else if (strcmp(argv[i], "--brk-gated") == 0) {
 			brk_gated = true;
+		} else if (strcmp(argv[i], "--pc-hist") == 0) {
+			pc_hist_top = 24;
+		} else if (strncmp(argv[i], "--pc-hist=", 10) == 0) {
+			pc_hist_top = (unsigned)strtoul(argv[i] + 10, nullptr, 10);
+			if (pc_hist_top == 0) pc_hist_top = 24;
+		} else if (strncmp(argv[i], "--pc-hist-from=", 15) == 0) {
+			pc_hist_from = strtoul(argv[i] + 15, nullptr, 10);
 		} else if (strcmp(argv[i], "-d") == 0 && i + 1 < argc) {
 			disk_path = argv[++i];
 		} else if (strcmp(argv[i], "-D") == 0 && i + 1 < argc) {
@@ -689,6 +704,59 @@ int main(int argc, char* argv[])
 		});
 	}
 
+	// --- PC histogram (--pc-hist) -------------------------------------
+	// One counter per PC; the step loop bumps the executing instruction's
+	// slot.  At exit, adjacent hot PCs (gap <= 8 bytes) merge into
+	// clusters so a busy loop reads as one address range with a combined
+	// percentage.  512KB of host memory, one increment per instruction —
+	// cheap enough to leave on for whole runs.
+	std::vector<unsigned long long> pc_hist(pc_hist_top ? 65536 : 0);
+	bool pc_hist_dumped = false;
+	auto dump_pc_hist = [&]() {
+		if (!pc_hist_top || pc_hist_dumped) return;
+		pc_hist_dumped = true;
+		unsigned long long total = 0;
+		for (auto c : pc_hist) total += c;
+		if (total == 0) {
+			fprintf(stderr, "PC histogram: 0 samples (sampling "
+				"starts at insn %lu — run ended earlier?)\n",
+				pc_hist_from);
+			return;
+		}
+		struct Cluster {
+			unsigned lo, hi, peak;
+			unsigned long long n, peak_n;
+		};
+		std::vector<Cluster> cl;
+		for (unsigned pc = 0; pc < 65536; pc++) {
+			if (!pc_hist[pc]) continue;
+			if (!cl.empty() && pc - cl.back().hi <= 8) {
+				cl.back().hi = pc;
+				cl.back().n += pc_hist[pc];
+				if (pc_hist[pc] > cl.back().peak_n) {
+					cl.back().peak = pc;
+					cl.back().peak_n = pc_hist[pc];
+				}
+			} else {
+				cl.push_back({pc, pc, pc,
+					      pc_hist[pc], pc_hist[pc]});
+			}
+		}
+		std::sort(cl.begin(), cl.end(),
+			  [](const Cluster& a, const Cluster& b) {
+				return a.n > b.n;
+			  });
+		fprintf(stderr, "PC histogram: %llu samples, %zu clusters; "
+			"top %u:\n", total, cl.size(), pc_hist_top);
+		for (unsigned i = 0; i < pc_hist_top && i < cl.size(); i++) {
+			const auto& c = cl[i];
+			fprintf(stderr,
+				"  $%04X-$%04X  %6.2f%%  %12llu  (peak $%04X)\n",
+				c.lo, c.hi, 100.0 * (double)c.n / (double)total,
+				c.n, c.peak);
+		}
+	};
+
 	// Automatic post-mortem on a fatal abort (e.g. the $BF3D invalid
 	// instruction). Fires at the deterministic instant of death, reading
 	// only host-side state (peek/read_physical) — zero perturbation.
@@ -825,6 +893,7 @@ int main(int argc, char* argv[])
 						fprintf(stderr, "  task#%u tsutop=$%02X tsstat=%u tsmode=$%02X%s\n",
 							i, rp(e+4), rp(e+5), rp(e+6), i==cur?"  <-- current":""), fprintf(stderr, "      tstid=$%04X tstidp=$%04X\n", (rp(e+10)<<8)|rp(e+11), (rp(e+12)<<8)|rp(e+13));
 		}
+		dump_pc_hist();
 		fprintf(stderr, "==== END POST-MORTEM ====\n");
 	};
 
@@ -834,7 +903,8 @@ int main(int argc, char* argv[])
 	// $FFCB and there are addresses to fire on.
 	bool stepping = (timeout > 0) || !watches.empty()
 		     || !dumps.empty() || !brk_addrs.empty()
-		     || trace_from || trace_to || trace_procs;
+		     || trace_from || trace_to || trace_procs
+		     || pc_hist_top;
 
 	for (auto& w : watches) {
 		w.prev = read_byte(w.phys, w.addr);
@@ -973,6 +1043,8 @@ int main(int argc, char* argv[])
 			cpu.tick();
 			{
 				Word ip = cpu.get_insn_pc();
+				if (pc_hist_top && count >= pc_hist_from)
+					pc_hist[ip]++;
 				pc_ring[pc_ring_pos] = ip;
 				pc_ring_pos = (pc_ring_pos + 1) % PC_RING;
 				// Not a fall-through (allow up to 5-byte instructions)?
@@ -1256,6 +1328,7 @@ int main(int argc, char* argv[])
 			}
 			fprintf(stderr, "%s: timeout after %lu instructions\n",
 				argv[0], timeout);
+			dump_pc_hist();
 			return 124;
 		}
 	} else {
@@ -1266,5 +1339,6 @@ int main(int argc, char* argv[])
 		fprintf(stderr, "cycles=%llu\n",
 			(unsigned long long)cpu.get_total_cycles());
 	}
+	dump_pc_hist();
 	return EXIT_SUCCESS;
 }
