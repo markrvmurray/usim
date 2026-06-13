@@ -226,14 +226,17 @@ static void test_picotask_register()
 	DATRAM dat(0xFE00, 2 * 1024 * 1024, 0x100);
 	PicoTask reg(dat);
 
-	// Write-only: reads return $FF, writes forward to DATRAM::set_task.
-	CHECK(reg.read(0) == 0xFF);
+	// Reads return the current task (firmware mirrors writes into the
+	// read register); writes forward to DATRAM::set_task.
+	CHECK(reg.read(0) == 0x00);	// reset state = task 0
 
 	reg.write(0, 0x05);
 	CHECK(dat.get_task() == 0x05);
+	CHECK(reg.read(0) == 0x05);	// reads back the active task
 
 	reg.write(0, 0xFF);
 	CHECK(dat.get_task() == 0x1F);	// masked to 5 bits
+	CHECK(reg.read(0) == 0x1F);	// read-back is masked too
 }
 
 static void test_picotick_disabled_by_default()
