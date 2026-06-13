@@ -98,6 +98,35 @@ public:
 };
 
 //
+// ScriptTerminal — deterministic console input for the main ACIA.
+// Output still goes to stdout (inherited Terminal::write), but input
+// comes from a fixed script whose bytes are released on GUEST CYCLE
+// count, not host stdin timing.  Byte i is delivered once total_cycles
+// reaches first_cyc + i*step_cyc.  Because cycles are deterministic,
+// the whole run is byte-for-byte reproducible — removing the host-
+// timing race.  first_cyc lets the boot reach the login prompt;
+// step_cyc paces "typing" so each command completes (and its output
+// drains) before the next line arrives.
+//
+class ScriptTerminal : public Terminal {
+	std::string	script;
+	size_t		pos = 0;
+	uint64_t	first_cyc;
+	uint64_t	step_cyc;
+public:
+	ScriptTerminal(USim& s, std::string scr, uint64_t first, uint64_t step)
+		: Terminal(s), script(std::move(scr)), first_cyc(first), step_cyc(step) {}
+	bool poll_read() override {
+		if (pos >= script.size()) return false;
+		return sys.get_total_cycles() >= first_cyc + (uint64_t)pos * step_cyc;
+	}
+	Byte read() override {
+		return (pos < script.size())
+			? (Byte)(unsigned char)script[pos++] : (Byte)0;
+	}
+};
+
+//
 // FRAMBacking — adapts PicoFRAM as a persistent backing for the
 // SystemWatchpoint shadow. The watchpoint window is $FFE0-$FFFF
 // (32 bytes); PicoFRAM holds 48 bytes spanning $FFD0-$FFFF, so window
@@ -213,6 +242,11 @@ static void usage(const char* prog)
 		"  -f <fram.dat>       FRAM persistence file (default: picothing.fram)\n"
 		"  --aux-pty           back the aux ACIA ($FFC6-7) with a host PTY\n"
 		"                      (prints the /dev/ttysNNN slave path at startup)\n"
+		"  --input=STR         deterministic scripted console input; bytes\n"
+		"                      released on guest CYCLE count (reproducible).\n"
+		"                      \\r \\n \\t \\0 \\\\ escapes honoured.\n"
+		"  --input-first=N     cycle to release input byte 0 (default 30M)\n"
+		"  --input-step=N      cycles between input bytes (default 200000)\n"
 		"\n"
 		"Firmware may be Intel HEX (.hex) or Motorola S-record (.s19/.srec).\n",
 		prog);
@@ -251,6 +285,10 @@ int main(int argc, char* argv[])
 	bool			aux_pty_enable = false;	// --aux-pty: PTY-back the aux ACIA
 	unsigned		pc_hist_top = 0;	// --pc-hist: top clusters to print (0 = disabled)
 	unsigned long		pc_hist_from = 0;	// --pc-hist-from: first sampled instruction
+	bool			have_input = false;	// --input: deterministic scripted console input
+	std::string		input_script;		// the bytes to feed (\\r \\n \\t escapes honoured)
+	uint64_t		input_first = 30000000;	// --input-first: cycle to release byte 0 (after boot)
+	uint64_t		input_step = 200000;	// --input-step: cycles between bytes
 
 	for (int i = 1; i < argc; i++) {
 		if (strncmp(argv[i], "--timeout=", 10) == 0) {
@@ -338,6 +376,30 @@ int main(int argc, char* argv[])
 			slave_path = argv[++i];
 		} else if (strcmp(argv[i], "--aux-pty") == 0) {
 			aux_pty_enable = true;
+		} else if (strncmp(argv[i], "--input=", 8) == 0) {
+			// Deterministic scripted console input. \r \n \t \\ escapes
+			// are decoded so a whole command sequence fits one argument,
+			// e.g. --input='\rUSER1\rload /j0/e1\r'.
+			have_input = true;
+			const char* s = argv[i] + 8;
+			input_script.clear();
+			for (; *s; ++s) {
+				if (*s == '\\' && s[1]) {
+					switch (*++s) {
+					case 'r': input_script.push_back('\r'); break;
+					case 'n': input_script.push_back('\n'); break;
+					case 't': input_script.push_back('\t'); break;
+					case '0': input_script.push_back('\0'); break;
+					default:  input_script.push_back(*s);   break;
+					}
+				} else {
+					input_script.push_back(*s);
+				}
+			}
+		} else if (strncmp(argv[i], "--input-first=", 14) == 0) {
+			input_first = strtoull(argv[i] + 14, nullptr, 0);
+		} else if (strncmp(argv[i], "--input-step=", 13) == 0) {
+			input_step = strtoull(argv[i] + 13, nullptr, 0);
 		} else if (strcmp(argv[i], "-f") == 0 && i + 1 < argc) {
 			fram_path = argv[++i];
 		} else if (argv[i][0] == '-') {
@@ -374,7 +436,16 @@ int main(int argc, char* argv[])
 	const Word	dat_ram_size        = 0x0100;		// 256 bytes
 
 	mc6809		cpu;
-	Terminal	console_term(cpu);
+	// Console ACIA backend: interactive Terminal by default, or a
+	// deterministic cycle-scheduled ScriptTerminal with --input (for
+	// reproducible runs / trace diffs). Both subclass mc6850_impl and
+	// send output to stdout.
+	std::unique_ptr<Terminal>	console_owned;
+	if (have_input)
+		console_owned = std::make_unique<ScriptTerminal>(cpu, input_script, input_first, input_step);
+	else
+		console_owned = std::make_unique<Terminal>(cpu);
+	Terminal&	console_term = *console_owned;
 
 	// Auxiliary ACIA backend: null by default (discards TX, no RX), or a
 	// host pseudo-terminal with --aux-pty so an external program such as
