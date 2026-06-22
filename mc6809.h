@@ -77,23 +77,28 @@ protected:	// Processor registers
 		};
 	};
 
-private:	// internal processor state
+protected:	// internal processor state (visible to the HD6309 subclass)
 	bool			waiting_sync;
 	bool			waiting_cwai;
 	bool			nmi_previous;
 
-private:	// instruction and operand fetch and decode
+protected:	// operand fetch + dispatch (used and/or overridden by HD6309)
 	Word&			ix_refreg(Byte);
-
-	void			fetch_instruction();
 	Byte			fetch_operand();
 	Word			fetch_word_operand();
-	Word			fetch_effective_address();
+	virtual Word		fetch_effective_address();	// HD6309 adds W-index modes
 	Word			fetch_indexed_operand();
-	void			execute_instruction();
-
 	void			do_predecrement();
 	void			do_postincrement();
+
+	virtual void		fetch_instruction();
+	virtual void		execute_instruction();
+	virtual void		illegal_opcode();	// unknown opcode (HD6309 traps)
+	// EXG/TFR are shared opcodes ($1E/$1F) but the HD6309 extends them to a
+	// 16-entry register set, so they must be reachable via virtual dispatch
+	virtual void		exg();
+	virtual void		tfr();
+private:
 
 private:	// instruction implementations
 	void			abx();
@@ -127,7 +132,6 @@ private:	// instruction implementations
 	void			daa();
 	void			deca(), decb(), dec();
 	void			eora(), eorb();
-	void			exg();
 	void			inca(), incb(), inc();
 	void			jmp();
 	void			jsr();
@@ -153,7 +157,6 @@ private:	// instruction implementations
 	void			subd();
 	void			swi(), swi2(), swi3();
 	void			sync();
-	void			tfr();
 	void			tsta(), tstb(), tst();
 
 protected:	// helper functions
@@ -234,8 +237,8 @@ public:
 	Byte			get_cc() const { return (Byte)cc.value; }
 	Byte			get_dp() const { return dp; }
 
-	Byte&			byterefreg(int);
-	Word&			wordrefreg(int);
+	virtual Byte&		byterefreg(int);
+	virtual Word&		wordrefreg(int);
 
 };
 

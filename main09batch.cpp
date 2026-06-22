@@ -43,7 +43,10 @@
 #include <cstring>
 #include <vector>
 
+#include <memory>
+
 #include "mc6809.h"
+#include "hd6309.h"
 #include "mc6850.h"
 #include "batchterm.h"
 #include "haltdev.h"
@@ -53,7 +56,7 @@
 
 static void usage(const char *prog)
 {
-	fprintf(stderr, "usage: %s [--timeout=N] [--cycles] [--trace] [--watch=ADDR]"
+	fprintf(stderr, "usage: %s [--hd6309] [--timeout=N] [--cycles] [--trace] [--watch=ADDR]"
 		" [--brk=ADDR[,ADDR,...]] [--brk-gated] <hexfile>\n", prog);
 	exit(EXIT_FAILURE);
 }
@@ -63,6 +66,7 @@ int main(int argc, char *argv[])
 	unsigned long timeout = 0;
 	bool trace = false;
 	bool report_cycles = false;
+	bool use_hd6309 = false;
 	const char *hexfile = nullptr;
 
 	Word watch_addr = 0;
@@ -93,6 +97,8 @@ int main(int argc, char *argv[])
 			}
 		} else if (strcmp(argv[i], "--brk-gated") == 0) {
 			brk_gated = true;
+		} else if (strcmp(argv[i], "--hd6309") == 0) {
+			use_hd6309 = true;
 		} else if (argv[i][0] == '-') {
 			usage(argv[0]);
 		} else {
@@ -106,7 +112,10 @@ int main(int argc, char *argv[])
 	}
 
 	bool			halted = false;
-	mc6809			cpu;
+	std::unique_ptr<mc6809>	cpup(use_hd6309
+				     ? static_cast<mc6809*>(new hd6309())
+				     : new mc6809());
+	mc6809&			cpu = *cpup;
 	BatchTerminal		term;
 
 	// BRK output is always-on unless --brk-gated is set, in which case

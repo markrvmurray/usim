@@ -76,6 +76,7 @@
 #include <algorithm>
 
 #include "mc6809.h"
+#include "hd6309.h"
 #include "mc6850.h"
 #include "term.h"
 #include "ptyserial.h"
@@ -194,6 +195,7 @@ static void usage(const char* prog)
 		"usage: %s [options] <firmware>\n"
 		"\n"
 		"Options:\n"
+		"  --hd6309            run as an HD6309 (default is MC6809)\n"
 		"  --timeout=N         cap at N instructions (rc 124 on hit)\n"
 		"  --cycles            print total cycles to stderr on exit\n"
 		"  --trace             per-instruction CPU trace\n"
@@ -283,6 +285,7 @@ int main(int argc, char* argv[])
 	std::vector<Word>	brk_addrs;
 	bool			brk_gated = false;
 	bool			aux_pty_enable = false;	// --aux-pty: PTY-back the aux ACIA
+	bool			use_hd6309 = false;	// --hd6309: run as an HD6309
 	unsigned		pc_hist_top = 0;	// --pc-hist: top clusters to print (0 = disabled)
 	unsigned long		pc_hist_from = 0;	// --pc-hist-from: first sampled instruction
 	bool			have_input = false;	// --input: deterministic scripted console input
@@ -376,6 +379,8 @@ int main(int argc, char* argv[])
 			slave_path = argv[++i];
 		} else if (strcmp(argv[i], "--aux-pty") == 0) {
 			aux_pty_enable = true;
+		} else if (strcmp(argv[i], "--hd6309") == 0) {
+			use_hd6309 = true;
 		} else if (strncmp(argv[i], "--input=", 8) == 0) {
 			// Deterministic scripted console input. \r \n \t \\ escapes
 			// are decoded so a whole command sequence fits one argument,
@@ -435,7 +440,10 @@ int main(int argc, char* argv[])
 	const size_t	physical_ram_size   = 2 * 1024 * 1024;	// 2MB
 	const Word	dat_ram_size        = 0x0100;		// 256 bytes
 
-	mc6809		cpu;
+	std::unique_ptr<mc6809>	cpu_owned(use_hd6309
+				     ? static_cast<mc6809*>(new hd6309())
+				     : new mc6809());
+	mc6809&		cpu = *cpu_owned;
 	// Console ACIA backend: interactive Terminal by default, or a
 	// deterministic cycle-scheduled ScriptTerminal with --input (for
 	// reproducible runs / trace diffs). Both subclass mc6850_impl and

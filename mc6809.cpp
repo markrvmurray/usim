@@ -458,8 +458,15 @@ void mc6809::execute_instruction()
 		case 0x1029:
 			lbvs(); break;
 		default:
-			invalid("invalid instruction");
+			illegal_opcode();
 	}
+}
+
+// Called for an unrecognised opcode. The base aborts via invalid(); the
+// HD6309 overrides this to take the illegal-instruction trap instead.
+void mc6809::illegal_opcode()
+{
+	invalid("invalid instruction");
 }
 
 void mc6809::print_regs()
@@ -716,8 +723,8 @@ static std::string disasm_reglist(Byte w, const char *other_sr)
 static std::string disasm_regpair(Byte w)
 {
 	static const char* regnames[] = {
-		"D", "X", "Y", "U", "S", "PC", "", "",
-		"A", "B", "CC", "DP", "", "", "", ""
+		"D", "X", "Y", "U", "S", "PC", "W", "V",
+		"A", "B", "CC", "DP", "0", "0", "E", "F"
 	};
 
 	int r1 = (w & 0xf0) >> 4;

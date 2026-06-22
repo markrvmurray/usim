@@ -15,12 +15,13 @@ LDFLAGS		=
 
 LIB_SRCS	= usim.cpp memory.cpp \
 		  mc6809.cpp mc6809in.cpp \
+		  hd6309.cpp hd6309in.cpp \
 		  mc6850.cpp \
 		  picotick.cpp picoide.cpp picofram.cpp \
 		  system_watchpoint.cpp
 
 OBJS		= $(LIB_SRCS:.cpp=.o)
-BIN		= usim09 usim09batch usim09pt tests/test6809
+BIN		= usim09 usim09batch usim09pt tests/test6809 tests/test6309
 
 LIB		= libusim.a
 
@@ -44,6 +45,21 @@ tests/test6809.o: tests/test6809.cpp
 
 tests/test6809.bin: tests/test6809.asm
 	asm6809 -B -o $(@) $(<)
+
+tests/test6309: $(LIB) tests/test6309.o
+	$(CXX) $(CCFLAGS) $(LDFLAGS) tests/test6309.o -L. -lusim -o $(@)
+
+tests/test6309.o: tests/test6309.cpp
+	$(CXX) $(CPPFLAGS) $(CCFLAGS) -c tests/test6309.cpp -o $(@)
+
+# Assembled with lwtools' lwasm (6309 mode is its default). Raw format
+# zero-fills the gap between the code at $0400 and the vectors at $fffe.
+tests/test6309.bin: tests/test6309.asm
+	lwasm --6309 --format=raw -o $(@) $(<)
+
+.PHONY: test6309
+test6309: tests/test6309 tests/test6309.bin
+	./tests/test6309
 
 .PHONY: test
 test: tests/test6809 tests/test6809.bin

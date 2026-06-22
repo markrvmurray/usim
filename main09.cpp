@@ -20,7 +20,11 @@
 #include <csignal>
 #include <unistd.h>
 
+#include <cstring>
+#include <memory>
+
 #include "mc6809.h"
+#include "hd6309.h"
 #include "mc6850.h"
 #include "term.h"
 #include "memory.h"
@@ -28,8 +32,20 @@
 
 int main(int argc, char *argv[])
 {
-	if (argc != 2) {
-		fprintf(stderr, "usage: usim09 <hexfile>\n");
+	bool use_hd6309 = false;
+	const char *hexfile = nullptr;
+	for (int i = 1; i < argc; ++i) {
+		if (strcmp(argv[i], "--hd6309") == 0) {
+			use_hd6309 = true;
+		} else if (argv[i][0] != '-' && !hexfile) {
+			hexfile = argv[i];
+		} else {
+			hexfile = nullptr;
+			break;
+		}
+	}
+	if (!hexfile) {
+		fprintf(stderr, "usage: usim09 [--hd6309] <hexfile>\n");
 		return EXIT_FAILURE;
 	}
 
@@ -39,7 +55,10 @@ int main(int argc, char *argv[])
 	const Word rom_base = 0xe000;
 	const Word rom_size = 0x10000 - rom_base;
 
-	mc6809			cpu;
+	std::unique_ptr<mc6809>	cpup(use_hd6309
+				     ? static_cast<mc6809*>(new hd6309())
+				     : new mc6809());
+	mc6809&			cpu = *cpup;
 	Terminal 		term(cpu);
 
 	auto ram        = std::make_shared<RAM>(ram_size);
@@ -72,17 +91,17 @@ int main(int argc, char *argv[])
 	//   'S'  → Motorola S-record
 	//   ':'  → Intel HEX (the historical default)
 	{
-		FILE *probe = fopen(argv[1], "rb");
-		if (!probe) { perror(argv[1]); return EXIT_FAILURE; }
+		FILE *probe = fopen(hexfile, "rb");
+		if (!probe) { perror(hexfile); return EXIT_FAILURE; }
 		unsigned char magic[4] = {0};
 		(void)fread(magic, 1, 4, probe);
 		fclose(probe);
 		if (magic[0] == 0x7F && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F') {
-			rom->load_elf(argv[1], rom_base);
+			rom->load_elf(hexfile, rom_base);
 		} else if (magic[0] == 'S') {
-			rom->load_srec(argv[1], rom_base);
+			rom->load_srec(hexfile, rom_base);
 		} else {
-			rom->load_intelhex(argv[1], rom_base);
+			rom->load_intelhex(hexfile, rom_base);
 		}
 	}
 
