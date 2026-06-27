@@ -10,7 +10,10 @@ DEBUG		= -g -O2
 CXX		= g++ --std=c++20 -Wall -Wextra -Werror
 CC		= gcc --std=c9x -Wall -Werror
 CCFLAGS		= $(DEBUG)
-CPPFLAGS	= -D_POSIX_SOURCE -I.
+# -MMD -MP makes the compiler emit a .d file beside every .o listing the
+# headers it included (-MP adds phony targets so deleting a header doesn't
+# break the build). These are -include'd at the foot of this file.
+CPPFLAGS	= -D_POSIX_SOURCE -I. -MMD -MP
 LDFLAGS		=
 
 LIB_SRCS	= usim.cpp memory.cpp \
@@ -121,42 +124,13 @@ cycles: usim09batch tests/test_main.hex
 
 .PHONY: clean
 clean:
-	$(RM) $(BIN) $(LIB) *.o tests/test_mmu_tick tests/*.o tests/test6809.bin tests/test_system_watchpoint tests/test_picoide
+	$(RM) $(BIN) $(LIB) *.o *.d tests/test_mmu_tick tests/*.o tests/*.d tests/test6809.bin tests/test_system_watchpoint tests/test_picoide
 
-.PHONY: depend
-depend:
-	makedepend 	$(LIB_SRCS) main.cpp term.cpp
-
-# Manually defined dependencies
-
-usim.o: usim.h device.h typedefs.h memory.h wiring.h
-usim.o: bits.h
-mc6809.o: mc6809.h wiring.h usim.h device.h typedefs.h
-mc6809.o: memory.h bits.h
-mc6809in.o: mc6809.h wiring.h usim.h device.h typedefs.h
-mc6809in.o: memory.h bits.h
-mc6850.o: mc6850.h device.h typedefs.h wiring.h bits.h
-memory.o: memory.h device.h typedefs.h
-picotick.o: picotick.h device.h typedefs.h wiring.h bits.h
-picoide.o: picoide.h device.h typedefs.h
-picofram.o: picofram.h device.h typedefs.h
-system_watchpoint.o: system_watchpoint.h device.h typedefs.h wiring.h mc6809.h
-main.o: mc6809.h wiring.h usim.h device.h
-main.o: typedefs.h memory.h bits.h mc6850.h
-main.o: term.h
-main09.o: mc6809.h wiring.h usim.h device.h
-main09.o: typedefs.h memory.h bits.h mc6850.h
-main09.o: term.h system_watchpoint.h
-term.o: term.h mc6850.h device.h typedefs.h wiring.h
-ptyserial.o: ptyserial.h mc6850.h device.h typedefs.h wiring.h
-batchterm.o: batchterm.h mc6850.h device.h typedefs.h wiring.h
-main09batch.o: mc6809.h wiring.h usim.h device.h
-main09batch.o: typedefs.h memory.h bits.h mc6850.h
-main09batch.o: batchterm.h haltdev.h system_watchpoint.h
-main_picothing.o: mc6809.h wiring.h usim.h device.h
-main_picothing.o: typedefs.h memory.h bits.h mc6850.h
-main_picothing.o: term.h ptyserial.h picotask.h picotick.h picoide.h picofram.h
-main_picothing.o: tracectl.h system_watchpoint.h
-
-# DO NOT DELETE THIS LINE -- make depend depends on it.
+# Compiler-generated header dependencies (see CPPFLAGS -MMD -MP). Pulling
+# these in means editing any header recompiles exactly the objects that
+# include it — directly or transitively. This replaces the old hand-kept
+# `make depend` list, which went stale: it never tracked hd6309.h / mc6809.h
+# across the subclass and the three mains, so a header edit left stale
+# objects and the next link produced a vtable/ABI mismatch (segfault).
+-include $(wildcard *.d tests/*.d)
 
