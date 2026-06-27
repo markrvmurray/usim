@@ -654,8 +654,7 @@ void hd6309::ef_inh(Byte& reg, bool isF)
 void hd6309::trap(Byte md_bit)
 {
 	md |= md_bit;
-	cc.e = 1;
-	help_psh(0xff, s, u);
+	psh_state(s, u);	// entire frame (incl E/F in native mode); sets CC.E
 	pc = read_word(vector_reserved);
 	cycles += 12;
 }

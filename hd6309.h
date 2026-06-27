@@ -67,6 +67,19 @@ protected:	// dispatch overrides (extend the base, delegate everything shared)
 	virtual void		exg() override;
 	virtual void		tfr() override;
 
+	// In native mode the HD6309 stacks the FULL machine state on an
+	// interrupt/SWI - including E and F - so the frame is 14 bytes
+	// (CC,A,B,E,F,DP,X,Y,U,PC) rather than the 6809's 12.  RTI pops the
+	// matching frame.  Emulation mode keeps the 6809 12-byte frame.
+	void			psh_state(Word& sp, Word& usp);	// entire-frame push
+	virtual void		swi() override;
+	virtual void		swi2() override;
+	virtual void		swi3() override;
+	virtual void		rti() override;
+	virtual void		cwai() override;
+	virtual void		do_irq() override;
+	virtual void		do_nmi() override;
+
 protected:	// HD6309 register-selector access (value semantics, 16-entry)
 	Word			read_exgtfr(Byte sel);
 	void			write_exgtfr(Byte sel, Word val);

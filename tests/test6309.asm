@@ -548,6 +548,35 @@ ill_handler
             lbne  fail
 
 ; ---------------------------------------------------------------------
+; test 20: interrupt frame stacks E/F in native mode, not in emulation
+; ---------------------------------------------------------------------
+            lda   #20
+            sta   RESULT
+            ldx   #t20_swi
+            stx   $fffa             ; SWI vector
+            lds   #STACK_TOP
+            ldmd  #1                ; native -> entire frame includes E/F
+            ldw   #$1234            ; E=$12 F=$34
+            swi                     ; stacks CC,A,B,E,F,DP,X,Y,U,PC
+            tfr   w,d               ; handler clobbered W; native RTI restores it
+            cmpd  #$1234
+            lbne  t20_fail
+            ldmd  #0                ; emulation -> 12-byte frame, no E/F
+            ldw   #$abcd
+            swi                     ; handler sets W=$beef; emul RTI won't restore
+            tfr   w,d
+            cmpd  #$beef
+            lbne  t20_fail
+            ldmd  #0
+            lbra  t20_done
+t20_swi
+            ldw   #$beef            ; clobber W inside the handler
+            rti
+t20_fail
+            lbra  fail
+t20_done
+
+; ---------------------------------------------------------------------
 ; all tests passed
 ; ---------------------------------------------------------------------
 pass

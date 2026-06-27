@@ -128,7 +128,7 @@ private:	// instruction implementations
 	void			cmpa(), cmpb();
 	void			cmpd(), cmpx(), cmpy(), cmpu(), cmps();
 	void			coma(), comb(), com();
-	void			cwai();
+	virtual void		cwai();
 	void			daa();
 	void			deca(), decb(), dec();
 	void			eora(), eorb();
@@ -148,14 +148,17 @@ private:	// instruction implementations
 	void			puls(), pulu();
 	void			rola(), rolb(), rol();
 	void			rora(), rorb(), ror();
-	void			rti(), rts();
+	virtual void		rti();
+	void			rts();
 	void			sbca(), sbcb();
 	void			sex();
 	void			sta(), stb();
 	void			std(), stx(), sty(), sts(), stu();
 	void			suba(), subb();
 	void			subd();
-	void			swi(), swi2(), swi3();
+	virtual void		swi();
+	virtual void		swi2();
+	virtual void		swi3();
 	void			sync();
 	void			tsta(), tstb(), tst();
 

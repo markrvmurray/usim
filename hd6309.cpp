@@ -123,20 +123,120 @@ void hd6309::illegal_opcode()
 	trap(md_illegal);
 }
 
+// Push the entire register state for an interrupt or SWI.  In native mode
+// the HD6309 stacks E and F as well, inserting them between B and DP so the
+// frame matches OS-9's 14-byte register image (CC,A,B,E,F,DP,X,Y,U,PC).  In
+// emulation mode this is exactly the 6809 12-byte frame.  Sets the entire
+// (E) flag in the saved CC, like the base 6809 interrupt sequence.
+void hd6309::psh_state(Word& sp, Word& usp)
+{
+	cc.e = 1;
+	do_psh(sp, pc);
+	do_psh(sp, usp);
+	do_psh(sp, y);
+	do_psh(sp, x);
+	do_psh(sp, dp);
+	if (native()) {
+		do_psh(sp, f);
+		do_psh(sp, e);
+	}
+	do_psh(sp, b);
+	do_psh(sp, a);
+	do_psh(sp, cc.value);
+}
+
 // FIRQ normally stacks only PC and CC (the fast frame). When MD bit 1 is
 // set the HD6309 stacks the entire register state instead, like IRQ.
 void hd6309::do_firq()
 {
 	if (firq_entire()) {
 		if (!waiting_cwai) {
-			cc.e = 1;
-			help_psh(0xff, s, u);
+			psh_state(s, u);
 		}
 		cc.f = cc.i = 1;
 		pc = read_word(vector_firq);
 	} else {
 		mc6809::do_firq();
 	}
+}
+
+void hd6309::do_irq()
+{
+	if (!waiting_cwai) {
+		psh_state(s, u);
+	}
+	cc.f = cc.i = 1;
+	pc = read_word(vector_irq);
+}
+
+void hd6309::do_nmi()
+{
+	if (!waiting_cwai) {
+		psh_state(s, u);
+	}
+	cc.f = cc.i = 1;
+	pc = read_word(vector_nmi);
+}
+
+void hd6309::swi()
+{
+	insn = "SWI";
+	psh_state(s, u);
+	cc.f = cc.i = 1;
+	pc = read_word(vector_swi);
+	cycles += 4;
+}
+
+void hd6309::swi2()
+{
+	insn = "SWI2";
+	psh_state(s, u);
+	pc = read_word(vector_swi2);
+	cycles += 4;
+}
+
+void hd6309::swi3()
+{
+	insn = "SWI3";
+	psh_state(s, u);
+	pc = read_word(vector_swi3);
+	cycles += 4;
+}
+
+// Pop the matching interrupt/SWI frame.  In native mode an entire-state
+// frame (CC.E set) includes E and F between B and DP.
+void hd6309::rti()
+{
+	insn = "RTI";
+	do_pul(s, cc.value);
+	if (cc.e) {
+		do_pul(s, a);
+		do_pul(s, b);
+		if (native()) {
+			do_pul(s, e);
+			do_pul(s, f);
+		}
+		do_pul(s, dp);
+		do_pul(s, x);
+		do_pul(s, y);
+		do_pul(s, u);
+		do_pul(s, pc);
+	} else {
+		do_pul(s, pc);
+	}
+	cycles += 2;
+}
+
+// CWAI pre-stacks the entire frame and waits for an interrupt; in native
+// mode that frame includes E and F, matching psh_state / rti.
+void hd6309::cwai()
+{
+	insn = "CWAI";
+	Byte n = fetch_operand();
+	cc.value &= n;
+	psh_state(s, u);	// entire frame (incl E/F in native mode); sets CC.E
+	cycles += 2;
+	waiting_cwai = true;
 }
 
 void hd6309::execute_instruction()
