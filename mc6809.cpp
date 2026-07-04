@@ -780,6 +780,31 @@ std::string mc6809::disasm_indexed()
 			return fmt("%d,PCR", (int16_t)operand, reg);
 		case 0x1f:			// ,Address
 			return fmt(",$%04hx", (int16_t)operand);
+		// HD6309 accumulator-offset and W-base modes. Printed by the
+		// shared disassembler so a 6309 --trace doesn't abort the run
+		// (execution-side support lives in hd6309::fetch_effective_
+		// address; on a plain 6809 these postbytes remain illegal to
+		// EXECUTE, but a readable trace line beats an abort).
+		case 0x07: case 0x17:		// ,R + E
+			return fmt("E,%c", reg);
+		case 0x0a: case 0x1a:		// ,R + F
+			return fmt("F,%c", reg);
+		case 0x0e: case 0x1e:		// ,R + W
+			return fmt("W,%c", reg);
+		case 0x0f:			// W-base, non-indirect
+			switch ((post >> 5) & 3) {
+				case 0: return ",W";
+				case 1: return fmt("%d,W", (int16_t)operand);
+				case 2: return ",W++";
+				default: return ",--W";
+			}
+		case 0x10:			// W-base, indirect
+			switch ((post >> 5) & 3) {
+				case 0: return "[,W]";
+				case 1: return fmt("[%d,W]", (int16_t)operand);
+				case 2: return "[,W++]";
+				default: return "[,--W]";
+			}
 		default:
 			invalid("indirect addressing postbyte");
 			return "";
