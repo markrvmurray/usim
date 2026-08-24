@@ -46,8 +46,12 @@ tests/test6809: $(LIB) tests/test6809.o
 tests/test6809.o: tests/test6809.cpp
 	$(CXX) $(CPPFLAGS) $(CCFLAGS) -c tests/test6809.cpp -o $(@)
 
+# rawrel writes each byte at its own address, so the image spans the
+# whole space and carries the vectors at $$fff0 -- which raw does not,
+# and which is why the 6309 image has to have its reset vector poked
+# in by hand. Built with lwasm so the tree needs one assembler.
 tests/test6809.bin: tests/test6809.asm
-	asm6809 -B -o $(@) $(<)
+	lwasm --6809 --format=rawrel -o $(@) $(<)
 
 tests/test6309: $(LIB) tests/test6309.o
 	$(CXX) $(CCFLAGS) $(LDFLAGS) tests/test6309.o -L. -lusim -o $(@)

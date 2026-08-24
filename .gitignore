@@ -13,4 +13,5 @@ tests/test_system_watchpoint
 tests/test_picoide
 tests/test6309
 tests/test6309.bin
+tests/test6809.bin
 **/*.dSYM

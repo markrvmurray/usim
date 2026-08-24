@@ -3,7 +3,8 @@
 // Functional test runner for the MC6809 emulator.
 //
 // The test binary covers addresses $0400–$FFFF (64512 bytes).
-// It is loaded at $0400; the rest of RAM is zero.
+// The image spans the whole address space, so it carries its own
+// interrupt vectors at $fff0.
 // Success is indicated by the CPU trapping at the 'pass' label.
 // Any other trap address indicates a test failure.
 //
@@ -46,14 +47,15 @@ int main(int argc, char *argv[])
 	auto ram = std::make_shared<RAM>(0x10000);
 	cpu.attach(ram, 0x0000, 0x0000);
 
-	// load binary at $0400
+	// load the image: rawrel spans the whole address space,
+	// so a byte's file offset is its address
 	{
 		FILE *f = fopen(binfile, "rb");
 		if (!f) {
 			fprintf(stderr, "error: cannot open %s\n", binfile);
 			return EXIT_FAILURE;
 		}
-		Word addr = 0x0400;
+		Word addr = 0x0000;
 		int ch;
 		while ((ch = fgetc(f)) != EOF) {
 			cpu.write(addr++, (Byte)ch);

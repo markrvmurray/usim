@@ -663,11 +663,11 @@ test_lea
 
 		; LEAX clears Z when result = 0
 		ldx	#$0000
-		leax	0,x
+		leax	,x
 		lbne	fail
 
 		ldx	#$0001
-		leax	0,x
+		leax	,x
 		lbeq	fail
 
 		lds	#STACK_TOP
