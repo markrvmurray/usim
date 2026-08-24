@@ -106,7 +106,7 @@ static void test_datram_fixed_window_routes_to_phys_base()
 	CHECK(dat.read_physical(0x1FFDFF) == 0x5A);
 
 	// And the read path goes through the same translation.
-	dat.write_physical(0x1E100, 0x42);
+	dat.write_physical(0x1FE100, 0x42);
 	CHECK(dat.read(0xE100) == 0x42);
 }
 
