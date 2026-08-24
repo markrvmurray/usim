@@ -818,7 +818,9 @@ void hd6309::tfm()
 			case 3:           ++(*dst); break;	// R0,R1+
 		}
 		--w;
-		cycles += 3;
+		// 3 a byte, of which the read and the write have each
+		// already charged one.
+		cycles += 1;
 	}
 	cycles += 3;
 }
