@@ -675,7 +675,9 @@ void hd6309::muld()
 	cc.z = (result == 0);
 	cc.v = 0;
 	cc.c = 0;
-	cycles += 28;
+	// 28 immediate, less the four bytes fetch_word_operand and the
+	// opcode have already charged.
+	cycles += 24;
 }
 
 void hd6309::divd()
@@ -704,7 +706,8 @@ void hd6309::divd()
 	} else {
 		cc.v = 0;
 	}
-	cycles += 25;
+	// 25 immediate, less the three bytes already charged.
+	cycles += 22;
 }
 
 void hd6309::divq()
@@ -733,7 +736,8 @@ void hd6309::divq()
 	} else {
 		cc.v = 0;
 	}
-	cycles += 35;
+	// 35 immediate, less the four bytes already charged.
+	cycles += 31;
 }
 
 //---------------------------------------------------------------------

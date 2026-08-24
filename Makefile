@@ -141,8 +141,13 @@ cycles: usim09batch samples/test_main.hex
 # moves. A mistimed 6309 instruction moves this number while every
 # functional check still passes, which is exactly how TFM came to
 # charge 6+5n cycles instead of 6+3n unnoticed: putting that back
-# reads 2319 here.
-EXPECTED_CYCLES_6309 = 2311
+# reads 2304 here.
+#
+# It moved from 2311 to 2296 when MULD, DIVD and DIVQ stopped adding
+# their whole documented figure on top of the operand fetches they
+# had already charged. That is the gate working: a deliberate timing
+# correction has to be acknowledged here before it can land.
+EXPECTED_CYCLES_6309 = 2296
 
 .PHONY: cycles6309
 cycles6309: tests/test6309 tests/test6309.bin
