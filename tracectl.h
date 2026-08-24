@@ -11,12 +11,24 @@
 //	  0x00  disable all
 //	  0x01  enable --brk output
 //	  0x02  enable --trace (and --brk)
+//	  0x04  start counting cycles
+//	  0x05  stop counting cycles
 //	Other values are no-ops.
+//
+//	The counter accumulates the cycles between each 0x04 and the
+//	0x05 that follows it, so a program can total the cost of one
+//	region across many visits to it and leave everything else out.
+//	It samples the CPU's own count at the two edges and so costs
+//	nothing while it runs; what it does include is part of the
+//	store that opens the window and part of the one that closes it,
+//	a fixed overhead a null window measures exactly.
 //
 //	vim: ts=8
 //
 
 #pragma once
+
+#include <cstdint>
 
 #include "device.h"
 #include "mc6809.h"
@@ -25,8 +37,15 @@ class TraceCtl : public MappedDevice {
 
 	mc6809&			cpu;
 	bool*			brk_enabled;
+	uint64_t		gated = 0;
+	uint64_t		windows = 0;
+	uint64_t		opened_at = 0;
+	bool			counting = false;
 
 public:
+	uint64_t		gated_cycles() const { return gated; }
+	uint64_t		gated_windows() const { return windows; }
+
 	virtual Byte		read(Word offset) {
 					(void)offset;
 					return 0;
@@ -45,6 +64,18 @@ public:
 					case 0x02:
 						if (brk_enabled) *brk_enabled = true;
 						cpu.tron();
+						break;
+					case 0x04:
+						opened_at = cpu.get_total_cycles();
+						counting = true;
+						break;
+					case 0x05:
+						if (counting) {
+							gated += cpu.get_total_cycles()
+								- opened_at;
+							++windows;
+							counting = false;
+						}
 						break;
 					default:
 						break;

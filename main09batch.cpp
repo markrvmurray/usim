@@ -14,7 +14,8 @@
 //	  0xFFC4-0xFFC5  ACIA (status/data) — PT's "console ACIA" slot
 //	  0xFFC6-0xFFC9  RAM (no devices wired)
 //	  0xFFCA         SystemWatchpoint control register
-//	  0xFFCB         TraceCtl (--brk-gated toggle, --trace toggle)
+//	  0xFFCB         TraceCtl (--brk-gated toggle, --trace toggle,
+//	                 gated cycle counter)
 //	  0xFFCC         Halt/exit device (written value = exit code) —
 //	                 emulator-only; PT has nothing here
 //	  0xFFCD-0xFFDF  RAM
@@ -59,6 +60,18 @@ static void usage(const char *prog)
 	fprintf(stderr, "usage: %s [--hd6309] [--timeout=N] [--cycles] [--trace] [--watch=ADDR]"
 		" [--brk=ADDR[,ADDR,...]] [--brk-gated] <hexfile>\n", prog);
 	exit(EXIT_FAILURE);
+}
+
+// Report what the program asked to be counted, if it asked at all.
+// A run that never pokes $FFCB says nothing, so --cycles keeps its
+// old single-line output for every existing caller.
+static void report_gated(const TraceCtl& tc)
+{
+	if (tc.gated_windows() == 0)
+		return;
+	fprintf(stderr, "gated=%llu windows=%llu\n",
+		(unsigned long long)tc.gated_cycles(),
+		(unsigned long long)tc.gated_windows());
 }
 
 int main(int argc, char *argv[])
@@ -255,6 +268,7 @@ int main(int argc, char *argv[])
 			if (report_cycles) {
 				fprintf(stderr, "cycles=%llu\n",
 					(unsigned long long)cpu.get_total_cycles());
+				report_gated(*tracectl);
 			}
 			fprintf(stderr, "usim09batch: timeout after %lu instructions\n", timeout);
 			// rc 124 follows GNU `timeout(1)` convention so test
@@ -269,6 +283,7 @@ int main(int argc, char *argv[])
 	if (report_cycles) {
 		fprintf(stderr, "cycles=%llu\n",
 			(unsigned long long)cpu.get_total_cycles());
+		report_gated(*tracectl);
 	}
 	return halt->getExitCode();
 }
