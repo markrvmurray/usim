@@ -69,9 +69,13 @@ static void report_gated(const TraceCtl& tc)
 {
 	if (tc.gated_windows() == 0)
 		return;
-	fprintf(stderr, "gated=%llu windows=%llu\n",
+	fprintf(stderr, "gated=%llu windows=%llu",
 		(unsigned long long)tc.gated_cycles(),
 		(unsigned long long)tc.gated_windows());
+	if (tc.counts_instructions())
+		fprintf(stderr, " gatedinsn=%llu",
+			(unsigned long long)tc.gated_instructions());
+	fprintf(stderr, "\n");
 }
 
 int main(int argc, char *argv[])
@@ -220,8 +224,11 @@ int main(int argc, char *argv[])
 	}
 
 	bool stepping = (timeout > 0) || !brk_addrs.empty();
+	unsigned long count = 0;
 	if (stepping) {
-		unsigned long count = 0;
+		// Only a stepped run counts instructions, so only a
+		// stepped run offers them to the gated counter.
+		tracectl->count_instructions(&count);
 		while (!halted && (timeout == 0 || count < timeout)) {
 			// Brk: dump full register state when PC is about to
 			// execute one of the listed addresses. Print BEFORE
