@@ -90,6 +90,7 @@ test: tests/test6809 tests/test6809.bin tests/test6309 tests/test6309.bin \
 	./tests/test_system_watchpoint
 	./tests/test_picoide
 	@$(MAKE) --no-print-directory cycles
+	@$(MAKE) --no-print-directory cycles6309
 
 tests/test_mmu_tick: tests/test_mmu_tick.cpp $(LIB)
 	$(CXX) $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_mmu_tick.cpp -L. -lusim -o $(@)
@@ -129,6 +130,27 @@ cycles: usim09batch samples/test_main.hex
 		echo "cycles: OK ($(EXPECTED_CYCLES))"; \
 	else \
 		echo "cycles: DRIFT — expected $(EXPECTED_CYCLES), got $$actual"; \
+		exit 1; \
+	fi
+
+# The same gate for the HD6309, which the one above cannot cover: it
+# runs the 6809 model, so no 6309-only instruction is timed by it.
+#
+# The functional suite doubles as the workload, since it already
+# reaches TFM, MULD, DIVD, BAND, ADDR/SUBR, SEXW and the Q and W
+# moves. A mistimed 6309 instruction moves this number while every
+# functional check still passes, which is exactly how TFM came to
+# charge 6+5n cycles instead of 6+3n unnoticed: putting that back
+# reads 2319 here.
+EXPECTED_CYCLES_6309 = 2311
+
+.PHONY: cycles6309
+cycles6309: tests/test6309 tests/test6309.bin
+	@actual=$$(./tests/test6309 | sed -n 's/.*cycles=//p'); \
+	if [ "$$actual" = "$(EXPECTED_CYCLES_6309)" ]; then \
+		echo "cycles6309: OK ($(EXPECTED_CYCLES_6309))"; \
+	else \
+		echo "cycles6309: DRIFT — expected $(EXPECTED_CYCLES_6309), got $$actual"; \
 		exit 1; \
 	fi
 

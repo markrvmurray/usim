@@ -76,7 +76,12 @@ int main(int argc, char *argv[])
 
 	Byte result = cpu.read(RESULT_ADDR);
 	if (result == RESULT_PASS) {
-		printf("PASS (PC=%04X)\n", cpu.trap_pc);
+		// The cycle total is a gate of its own: the suite reaches
+		// TFM, MULD, DIVD, BAND, ADDR/SUBR and the Q and W moves,
+		// so a mistimed 6309 instruction moves this number even
+		// though every functional check still passes.
+		printf("PASS (PC=%04X) cycles=%llu\n", cpu.trap_pc,
+		       (unsigned long long)cpu.get_total_cycles());
 		return EXIT_SUCCESS;
 	}
 
