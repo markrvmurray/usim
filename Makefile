@@ -64,10 +64,6 @@ tests/test6309.bin: tests/test6309.asm
 test6309: tests/test6309 tests/test6309.bin
 	./tests/test6309
 
-.PHONY: test
-test: tests/test6809 tests/test6809.bin
-	tests/test6809
-
 usim09batch: $(LIB) main09batch.o batchterm.o
 	$(CXX) $(CCFLAGS) $(LDFLAGS) main09batch.o batchterm.o -L. -lusim -o $(@)
 
@@ -79,8 +75,13 @@ usim09pt: $(LIB) main_picothing.o term.o ptyserial.o
 .cpp.o:
 	$(CXX) $(CPPFLAGS) $(CCFLAGS) -c $<
 
+# One target: a second definition of test would override this one
+# silently, which is how the CPU suites came to stop running.
 .PHONY: test
-test: tests/test_mmu_tick tests/test_system_watchpoint tests/test_picoide
+test: tests/test6809 tests/test6809.bin tests/test6309 tests/test6309.bin \
+      tests/test_mmu_tick tests/test_system_watchpoint tests/test_picoide
+	./tests/test6809
+	./tests/test6309
 	./tests/test_mmu_tick
 	./tests/test_system_watchpoint
 	./tests/test_picoide
@@ -97,7 +98,7 @@ tests/test_picoide: tests/test_picoide.cpp $(LIB)
 
 # Cycle-count regression gate.
 #
-# `usim09batch --timeout=1000000 --cycles tests/test_main.hex` is
+# `usim09batch --timeout=1000000 --cycles samples/test_main.hex` is
 # expected to report exactly EXPECTED_CYCLES on stderr. The number
 # comes from the simulated CPU model (per-instruction cycle counts
 # the mc6809 emits), so host compiler / optimisation level can't
@@ -110,11 +111,16 @@ tests/test_picoide: tests/test_picoide.cpp $(LIB)
 # `make cycles` runs the gate standalone (exits non-zero on drift,
 # prints expected vs actual); `make test` invokes it after the unit
 # tests.
-EXPECTED_CYCLES = 3333356
+#
+# The figure was one short of what the model has ever produced, and
+# named a path that had already moved when the gate was written, so
+# the gate had never once run. Both are corrected here; 3333357 is
+# what every commit back to the gate's own produces.
+EXPECTED_CYCLES = 3333357
 
 .PHONY: cycles
-cycles: usim09batch tests/test_main.hex
-	@actual=$$(./usim09batch --timeout=1000000 --cycles tests/test_main.hex 2>&1 | sed -n 's/^cycles=//p'); \
+cycles: usim09batch samples/test_main.hex
+	@actual=$$(./usim09batch --timeout=1000000 --cycles samples/test_main.hex 2>&1 | sed -n 's/^cycles=//p'); \
 	if [ "$$actual" = "$(EXPECTED_CYCLES)" ]; then \
 		echo "cycles: OK ($(EXPECTED_CYCLES))"; \
 	else \
