@@ -37,6 +37,7 @@
 //
 //	BatchTerminal (unbuffered stdio, no termios)
 //	--timeout=N instruction count limit
+//	--profile=FILE write cycles and instruction counts per address
 //
 
 #include <cstdlib>
@@ -58,7 +59,7 @@
 static void usage(const char *prog)
 {
 	fprintf(stderr, "usage: %s [--hd6309] [--timeout=N] [--cycles] [--trace] [--watch=ADDR]"
-		" [--brk=ADDR[,ADDR,...]] [--brk-gated] <hexfile>\n", prog);
+		" [--brk=ADDR[,ADDR,...]] [--brk-gated] [--profile=FILE] <hexfile>\n", prog);
 	exit(EXIT_FAILURE);
 }
 
@@ -90,6 +91,7 @@ int main(int argc, char *argv[])
 	bool watching = false;
 	std::vector<Word> brk_addrs;
 	bool brk_gated = false;
+	const char *profile_file = nullptr;
 
 	// Parse arguments
 	for (int i = 1; i < argc; ++i) {
@@ -114,6 +116,8 @@ int main(int argc, char *argv[])
 			}
 		} else if (strcmp(argv[i], "--brk-gated") == 0) {
 			brk_gated = true;
+		} else if (strncmp(argv[i], "--profile=", 10) == 0) {
+			profile_file = argv[i] + 10;
 		} else if (strcmp(argv[i], "--hd6309") == 0) {
 			use_hd6309 = true;
 		} else if (argv[i][0] == '-') {
@@ -223,7 +227,27 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "WATCH: $%04X initial=%02X\n", watch_addr, watch_prev);
 	}
 
-	bool stepping = (timeout > 0) || !brk_addrs.empty();
+	// --profile: cycles and instructions charged to the address of
+	// each instruction executed, written at exit as "ADDR cycles count"
+	// lines. A map file folds them by routine. Implies stepping.
+	std::vector<uint64_t> prof_cycles, prof_count;
+	if (profile_file) {
+		prof_cycles.assign(0x10000, 0);
+		prof_count.assign(0x10000, 0);
+	}
+	auto write_profile = [&]() {
+		if (!profile_file) return;
+		FILE *pf = fopen(profile_file, "w");
+		if (!pf) { perror(profile_file); return; }
+		for (unsigned a = 0; a < 0x10000; a++)
+			if (prof_count[a])
+				fprintf(pf, "%04X %llu %llu\n", a,
+					(unsigned long long)prof_cycles[a],
+					(unsigned long long)prof_count[a]);
+		fclose(pf);
+	};
+
+	bool stepping = (timeout > 0) || !brk_addrs.empty() || profile_file;
 	unsigned long count = 0;
 	if (stepping) {
 		// Only a stepped run counts instructions, so only a
@@ -252,7 +276,13 @@ int main(int argc, char *argv[])
 					}
 				}
 			}
+			Word prof_pc = cpu.get_pc();
+			uint64_t prof_before = cpu.get_total_cycles();
 			cpu.tick();
+			if (profile_file) {
+				prof_cycles[prof_pc] += cpu.get_total_cycles() - prof_before;
+				prof_count[prof_pc]++;
+			}
 			if (watching) {
 				Byte cur = cpu.read(watch_addr);
 				if (cur != watch_prev) {
@@ -278,6 +308,7 @@ int main(int argc, char *argv[])
 				report_gated(*tracectl);
 			}
 			fprintf(stderr, "usim09batch: timeout after %lu instructions\n", timeout);
+			write_profile();
 			// rc 124 follows GNU `timeout(1)` convention so test
 			// harnesses can distinguish a cap-hit from a real
 			// non-zero exit set by the simulated program.
@@ -292,5 +323,6 @@ int main(int argc, char *argv[])
 			(unsigned long long)cpu.get_total_cycles());
 		report_gated(*tracectl);
 	}
+	write_profile();
 	return halt->getExitCode();
 }
