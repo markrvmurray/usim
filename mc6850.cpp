@@ -28,7 +28,7 @@ void mc6850::reset()
 	cycles = 0;
 }
 
-void mc6850::tick(uint8_t ticks)
+void mc6850::tick(uint32_t ticks)
 {
 	if ((sr & IRQB) == 0) {
 		if (((sr & TDRE) && ((cr & 0x60) == 0x20)) ||

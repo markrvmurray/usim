@@ -104,7 +104,7 @@ public:
 				}
 
 	// ActiveDevice — empty tick(); reset() disarms.
-	void			tick(uint8_t /*cycles*/) override { }
+	void			tick(uint32_t /*cycles*/) override { }
 	void			reset() override;
 
 	// Loader-side: seed the vector shadow from a firmware image.

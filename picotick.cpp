@@ -20,7 +20,7 @@ void PicoTick::reset()
 	counter = 0;
 }
 
-void PicoTick::tick(uint8_t cycles)
+void PicoTick::tick(uint32_t cycles)
 {
 	if (!(ctrl & 0x01))
 		return;		// timer disabled

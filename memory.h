@@ -363,7 +363,7 @@ class DATRAMTicker : public ActiveDevice {
 	DATRAM&			d;
 public:
 				DATRAMTicker(DATRAM& d) : d(d) {}
-	void			tick(uint8_t /*cycles*/) override { d.on_tick(); }
+	void			tick(uint32_t /*cycles*/) override { d.on_tick(); }
 	void			reset() override { d.on_reset(); }
 };
 

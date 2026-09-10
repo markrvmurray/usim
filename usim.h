@@ -26,7 +26,11 @@ protected:
 
 		bool		m_trace = false;
 		bool		halted = true;
-		uint8_t		cycles = 0;
+		// 32-bit because a single TFM charges three cycles a byte over
+		// up to 65535 bytes - roughly 196k - before the next tick folds
+		// it into total_cycles. A narrower counter wraps and the
+		// instruction is silently under-billed.
+		uint32_t	cycles = 0;
 		uint64_t	total_cycles = 0;
 
 // Generic internal registers that we assume all CPUs have

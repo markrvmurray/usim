@@ -19,7 +19,7 @@ class ActiveDevice {
 
 public:
 	virtual void		reset() = 0;
-	virtual void		tick(uint8_t cycles) = 0;
+	virtual void		tick(uint32_t cycles) = 0;
 
 public:
 	using shared_ptr = std::shared_ptr<ActiveDevice>;

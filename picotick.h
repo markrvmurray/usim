@@ -29,7 +29,7 @@ public:
 	virtual		~PicoTick() = default;
 
 	void		reset() override;
-	void		tick(uint8_t cycles) override;
+	void		tick(uint32_t cycles) override;
 	Byte		read(Word offset) override;
 	void		write(Word offset, Byte val) override;
 };

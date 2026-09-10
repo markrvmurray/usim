@@ -59,7 +59,7 @@ protected:
 // Initialisation functions
 
 protected:
-	virtual void		tick(uint8_t);
+	virtual void		tick(uint32_t);
 	virtual void		reset();
 
 // Read and write functions
