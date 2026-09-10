@@ -61,6 +61,18 @@ Word hd6309::fetch_effective_address()
 	}
 
 	post = fetch();
+
+	// The indexed half of the native-mode saving. Applied here rather
+	// than after the adders below because subtraction commutes, and at
+	// this point `cycles` has already counted the opcode byte or bytes
+	// and the postbyte, so it cannot underflow a delta of at most two.
+	if (native()) {
+		int d = postbyte_native_delta[post];
+		if (d > 0 && cycles >= (uint32_t)d) {
+			cycles -= (uint32_t)d;
+		}
+	}
+
 	Byte pbm = post & 0x8f;
 	bool indirect = (post & 0x90) == 0x90;
 
@@ -82,13 +94,18 @@ Word hd6309::fetch_effective_address()
 	Word addr = 0;
 	if (acc_off) {
 		Word base = ix_refreg(post);			// X/Y/U/S from bits 6-5
-		if (pbm == 0x87)      { addr = base + extend8(e); cycles += 1; }	// E,R
-		else if (pbm == 0x8a) { addr = base + extend8(f); cycles += 1; }	// F,R
-		else                  { addr = base + w;          cycles += 4; }	// W,R
+		// E,R / F,R / W,R all cost one extra cycle over ,R in both MD
+		// modes, which is two here once the postbyte's own dead cycle
+		// is included (see the indexed table in the 6x09 reference).
+		if (pbm == 0x87)      { addr = base + extend8(e); cycles += 2; }	// E,R
+		else if (pbm == 0x8a) { addr = base + extend8(f); cycles += 2; }	// F,R
+		else                  { addr = base + w;          cycles += 2; }	// W,R
 	} else {
 		switch ((post >> 5) & 3) {			// W-base sub-mode
 			case 0: addr = w;                cycles += 1; break;	// ,W
-			case 1: addr = w + fetch_word(); cycles += 5; break;	// n16,W
+			// n16,W is two extra cycles over ,W, and fetch_word has
+			// already charged the two offset bytes.
+			case 1: addr = w + fetch_word(); cycles += 1; break;	// n16,W
 			case 2: addr = w; w += 2;        cycles += 2; break;	// ,W++
 			case 3: w -= 2; addr = w;        cycles += 2; break;	// ,--W
 		}
@@ -235,8 +252,165 @@ void hd6309::cwai()
 	Byte n = fetch_operand();
 	cc.value &= n;
 	psh_state(s, u);	// entire frame (incl E/F in native mode); sets CC.E
-	cycles += 2;
+	// 22 in emulation mode, less the opcode and immediate bytes and the
+	// twelve stack writes psh_state has already charged. Native mode is
+	// 20, but psh_state writes two more bytes there, so the saving is
+	// four - see the native delta table.
+	cycles += 8;
 	waiting_cwai = true;
+}
+
+
+//---------------------------------------------------------------------
+//
+// Native-mode instruction timing
+//
+// In emulation mode (MD bit 0 clear) the HD6309 is cycle-identical to
+// the MC6809, which is what the shared mc6809 code already charges. In
+// native mode it drops dead cycles - never bus cycles - so the whole
+// correction is a subtraction, and it splits cleanly in two:
+//
+//   native_delta[page][opcode]   the instruction body, plus the dead
+//                                cycle the direct and extended
+//                                addressing preambles carry
+//   postbyte_native_delta[post]  the indexed addressing mode
+//
+// The split is not an invention; it is how both reference tables are
+// written. `LDA indexed` is published as "4+" with a blank native
+// column because the saving belongs to the postbyte, while `LDA direct`
+// is published as "4 (3)" because that one belongs to the opcode. An
+// indexed instruction may draw on both tables - the 16-bit ALU ops and
+// JSR have a body dead cycle of their own - and the two never overlap.
+//
+// Derived from Darren Atkinson's "6x09 Instruction Sets" (measured on
+// real silicon; the opcode tables and the Indexed Addressing Mode Table)
+// cross-checked against Chet Simpson's HD6309 Technical Reference Guide.
+// Where the two disagreed the raw text was read and Atkinson followed:
+// RTS is 5/4 (the TRG's "1" cannot be right - RTS makes three bus
+// accesses), ORCC is 3 flat in both modes (the TRG gives ANDCC 3 flat
+// and ORCC 3/2, which cannot both be true of two identically shaped
+// instructions), LDW and LDY immediate are 4 flat, and DIVQ immediate
+// is 34 (the TRG's 36 would make immediate cost the same as direct,
+// which no other multiply or divide does).
+//
+// Three groups are deliberately zero here because the bus model already
+// gets them right on its own: SWI, SWI2, SWI3 and RTI stack two extra
+// bytes in native mode (E and F), and those writes are charged as bus
+// cycles, which is exactly the published +2. CWAI carries 4 rather than
+// its published delta of 2 for the same reason - it pays the +2 too, so
+// it has to give back four to land on 20.
+//
+// Long conditional branches are absent from the table because their
+// saving is conditional: the extra cycle exists only when the branch is
+// taken, so charge_native_delta works it out from the resulting PC.
+//
+const int8_t hd6309::native_delta[3][256] = {
+    {  // page 0
+	 1,  0,  0,  1,  1,  0,  1,  1,  1,  1,  1,  0,  1,  2,  1,  1,   // $00
+	 0,  0,  1,  1,  0,  0,  1,  2,  0,  1,  0,  0,  0,  1,  3,  2,   // $10
+	 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,   // $20
+	 0,  0,  0,  0,  1,  1,  1,  1,  0,  1,  2,  0,  4,  1,  0,  0,   // $30
+	 1,  0,  0,  1,  1,  0,  1,  1,  1,  1,  1,  0,  1,  1,  0,  1,   // $40
+	 1,  0,  0,  1,  1,  0,  1,  1,  1,  1,  1,  0,  1,  1,  0,  1,   // $50
+	 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  1,  0,  0,   // $60
+	 1,  0,  0,  1,  1,  0,  1,  1,  1,  1,  1,  0,  1,  2,  1,  1,   // $70
+	 0,  0,  0,  1,  0,  0,  0,  0,  0,  0,  0,  0,  1,  1,  0,  0,   // $80
+	 1,  1,  1,  2,  1,  1,  1,  1,  1,  1,  1,  1,  2,  1,  1,  1,   // $90
+	 0,  0,  0,  1,  0,  0,  0,  0,  0,  0,  0,  0,  1,  1,  0,  0,   // $A0
+	 1,  1,  1,  2,  1,  1,  1,  1,  1,  1,  1,  1,  2,  1,  1,  1,   // $B0
+	 0,  0,  0,  1,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,   // $C0
+	 1,  1,  1,  2,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,   // $D0
+	 0,  0,  0,  1,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,   // $E0
+	 1,  1,  1,  2,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,   // $F0
+    },
+    {  // page 2 ($10xx)
+	 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,   // $00
+	 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,   // $10
+	 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,   // $20
+	 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,   // $30
+	 1,  0,  0,  1,  1,  0,  1,  1,  1,  1,  1,  0,  1,  1,  0,  1,   // $40
+	 0,  0,  0,  1,  1,  0,  1,  0,  0,  1,  1,  0,  1,  1,  0,  1,   // $50
+	 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,   // $60
+	 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,   // $70
+	 1,  1,  1,  1,  1,  1,  0,  0,  1,  1,  1,  1,  1,  0,  0,  0,   // $80
+	 2,  2,  2,  2,  2,  2,  1,  1,  2,  2,  2,  2,  2,  0,  1,  1,   // $90
+	 1,  1,  1,  1,  1,  1,  0,  0,  1,  1,  1,  1,  1,  0,  0,  0,   // $A0
+	 2,  2,  2,  2,  2,  2,  1,  1,  2,  2,  2,  2,  2,  0,  1,  1,   // $B0
+	 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,   // $C0
+	 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  1,  1,  1,  1,   // $D0
+	 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,   // $E0
+	 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  1,  0,  1,  1,   // $F0
+    },
+    {  // page 3 ($11xx)
+	 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,   // $00
+	 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,   // $10
+	 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,   // $20
+	 1,  1,  1,  1,  1,  1,  1,  1,  0,  0,  0,  0,  0,  0,  0,  0,   // $30
+	 0,  0,  0,  1,  0,  0,  0,  0,  0,  0,  1,  0,  1,  1,  0,  1,   // $40
+	 0,  0,  0,  1,  0,  0,  0,  0,  0,  0,  1,  0,  1,  1,  0,  1,   // $50
+	 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,   // $60
+	 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,   // $70
+	 0,  0,  0,  1,  0,  0,  0,  0,  0,  0,  0,  0,  1,  0,  0,  0,   // $80
+	 1,  1,  0,  2,  0,  0,  1,  1,  0,  0,  0,  1,  2,  1,  1,  1,   // $90
+	 0,  0,  0,  1,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,   // $A0
+	 1,  1,  0,  2,  0,  0,  1,  1,  0,  0,  0,  1,  2,  1,  1,  1,   // $B0
+	 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,   // $C0
+	 1,  1,  0,  0,  0,  0,  1,  0,  0,  0,  0,  1,  0,  0,  0,  0,   // $D0
+	 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,   // $E0
+	 1,  1,  0,  0,  0,  0,  1,  0,  0,  0,  0,  1,  0,  0,  0,  0,   // $F0
+    },
+};
+
+const int8_t hd6309::postbyte_native_delta[256] = {
+	 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,   // $00
+	 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,   // $10
+	 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,   // $20
+	 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,   // $30
+	 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,   // $40
+	 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,   // $50
+	 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,   // $60
+	 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,   // $70
+	 1,  1,  1,  1,  0,  0,  0,  0,  0,  1,  0,  2,  0,  2,  0,  0,   // $80
+	 0,  1,  0,  1,  0,  0,  0,  0,  0,  1,  0,  2,  0,  2,  0,  1,   // $90
+	 1,  1,  1,  1,  0,  0,  0,  0,  0,  1,  0,  2,  0,  2,  0,  0,   // $A0
+	 0,  1,  0,  1,  0,  0,  0,  0,  0,  1,  0,  2,  0,  2,  0,  0,   // $B0
+	 1,  1,  1,  1,  0,  0,  0,  0,  0,  1,  0,  2,  0,  2,  0,  0,   // $C0
+	 0,  1,  0,  1,  0,  0,  0,  0,  0,  1,  0,  2,  0,  2,  0,  0,   // $D0
+	 1,  1,  1,  1,  0,  0,  0,  0,  0,  1,  0,  2,  0,  2,  0,  0,   // $E0
+	 0,  1,  0,  1,  0,  0,  0,  0,  0,  1,  0,  2,  0,  2,  0,  0,   // $F0
+};
+
+// Subtract this instruction's native-mode saving. Called at the end of
+// execute_instruction, so the emulation-mode cost has already been
+// charged in full.
+void hd6309::charge_native_delta()
+{
+	if (!native()) {
+		return;
+	}
+
+	int page, opcode;
+	if (ir < 0x0100)		{ page = 0; opcode = ir; }
+	else if ((ir >> 8) == 0x10)	{ page = 1; opcode = ir & 0xff; }
+	else if ((ir >> 8) == 0x11)	{ page = 2; opcode = ir & 0xff; }
+	else				{ return; }
+
+	int d = native_delta[page][opcode];
+
+	// $1021-$102F are the long conditional branches: 5 cycles when not
+	// taken in either mode, 6 when taken in emulation mode and 5 when
+	// taken in native mode. The not-taken PC is the instruction address
+	// plus its four bytes, so anything else means it branched.
+	if (page == 1 && opcode >= 0x21 && opcode <= 0x2f) {
+		d = (pc != (Word)(insn_pc + 4)) ? 1 : 0;
+	}
+
+	// The saving is always dead cycles this instruction has already
+	// charged, so it cannot exceed them; the guard is belt and braces
+	// against a table entry that is wrong rather than a real case.
+	if (d > 0 && cycles >= (uint32_t)d) {
+		cycles -= (uint32_t)d;
+	}
 }
 
 void hd6309::execute_instruction()
@@ -335,6 +509,8 @@ void hd6309::execute_instruction()
 		// virtual exg()/tfr() overrides, so they need no case here.
 		default:
 			mc6809::execute_instruction();
-			return;
+			break;
 	}
+
+	charge_native_delta();
 }

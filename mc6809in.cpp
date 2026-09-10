@@ -316,7 +316,9 @@ void mc6809::abx()
 {
 	insn = "ABX";
 	x += b;
-	++cycles;
+	// 3, less the one opcode byte already charged. (On an HD6309 in
+	// native mode this drops to 1 - see the native delta table.)
+	cycles += 2;
 }
 
 void mc6809::adca()
@@ -698,7 +700,9 @@ void mc6809::cwai()
 	cc.value &= n;
 	cc.e = 1;
 	help_psh(0xff, s, u);
-	cycles += 2;
+	// 22, less the opcode and immediate bytes and the twelve stack
+	// writes help_psh has already charged.
+	cycles += 8;
 	waiting_cwai = true;
 }
 

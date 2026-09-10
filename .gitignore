@@ -11,6 +11,7 @@ usim09pt
 tests/test_mmu_tick
 tests/test_system_watchpoint
 tests/test_picoide
+tests/test_cycles6309
 tests/test6309
 tests/test6309.bin
 tests/test6809

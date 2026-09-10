@@ -577,6 +577,75 @@ t20_fail
 t20_done
 
 ; ---------------------------------------------------------------------
+; test 21: native-mode timing exercise
+;
+; Functionally this is a no-op - it computes a known value and checks
+; it. Its real job is to put the aggregate cycle gate (make cycles6309)
+; through native mode, which no other test does: tests 12 and 20 enter
+; native mode for a handful of instructions whose only mode-sensitive
+; cost is the SWI/RTI frame, so before this block the gate was almost
+; blind to native timings.
+;
+; The instructions below are chosen because each carries a different
+; native-mode saving: direct and extended addressing lose their dead
+; cycle, the auto-increment and 16-bit-offset postbytes lose one, D,R
+; loses two, EXG loses three, ABX loses two, and a taken long branch
+; loses one while an untaken one loses nothing. Per-instruction figures
+; are asserted properly in tests/test_cycles6309; this only has to make
+; the totals differ between the two modes.
+; ---------------------------------------------------------------------
+            lda   #21
+            sta   RESULT
+            ldmd  #1                ; native mode for the whole block
+            ldx   #$0200
+            ldy   #$0300
+            ldu   #$0400
+            lda   #$5a
+            sta   $40               ; direct: 5 cycles native, 6 emulation
+            sta   $0500             ; extended
+            ldb   $40               ; direct
+            ldb   $0500             ; extended
+            lda   ,x+               ; ,R+  postbyte
+            lda   ,x++              ; ,R++ postbyte
+            lda   ,-x               ; ,-R  postbyte
+            ldd   #$0002
+            lda   d,y               ; D,R  postbyte: two cycles native
+            lda   $1000,y           ; n16,R postbyte
+            exg   a,b               ; 8 emulation, 5 native
+            abx                     ; 3 emulation, 1 native
+            clra                    ; inherent: 2 emulation, 1 native
+            comb
+            cmpa  #$00
+            lbeq  t21_taken         ; taken long branch: 6 emulation, 5 native
+            lbra  t21_fail
+t21_taken
+            lbne  t21_fail          ; untaken long branch: 5 in both modes
+            ldmd  #0                ; back to emulation for the same work
+            lda   #$5a
+            sta   $40
+            sta   $0500
+            ldb   $40
+            ldb   $0500
+            ldx   #$0200
+            lda   ,x+
+            lda   ,x++
+            lda   ,-x
+            ldd   #$0002
+            lda   d,y
+            lda   $1000,y
+            exg   a,b
+            abx
+            clra
+            comb
+            lda   $40               ; the store above must still be there
+            cmpa  #$5a
+            lbne  t21_fail
+            lbra  t21_done
+t21_fail
+            lbra  fail
+t21_done
+
+; ---------------------------------------------------------------------
 ; all tests passed
 ; ---------------------------------------------------------------------
 pass

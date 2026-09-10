@@ -54,9 +54,30 @@ protected:	// HD6309-only registers
 	bool			native() const { return md & md_native; }
 	bool			firq_entire() const { return md & md_firq_entire; }
 
+
+public:		// host-side control
+	// Force the native bit at startup so an unmodified binary can be
+	// run in either mode without a rebuild (usim09batch --md-native).
+	// reset() clears MD, so this has to be applied after it. A program
+	// that runs its own LDMD still overrides whatever is set here.
+	void			set_native_mode(bool on)
+				{ md = on ? (Byte)(md | md_native)
+					  : (Byte)(md & ~md_native); }
+
 protected:	// dispatch overrides (extend the base, delegate everything shared)
 	virtual void		fetch_instruction() override;
 	virtual void		execute_instruction() override;
+
+protected:	// native-mode (MD bit 0) instruction timing
+	// Native mode removes dead cycles - never bus cycles - so the
+	// correction is a subtraction applied on top of the emulation-mode
+	// charge. Two disjoint tables: one keyed on the opcode, covering the
+	// instruction body and the direct/extended addressing preamble, and
+	// one keyed on the indexed postbyte, covering the addressing mode.
+	// An indexed instruction can draw on both; nothing is counted twice.
+	static const int8_t	native_delta[3][256];	// page 0 / $10xx / $11xx
+	static const int8_t	postbyte_native_delta[256];
+	void			charge_native_delta();
 
 	// HD6309 adds E,R / F,R / W,R accumulator-offset indexed modes and the
 	// ,W / n,W / ,W++ / ,--W W-base modes (with indirect variants)

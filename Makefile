@@ -24,7 +24,8 @@ LIB_SRCS	= usim.cpp memory.cpp \
 		  system_watchpoint.cpp
 
 OBJS		= $(LIB_SRCS:.cpp=.o)
-BIN		= usim09 usim09batch usim09pt tests/test6809 tests/test6309
+BIN		= usim09 usim09batch usim09pt tests/test6809 tests/test6309 \
+		  tests/test_cycles6309
 
 LIB		= libusim.a
 
@@ -83,12 +84,14 @@ usim09pt: $(LIB) main_picothing.o term.o ptyserial.o
 # silently, which is how the CPU suites came to stop running.
 .PHONY: test
 test: tests/test6809 tests/test6809.bin tests/test6309 tests/test6309.bin \
-      tests/test_mmu_tick tests/test_system_watchpoint tests/test_picoide
+      tests/test_mmu_tick tests/test_system_watchpoint tests/test_picoide \
+      tests/test_cycles6309
 	./tests/test6809
 	./tests/test6309
 	./tests/test_mmu_tick
 	./tests/test_system_watchpoint
 	./tests/test_picoide
+	./tests/test_cycles6309
 	@$(MAKE) --no-print-directory cycles
 	@$(MAKE) --no-print-directory cycles6309
 
@@ -100,6 +103,12 @@ tests/test_system_watchpoint: tests/test_system_watchpoint.cpp $(LIB)
 
 tests/test_picoide: tests/test_picoide.cpp $(LIB)
 	$(CXX) $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_picoide.cpp -L. -lusim -o $(@)
+
+# Per-instruction timing, both MD modes. Unlike the two aggregate gates
+# below, this one names the instruction that moved, and it is the only
+# thing in the tree that covers native-mode timings at all.
+tests/test_cycles6309: tests/test_cycles6309.cpp $(LIB)
+	$(CXX) $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_cycles6309.cpp -L. -lusim -o $(@)
 
 # Cycle-count regression gate.
 #
@@ -147,7 +156,31 @@ cycles: usim09batch samples/test_main.hex
 # their whole documented figure on top of the operand fetches they
 # had already charged. That is the gate working: a deliberate timing
 # correction has to be acknowledged here before it can land.
-EXPECTED_CYCLES_6309 = 2296
+#
+# 2296 -> 2222: the HD6309 instructions were reconciled against Darren
+# Atkinson's 6x09 reference and Chet Simpson's HD6309 Technical
+# Reference Guide, opcode by opcode and postbyte by postbyte. Several
+# groups were over-charging in emulation mode -- the $104x/$105x 16-bit
+# inherent ops, the BAND..STBT bit group, LDMD, BITMD, SEXW, DIVQ,
+# OIM/AIM/EIM/TIM, and the E,R / F,R / W,R / n16,W indexed postbytes --
+# because each added its whole documented figure on top of bytes the
+# fetch had already charged. ABX and CWAI were under-charging in the
+# shared MC6809 code and were corrected too; neither is executed by the
+# 6809 workload above, which is why EXPECTED_CYCLES did not move.
+#
+# Every one of the 430 documented opcodes and 249 indexed postbytes now
+# matches the reference exactly in BOTH MD modes. That is asserted
+# per-instruction by tests/test_cycles6309, which is the gate that
+# actually protects this work; this aggregate figure is a backstop.
+#
+# 2222 -> 2408: test 21 was added to the suite, a block that runs the
+# same instruction sequence once in native mode and once in emulation
+# mode. Before it, this gate was almost blind to native timings -- the
+# only native-mode instructions in the suite were a SWI/RTI pair whose
+# cost the bus model already got right. Assembling that block with
+# `ldmd #0` instead of `ldmd #1` reads 2426, so the 18-cycle gap is
+# what this figure now protects.
+EXPECTED_CYCLES_6309 = 2408
 
 .PHONY: cycles6309
 cycles6309: tests/test6309 tests/test6309.bin
@@ -161,7 +194,7 @@ cycles6309: tests/test6309 tests/test6309.bin
 
 .PHONY: clean
 clean:
-	$(RM) $(BIN) $(LIB) *.o *.d tests/test_mmu_tick tests/*.o tests/*.d tests/test6809.bin tests/test_system_watchpoint tests/test_picoide
+	$(RM) $(BIN) $(LIB) *.o *.d tests/test_mmu_tick tests/*.o tests/*.d tests/test6809.bin tests/test_system_watchpoint tests/test_picoide tests/test_cycles6309
 
 # Compiler-generated header dependencies (see CPPFLAGS -MMD -MP). Pulling
 # these in means editing any header recompiles exactly the objects that

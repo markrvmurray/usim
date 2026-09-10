@@ -357,7 +357,8 @@ void hd6309::sexw()
 	cc.n = btst(d, 15);
 	cc.z = (d == 0x0000 && w == 0x0000);
 	// V and C are intentionally left untouched
-	cycles += 4;
+	// 4, less the one opcode byte already charged.
+	cycles += 3;
 }
 
 //---------------------------------------------------------------------
@@ -578,7 +579,11 @@ void hd6309::mem_imm_op()
 	if (lo != 0xb) {
 		write(addr, r);
 	}
-	cycles += 1;
+	// 6 direct, 7+ indexed, 7 extended, in both MD modes. The write-back
+	// supplies one of those cycles, so TIM - which tests without storing
+	// - charges one more than the other three, and the indexed form
+	// carries a dead cycle that direct and extended do not.
+	cycles += (lo == 0xb ? 1 : 0) + (mode == indexed ? 1 : 0);
 }
 
 //---------------------------------------------------------------------
@@ -736,8 +741,8 @@ void hd6309::divq()
 	} else {
 		cc.v = 0;
 	}
-	// 35 immediate, less the four bytes already charged.
-	cycles += 31;
+	// 34 immediate, less the four bytes already charged.
+	cycles += 30;
 }
 
 //---------------------------------------------------------------------
@@ -753,7 +758,8 @@ void hd6309::ldmd()
 	cc.n = btst(md, 7);
 	cc.z = !md;
 	cc.v = 0;
-	cycles += 5;
+	// 5, less the three bytes already charged.
+	cycles += 2;
 }
 
 void hd6309::bitmd()
@@ -763,7 +769,8 @@ void hd6309::bitmd()
 	cc.n = btst(t, 7);
 	cc.z = !t;
 	cc.v = 0;
-	cycles += 4;
+	// 4, less the three bytes already charged.
+	cycles += 1;
 }
 
 //---------------------------------------------------------------------
@@ -884,7 +891,10 @@ void hd6309::bit_op()
 		if (result) *reg |= (1 << dstbit);
 		else        *reg &= ~(1 << dstbit);
 	}
-	cycles += 6;
+	// BAND..LDBT are 7, STBT 8; the extra one is STBT's write-back,
+	// which is charged as a bus cycle. Both leave 2 on top of the four
+	// opcode/postbyte/address bytes and the operand read.
+	cycles += 2;
 }
 
 // dispatch the $104x (on D) / $105x (on W) 16-bit inherent ops by ir nibble
@@ -903,5 +913,6 @@ void hd6309::help_inh16(Word& reg)
 		case 0xd: insn = "TSTW"; help_tst16(reg); break;
 		case 0xf: insn = "CLRW"; help_clr16(reg); break;
 	}
-	cycles += 2;
+	// 3, less the two opcode bytes already charged.
+	cycles += 1;
 }

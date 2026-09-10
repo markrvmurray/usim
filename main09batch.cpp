@@ -58,8 +58,9 @@
 
 static void usage(const char *prog)
 {
-	fprintf(stderr, "usage: %s [--hd6309] [--timeout=N] [--cycles] [--trace] [--watch=ADDR]"
-		" [--brk=ADDR[,ADDR,...]] [--brk-gated] [--profile=FILE] <hexfile>\n", prog);
+	fprintf(stderr, "usage: %s [--hd6309] [--md-native] [--timeout=N] [--cycles] [--trace]"
+		" [--watch=ADDR] [--brk=ADDR[,ADDR,...]] [--brk-gated] [--profile=FILE]"
+		" <hexfile>\n", prog);
 	exit(EXIT_FAILURE);
 }
 
@@ -85,6 +86,7 @@ int main(int argc, char *argv[])
 	bool trace = false;
 	bool report_cycles = false;
 	bool use_hd6309 = false;
+	bool md_native = false;
 	const char *hexfile = nullptr;
 
 	Word watch_addr = 0;
@@ -120,6 +122,8 @@ int main(int argc, char *argv[])
 			profile_file = argv[i] + 10;
 		} else if (strcmp(argv[i], "--hd6309") == 0) {
 			use_hd6309 = true;
+		} else if (strcmp(argv[i], "--md-native") == 0) {
+			md_native = true;
 		} else if (argv[i][0] == '-') {
 			usage(argv[0]);
 		} else {
@@ -130,6 +134,12 @@ int main(int argc, char *argv[])
 
 	if (!hexfile) {
 		usage(argv[0]);
+	}
+
+	// Native mode is an HD6309 concept; the 6809 has no MD register.
+	if (md_native && !use_hd6309) {
+		fprintf(stderr, "%s: --md-native requires --hd6309\n", argv[0]);
+		return EXIT_FAILURE;
 	}
 
 	bool			halted = false;
@@ -216,6 +226,12 @@ int main(int argc, char *argv[])
 	}
 
 	cpu.reset();
+	// After reset, which clears MD. Lets the same binary be timed in
+	// both modes without a rebuild - the point of the flag is measuring
+	// what native mode is worth.
+	if (md_native) {
+		static_cast<hd6309&>(cpu).set_native_mode(true);
+	}
 	if (trace) cpu.tron();
 
 	// Memory watchpoint: monitor writes to a specific address.
