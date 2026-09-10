@@ -700,10 +700,16 @@ void hd6309::divd()
 	cc.n = btst(b, 7);
 	cc.z = !b;
 	cc.c = btst(b, 0);
+	bool twos_overflow = false;
+	bool range_overflow = false;
 	if (result > 128 || result < -127) {
+		// two's complement overflow: the quotient fits in eight bits
+		// but not as a signed value, so its sign is wrong
+		twos_overflow = true;
 		cc.v = 1;
 		if (result > 256 || result < -255) {
-			// hard overflow: division aborted, D restored to |old D|
+			// range overflow: division aborted, D restored to |old D|
+			range_overflow = true;
 			cc.n = btst((Word)old_d, 15);
 			cc.z = !(Word)old_d;
 			d = (Word)(old_d < 0 ? -old_d : old_d);
@@ -713,6 +719,16 @@ void hd6309::divd()
 	}
 	// 25 immediate, less the three bytes already charged.
 	cycles += 22;
+	// A short division costs less. The reference lists the two savings
+	// as alternatives - "one fewer cycle" for a two's complement
+	// overflow, "13 fewer" for a range overflow - and every range
+	// overflow is also a two's complement overflow, so the larger
+	// replaces the smaller rather than adding to it.
+	if (range_overflow) {
+		cycles -= 13;
+	} else if (twos_overflow) {
+		cycles -= 1;
+	}
 }
 
 void hd6309::divq()
@@ -730,10 +746,12 @@ void hd6309::divq()
 	cc.n = btst((Word)result, 15);
 	cc.z = !(Word)result;
 	cc.c = btst((Word)result, 0);
+	bool range_overflow = false;
 	if (result > 32768 || result < -32767) {
 		cc.v = 1;
 		if (result > 65536 || result < -65535) {
-			// hard overflow: division aborted, Q restored
+			// range overflow: division aborted, Q restored
+			range_overflow = true;
 			if (old_q < 0) cc.n = 1;
 			else if (old_q == 0) cc.z = 1;
 			set_q((DWord)old_q);
@@ -743,6 +761,12 @@ void hd6309::divq()
 	}
 	// 34 immediate, less the four bytes already charged.
 	cycles += 30;
+	// Unlike DIVD, the reference documents a saving only for the range
+	// overflow - the aborted division - and none for a plain two's
+	// complement overflow.
+	if (range_overflow) {
+		cycles -= 21;
+	}
 }
 
 //---------------------------------------------------------------------

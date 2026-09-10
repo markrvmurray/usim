@@ -49,15 +49,16 @@ public:
 	// Benign state: pointers into free RAM, non-zero divisors so
 	// DIVD/DIVQ do not take the divide-by-zero trap, and a small W so
 	// TFM terminates.
-	void seed() {
+	void seed(Word dval = 0x0007, Word wval = 0x0003) {
 		x = 0x0100; y = 0x0110; u = 0x0120; s = 0x0180;
-		d = 0x0007; w = 0x0003; dp = 0x00;
+		d = dval; w = wval; dp = 0x00;
 	}
 protected:
 	void post_exec() override { cost = cycles; halt(); }
 };
 
-static int run_one(const char *hex, bool native)
+static int run_one(const char *hex, bool native,
+		   Word dval = 0x0007, Word wval = 0x0003)
 {
 	Probe cpu;
 	auto ram = std::make_shared<RAM>(0x10000);
@@ -79,7 +80,7 @@ static int run_one(const char *hex, bool native)
 
 	cpu.reset();
 	cpu.set_native(native);
-	cpu.seed();
+	cpu.seed(dval, wval);
 	cpu.tick();
 	return (int)cpu.cost;
 }
@@ -773,6 +774,48 @@ static const Case branch_cases[] = {
 	{ "270010",    3,  3, "BEQ not taken" },
 };
 
+// DIVD and DIVQ abandon or shorten the division on an overflow and cost
+// less when they do. The figures are the table entry less the documented
+// saving: one cycle for a DIVD two's complement overflow (the quotient
+// fits in eight bits but not as a signed value), 13 for a DIVD range
+// overflow and 21 for a DIVQ range overflow (both abort the division).
+// DIVQ has no documented saving for a plain two's complement overflow.
+//
+// D and W are seeded per case to steer which path is taken; the divisor
+// is the instruction's own immediate byte or word.
+struct DivCase {
+	const char	*bytes;
+	Word		d;
+	Word		w;
+	int		emul;
+	int		native;
+	const char	*name;
+};
+
+static const DivCase div_cases[] = {
+	// DIVD #imm8: 25 immediate, 27/26 direct.
+	{ "118D02", 0x0007, 0, 25, 25, "DIVD imm, 7/2, no overflow" },
+	{ "118D02", 0x012C, 0, 24, 24, "DIVD imm, 300/2, twos overflow (-1)" },
+	{ "118D03", 0x0384, 0, 12, 12, "DIVD imm, 900/3, range overflow (-13)" },
+	{ "119D20", 0x0007, 0, 27, 26, "DIVD direct, no overflow" },
+	// The direct operand is the $01 fill byte, so D alone picks the
+	// path: 150/1 overflows the signed range only, 900/1 the 8-bit
+	// range as well.
+	{ "119D20", 0x0096, 0, 26, 25, "DIVD direct, twos overflow (-1)" },
+	{ "119D20", 0x0384, 0, 14, 13, "DIVD direct, range overflow (-13)" },
+
+	// DIVQ #imm16: 34 immediate, 36/35 direct. Q is D:W.
+	{ "118E0002", 0x0000, 0x0007, 34, 34, "DIVQ imm, no overflow" },
+	{ "118E0001", 0x0002, 0x0000, 13, 13, "DIVQ imm, range overflow (-21)" },
+	// A two's complement overflow on its own buys nothing on DIVQ -
+	// 40000/1 is over 32768 but still inside 16 bits.
+	{ "118E0001", 0x0000, 0x9C40, 34, 34, "DIVQ imm, twos overflow (no saving)" },
+	// The direct operand is the $0101 fill word, so Q has to be large
+	// for the quotient to leave 16-bit range.
+	{ "119E20",   0x0000, 0x0007, 36, 35, "DIVQ direct, no overflow" },
+	{ "119E20",   0x0800, 0x0000, 15, 14, "DIVQ direct, range overflow (-21)" },
+};
+
 static int failures = 0;
 static int checks   = 0;
 
@@ -801,6 +844,22 @@ int main()
 	check_all(postbyte_cases, sizeof(postbyte_cases) / sizeof(Case), "postbyte");
 	check_all(tfm_cases,      sizeof(tfm_cases)      / sizeof(Case), "tfm");
 	check_all(branch_cases,   sizeof(branch_cases)   / sizeof(Case), "branch");
+
+	for (size_t i = 0; i < sizeof(div_cases) / sizeof(DivCase); i++) {
+		const DivCase &c = div_cases[i];
+		for (int native = 0; native < 2; native++) {
+			int want = native ? c.native : c.emul;
+			int got  = run_one(c.bytes, native != 0, c.d, c.w);
+			checks++;
+			if (got != want) {
+				failures++;
+				fprintf(stderr,
+					"FAIL divide: %s [%s] %s mode: expected %d, got %d\n",
+					c.bytes, c.name,
+					native ? "native" : "emulation", want, got);
+			}
+		}
+	}
 
 	if (failures) {
 		fprintf(stderr, "FAILED: %d of %d checks\n", failures, checks);
