@@ -230,7 +230,14 @@ int main(int argc, char *argv[])
 	// --profile: cycles and instructions charged to the address of
 	// each instruction executed, written at exit as "ADDR cycles count"
 	// lines. A map file folds them by routine. Implies stepping.
+	// USim::tick folds an instruction's cycles into the total at the
+	// start of the next tick, so the difference seen around a tick is
+	// the cost of the instruction executed by the tick before; it is
+	// charged to that instruction's address. The last instruction's
+	// cost is still pending at exit and is not charged.
 	std::vector<uint64_t> prof_cycles, prof_count;
+	Word prof_prev_pc = 0;
+	bool prof_have_prev = false;
 	if (profile_file) {
 		prof_cycles.assign(0x10000, 0);
 		prof_count.assign(0x10000, 0);
@@ -280,8 +287,12 @@ int main(int argc, char *argv[])
 			uint64_t prof_before = cpu.get_total_cycles();
 			cpu.tick();
 			if (profile_file) {
-				prof_cycles[prof_pc] += cpu.get_total_cycles() - prof_before;
-				prof_count[prof_pc]++;
+				if (prof_have_prev) {
+					prof_cycles[prof_prev_pc] += cpu.get_total_cycles() - prof_before;
+					prof_count[prof_prev_pc]++;
+				}
+				prof_prev_pc = prof_pc;
+				prof_have_prev = true;
 			}
 			if (watching) {
 				Byte cur = cpu.read(watch_addr);
