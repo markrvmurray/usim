@@ -180,7 +180,14 @@ cycles: usim09batch samples/test_main.hex
 # cost the bus model already got right. Assembling that block with
 # `ldmd #0` instead of `ldmd #1` reads 2426, so the 18-cycle gap is
 # what this figure now protects.
-EXPECTED_CYCLES_6309 = 2408
+#
+# 2408 -> 2392: the illegal-instruction / divide-by-zero trap was
+# charging 12 on top of its stacking where SWI2 and SWI3, whose entry
+# sequence it shares, charge 4. That made a trap cost 28 against their
+# 20 for the identical hardware sequence. The suite takes two traps
+# (test 13's divide by zero, test 14's illegal instruction), so the
+# figure drops by exactly 16.
+EXPECTED_CYCLES_6309 = 2392
 
 .PHONY: cycles6309
 cycles6309: tests/test6309 tests/test6309.bin

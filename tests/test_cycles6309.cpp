@@ -816,6 +816,25 @@ static const DivCase div_cases[] = {
 	{ "119E20",   0x0800, 0x0000, 15, 14, "DIVQ direct, range overflow (-21)" },
 };
 
+// The illegal-instruction and divide-by-zero traps. Both run the same
+// entry sequence as SWI2/SWI3 -- stack the entire state, read a vector
+// -- so a trap taken on a two-byte opcode costs exactly what SWI2 does,
+// and each further byte the aborted instruction had already fetched
+// adds one. Nothing in the path is native-mode conditional; the two
+// extra frame bytes are the whole difference between the modes.
+//
+// The div-by-zero cases pass an immediate zero divisor, so they trap
+// without needing the memory fill disturbed.
+static const Case trap_cases[] = {
+	{ "103F",      20,  22, "SWI2 (the path the traps share)" },
+	{ "113F",      20,  22, "SWI3 (ditto)" },
+	{ "1001",      20,  22, "illegal $1001 -- costs what SWI2 costs" },
+	{ "1102",      20,  22, "illegal $1102" },
+	{ "1055",      20,  22, "illegal $1055" },
+	{ "118D00",    21,  23, "DIVD #0 -- div-zero trap, one extra byte fetched" },
+	{ "118E0000",  22,  24, "DIVQ #0 -- div-zero trap, two extra bytes fetched" },
+};
+
 static int failures = 0;
 static int checks   = 0;
 
@@ -844,6 +863,7 @@ int main()
 	check_all(postbyte_cases, sizeof(postbyte_cases) / sizeof(Case), "postbyte");
 	check_all(tfm_cases,      sizeof(tfm_cases)      / sizeof(Case), "tfm");
 	check_all(branch_cases,   sizeof(branch_cases)   / sizeof(Case), "branch");
+	check_all(trap_cases,     sizeof(trap_cases)     / sizeof(Case), "trap");
 
 	for (size_t i = 0; i < sizeof(div_cases) / sizeof(DivCase); i++) {
 		const DivCase &c = div_cases[i];

@@ -661,7 +661,22 @@ void hd6309::trap(Byte md_bit)
 	md |= md_bit;
 	psh_state(s, u);	// entire frame (incl E/F in native mode); sets CC.E
 	pc = read_word(vector_reserved);
-	cycles += 12;
+	// The illegal-instruction and divide-by-zero traps run the same
+	// entry sequence as SWI2 and SWI3 - stack the entire state, read a
+	// vector - differing only in which vector and which MD bit. MAME
+	// makes that explicit: ILLEGAL and DIVIDE_BY_ZERO both set their
+	// flag and then `goto SOFTWARE_INTERRUPT`, the label whose own
+	// comment reads "used for SWI2/SWI3 and illegal/div0 on 6309".
+	// So the constant is SWI2's, and a trap taken on a two-byte opcode
+	// costs what SWI2 costs. It was 12 here, which made that entry 28
+	// against SWI2's 20 for an identical hardware sequence.
+	//
+	// Nothing in that path is native-mode conditional, in MAME or in
+	// the references, so there is no native_delta entry either: the
+	// only difference between modes is the two extra frame bytes,
+	// which the bus model charges by itself. That gives 20 emulation
+	// and 22 native, exactly matching SWI2 and SWI3.
+	cycles += 4;
 }
 
 //---------------------------------------------------------------------
