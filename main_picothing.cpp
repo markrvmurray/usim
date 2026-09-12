@@ -196,6 +196,10 @@ static void usage(const char* prog)
 		"\n"
 		"Options:\n"
 		"  --hd6309            run as an HD6309 (default is MC6809)\n"
+		"  --md-native         start the HD6309 in native mode (MD bit 0),\n"
+		"                      so an image that never runs LDMD itself can\n"
+		"                      still be observed and timed in native mode.\n"
+		"                      Requires --hd6309.\n"
 		"  --timeout=N         cap at N instructions (rc 124 on hit)\n"
 		"  --cycles            print total cycles to stderr on exit\n"
 		"  --trace             per-instruction CPU trace\n"
@@ -286,6 +290,7 @@ int main(int argc, char* argv[])
 	bool			brk_gated = false;
 	bool			aux_pty_enable = false;	// --aux-pty: PTY-back the aux ACIA
 	bool			use_hd6309 = false;	// --hd6309: run as an HD6309
+	bool			md_native = false;	// --md-native: MD bit 0 at reset
 	unsigned		pc_hist_top = 0;	// --pc-hist: top clusters to print (0 = disabled)
 	unsigned long		pc_hist_from = 0;	// --pc-hist-from: first sampled instruction
 	bool			have_input = false;	// --input: deterministic scripted console input
@@ -381,6 +386,8 @@ int main(int argc, char* argv[])
 			aux_pty_enable = true;
 		} else if (strcmp(argv[i], "--hd6309") == 0) {
 			use_hd6309 = true;
+		} else if (strcmp(argv[i], "--md-native") == 0) {
+			md_native = true;
 		} else if (strncmp(argv[i], "--input=", 8) == 0) {
 			// Deterministic scripted console input. \r \n \t \\ escapes
 			// are decoded so a whole command sequence fits one argument,
@@ -417,6 +424,12 @@ int main(int argc, char* argv[])
 
 	if (!firmware_path) {
 		usage(argv[0]);
+		return EXIT_FAILURE;
+	}
+
+	// Native mode is an HD6309 concept; the MC6809 has no MD register.
+	if (md_native && !use_hd6309) {
+		fprintf(stderr, "%s: --md-native requires --hd6309\n", argv[0]);
 		return EXIT_FAILURE;
 	}
 
@@ -599,6 +612,12 @@ int main(int argc, char* argv[])
 	}
 
 	cpu.reset();
+	// After reset, which clears MD. Lets an image that never runs LDMD
+	// itself be observed in native mode - on this board in particular,
+	// a real HD6309 would be run native.
+	if (md_native) {
+		static_cast<hd6309&>(cpu).set_native_mode(true);
+	}
 	if (trace) cpu.tron();
 
 	// Read one byte either physically (bypassing the DAT) or as the

@@ -33,10 +33,13 @@
 int main(int argc, char *argv[])
 {
 	bool use_hd6309 = false;
+	bool md_native = false;
 	const char *hexfile = nullptr;
 	for (int i = 1; i < argc; ++i) {
 		if (strcmp(argv[i], "--hd6309") == 0) {
 			use_hd6309 = true;
+		} else if (strcmp(argv[i], "--md-native") == 0) {
+			md_native = true;
 		} else if (argv[i][0] != '-' && !hexfile) {
 			hexfile = argv[i];
 		} else {
@@ -45,7 +48,13 @@ int main(int argc, char *argv[])
 		}
 	}
 	if (!hexfile) {
-		fprintf(stderr, "usage: usim09 [--hd6309] <hexfile>\n");
+		fprintf(stderr, "usage: usim09 [--hd6309] [--md-native] <hexfile>\n");
+		return EXIT_FAILURE;
+	}
+
+	// Native mode is an HD6309 concept; the MC6809 has no MD register.
+	if (md_native && !use_hd6309) {
+		fprintf(stderr, "usim09: --md-native requires --hd6309\n");
 		return EXIT_FAILURE;
 	}
 
@@ -114,6 +123,11 @@ int main(int argc, char *argv[])
 	}
 
 	cpu.reset();
+	// After reset, which clears MD. Lets an image that never runs LDMD
+	// itself be observed in native mode.
+	if (md_native) {
+		static_cast<hd6309&>(cpu).set_native_mode(true);
+	}
 	cpu.run();
 
 	return EXIT_SUCCESS;
