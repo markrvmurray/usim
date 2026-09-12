@@ -304,6 +304,22 @@ void hd6309::cwai()
 // saving is conditional: the extra cycle exists only when the branch is
 // taken, so charge_native_delta works it out from the resulting PC.
 //
+// Two zeroes in this table are worth calling out, because a zero can
+// mean either "the reference says no difference" or "nobody checked".
+// Both of these are the former:
+//
+//   TFM ($1138-$113B) is 6+3n in BOTH modes. Atkinson's per-instruction
+//   table prints it as "6 + 3n" with no slash, and a slash is exactly
+//   how that document spells an emulation/native split everywhere else
+//   -- so this is a positive statement, not an omission. Simpson's
+//   guide leaves the native column blank, meaning no difference, and
+//   MAME applies no native conditioning to its TFM loop. Three sources,
+//   no saving.
+//
+//   The illegal-instruction / divide-by-zero trap has no entry because
+//   it runs the SWI2/SWI3 entry sequence, which is not native-mode
+//   conditional either; see the comment on hd6309::trap.
+//
 const int8_t hd6309::native_delta[3][256] = {
     {  // page 0
 	 1,  0,  0,  1,  1,  0,  1,  1,  1,  1,  1,  0,  1,  2,  1,  1,   // $00
