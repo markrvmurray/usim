@@ -84,6 +84,7 @@
 #include "picotask.h"
 #include "picotick.h"
 #include "picoide.h"
+#include "picovideo.h"
 #include "picofram.h"
 #include "tracectl.h"
 #include "system_watchpoint.h"
@@ -201,6 +202,10 @@ static void usage(const char* prog)
 		"                      still be observed and timed in native mode.\n"
 		"                      Requires --hd6309.\n"
 		"  --timeout=N         cap at N instructions (rc 124 on hit)\n"
+		"  --video[=SCALE]     open the pico-thing-video window (SDL, the\n"
+		"                      firmware's own renderer; SCALE is an integer\n"
+		"                      window zoom, default 1). Default off: scripted\n"
+		"                      and batch runs stay windowless\n"
 		"  --cycles            print total cycles to stderr on exit\n"
 		"  --trace             per-instruction CPU trace\n"
 		"  --trace-from=N      enable trace at instruction N (windowed)\n"
@@ -266,6 +271,8 @@ int main(int argc, char* argv[])
 	const char*		fram_path = "picothing.fram";
 
 	unsigned long		timeout = 0;
+	bool			video_window = false;
+	int			video_scale = 1;
 	bool			report_cycles = false;
 	bool			trace = false;
 	unsigned long		trace_from = 0;		// 0 = unset
@@ -301,6 +308,12 @@ int main(int argc, char* argv[])
 	for (int i = 1; i < argc; i++) {
 		if (strncmp(argv[i], "--timeout=", 10) == 0) {
 			timeout = strtoul(argv[i] + 10, nullptr, 10);
+		} else if (strcmp(argv[i], "--video") == 0) {
+			video_window = true;
+		} else if (strncmp(argv[i], "--video=", 8) == 0) {
+			video_window = true;
+			video_scale = (int)strtoul(argv[i] + 8, nullptr, 10);
+			if (video_scale < 1) video_scale = 1;
 		} else if (strcmp(argv[i], "--cycles") == 0) {
 			report_cycles = true;
 		} else if (strcmp(argv[i], "--trace") == 0) {
@@ -499,6 +512,7 @@ int main(int argc, char* argv[])
 	auto tick       = std::make_shared<PicoTick>((uint32_t)tick_cycles);	// default 50Hz at ~1MHz; --tick to amplify IRQ-race pressure
 	auto ide        = std::make_shared<PicoIDE>(disk_path, slave_path);
 	auto fram       = std::make_shared<PicoFRAM>(fram_path);
+	auto video      = std::make_shared<PicoVideo>(cpu, video_window, video_scale);
 	auto tracectl   = std::make_shared<TraceCtl>(cpu, &brk_enabled);
 	auto watch      = std::make_shared<SystemWatchpoint>(cpu);
 	auto watch_ctrl = std::make_shared<SystemWatchpointCtrl>(*watch);
@@ -522,6 +536,7 @@ int main(int argc, char* argv[])
 	cpu.attach(watch);				// ActiveDevice: reset disarms
 	cpu.attach(datram_tk);				// ActiveDevice: advances DATRAM NMI pulse
 	cpu.attach_range(ide,        0xFF00, 0x000A);	// $FF00-$FF09
+	cpu.attach_range(video,      0xFF10, 0x0008);	// $FF10-$FF17 (video Pico)
 	cpu.attach_range(taskreg,    0xFFC0, 0x0001);	// $FFC0
 	cpu.attach_range(console,    0xFFC4, 0x0002);	// $FFC4-$FFC5
 	cpu.attach_range(aux_acia,   0xFFC6, 0x0002);	// $FFC6-$FFC7

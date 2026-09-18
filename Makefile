@@ -29,6 +29,16 @@ BIN		= usim09 usim09batch usim09pt tests/test6809 tests/test6309 \
 
 LIB		= libusim.a
 
+# --- Pico-Thing video simulator (usim09pt only) ---
+# The window renders with the pico-thing-video firmware's own PORTABLE
+# renderer, compiled unchanged from that tree. SDL2 comes via pkg-config;
+# -isystem keeps its headers outside -Werror's blast radius. None of this
+# touches libusim or the other binaries.
+PICOVIDEO	?= $(HOME)/Documents/PICO/pico-thing-video
+SDL_CFLAGS	:= $(shell pkg-config --cflags sdl2 | sed 's/-I/-isystem /g')
+SDL_LIBS	:= $(shell pkg-config --libs sdl2)
+PV_OBJS		= picovideo.o picovideo_display.o pv_render.o
+
 all: $(BIN)
 
 $(LIB): $(OBJS)
@@ -72,8 +82,19 @@ test6309: tests/test6309 tests/test6309.bin
 usim09batch: $(LIB) main09batch.o batchterm.o
 	$(CXX) $(CCFLAGS) $(LDFLAGS) main09batch.o batchterm.o -L. -lusim -o $(@)
 
-usim09pt: $(LIB) main_picothing.o term.o ptyserial.o
-	$(CXX) $(CCFLAGS) $(LDFLAGS) main_picothing.o term.o ptyserial.o -L. -lusim -o $(@)
+usim09pt: $(LIB) main_picothing.o term.o ptyserial.o $(PV_OBJS)
+	$(CXX) $(CCFLAGS) $(LDFLAGS) main_picothing.o term.o ptyserial.o $(PV_OBJS) $(SDL_LIBS) -L. -lusim -o $(@)
+
+# Firmware renderer, compiled from the pico-thing-video tree (VIDEO_DEMO
+# gates the built-in test pattern the simulator shows at reset).
+pv_render.o: $(PICOVIDEO)/src/video_render.cpp
+	$(CXX) $(CPPFLAGS) $(CCFLAGS) -I$(PICOVIDEO)/include -Ipico_shim -DVIDEO_DEMO=1 -c -o $(@) $<
+
+picovideo.o: picovideo.cpp
+	$(CXX) $(CPPFLAGS) $(CCFLAGS) -I$(PICOVIDEO)/include -DVIDEO_DEMO=1 -c -o $(@) $<
+
+picovideo_display.o: picovideo_display.cpp
+	$(CXX) $(CPPFLAGS) $(CCFLAGS) -I$(PICOVIDEO)/include $(SDL_CFLAGS) -c -o $(@) $<
 
 .SUFFIXES: .cpp
 
