@@ -15,6 +15,9 @@
 #include "mc6809.h"
 #include "picovideo.h"
 #include "vid_link.h"
+#include "video.h"
+#include "video_render.h"
+#include "font_spleen_8x16.h"
 
 static int failures = 0;
 
@@ -39,6 +42,22 @@ void picovideo_display_shutdown()
 
 static const Word DATA = 0;	// $FF10
 static const Word STAT = 1;	// $FF11
+
+// The console renders white (0xFF) glyph pixels on an opaque black
+// (0x00) background. Compare a text cell against the font directly —
+// the same table the renderer blits from.
+static bool check_cell(int col, int row, uint8_t ch)
+{
+	for (int gy = 0; gy < CHAR_H; gy++) {
+		uint8_t mask = font_spleen_8x16[ch][gy];
+		for (int gx = 0; gx < CHAR_W; gx++) {
+			uint8_t want = (mask & (0x80 >> gx)) ? 0xFF : 0x00;
+			if (video_framebuffer[row * CHAR_H + gy][col * CHAR_W + gx] != want)
+				return false;
+		}
+	}
+	return true;
+}
 
 int main()
 {
@@ -113,6 +132,54 @@ int main()
 		CHECK(v.read(DATA) == (Byte)i);
 	}
 	CHECK(!(v.read(STAT) & VID_STAT_RDRF));
+
+	// ---- M1: the glass TTY (loopback OFF routes bytes to the console) ----
+
+	// Reset re-draws the demo; the first console byte lazily claims the
+	// screen: graphics cleared, text cleared, cursor homed.
+	v.reset();
+	v.write(STAT, 0x00);		// loopback off
+	v.write(DATA, 'H');
+	v.write(DATA, 'i');
+	v.tick(1);
+	CHECK(check_cell(0, 0, 'H'));
+	CHECK(check_cell(1, 0, 'i'));
+	CHECK(video_framebuffer[300][700] == 0x00);	// demo gone
+
+	// CR returns to column 0 without a line feed: overwrite in place.
+	v.write(DATA, 0x0D);
+	v.write(DATA, 'X');
+	v.tick(1);
+	CHECK(check_cell(0, 0, 'X'));
+
+	// LF moves down, keeping the column.
+	v.write(DATA, 0x0A);
+	v.write(DATA, 'Y');
+	v.tick(1);
+	CHECK(check_cell(1, 1, 'Y'));
+
+	// Console bytes must not appear on the input FIFO when loopback is
+	// off (they went to the renderer instead).
+	CHECK(!(v.read(STAT) & VID_STAT_RDRF));
+
+	// Scrolling: line-feed to the bottom and once more; everything moves
+	// up one row, so Y (row 1) lands on row 0 and X scrolls with it.
+	for (int i = 0; i < 28; i++)
+		v.write(DATA, 0x0A);	// row 1 + 28 = the bottom row
+	v.tick(1);
+	CHECK(check_cell(1, 1, 'Y'));	// not yet scrolled
+	v.write(DATA, 0x0A);		// one beyond the bottom: scroll
+	v.tick(1);
+	CHECK(check_cell(1, 0, 'Y'));
+	CHECK(!check_cell(0, 0, 'X'));	// X's row scrolled away... to row -1
+	CHECK(check_cell(0, -1 + 1, 'X') == false);
+
+	// M0 loopback still works after M1 (the vlink test must keep passing).
+	v.write(STAT, VID_CTL_LOOPBACK);
+	v.write(DATA, 0x55);
+	v.tick(1);
+	CHECK(v.read(STAT) & VID_STAT_RDRF);
+	CHECK(v.read(DATA) == 0x55);
 
 	if (failures == 0) {
 		printf("OK\n");
