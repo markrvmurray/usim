@@ -174,6 +174,114 @@ int main()
 	CHECK(!check_cell(0, 0, 'X'));	// X's row scrolled away... to row -1
 	CHECK(check_cell(0, -1 + 1, 'X') == false);
 
+	// ---- M2: the control-code table ----
+
+	// Clear/home ($0C): wipes the text, next glyph lands at the origin.
+	v.write(DATA, 0x0C);
+	v.write(DATA, 'A');
+	v.tick(1);
+	CHECK(check_cell(0, 0, 'A'));
+	CHECK(check_cell(1, 0, ' '));	// scrolled content gone
+
+	// Cursor-XY ($02 col+$20 row+$20).
+	v.write(DATA, 0x02);
+	v.write(DATA, 0x20 + 10);
+	v.write(DATA, 0x20 + 5);
+	v.write(DATA, 'Q');
+	v.tick(1);
+	CHECK(check_cell(10, 5, 'Q'));
+
+	// Home ($01).
+	v.write(DATA, 0x01);
+	v.write(DATA, 'H');
+	v.tick(1);
+	CHECK(check_cell(0, 0, 'H'));
+
+	// Backspace ($08) is non-destructive cursor-left: "AB" BS 'C' -> "AC".
+	v.write(DATA, 0x0C);
+	v.write(DATA, 'A');
+	v.write(DATA, 'B');
+	v.write(DATA, 0x08);
+	v.write(DATA, 'C');
+	v.tick(1);
+	CHECK(check_cell(0, 0, 'A'));
+	CHECK(check_cell(1, 0, 'C'));
+
+	// Erase to end of line ($04): position mid-text, tail clears, head stays.
+	v.write(DATA, 0x0C);
+	for (const char* s = "ABCDEF"; *s; s++)
+		v.write(DATA, (Byte)*s);
+	v.write(DATA, 0x02);
+	v.write(DATA, 0x20 + 2);
+	v.write(DATA, 0x20 + 0);
+	v.write(DATA, 0x04);
+	v.tick(1);
+	CHECK(check_cell(1, 0, 'B'));
+	CHECK(check_cell(2, 0, ' '));
+	CHECK(check_cell(5, 0, ' '));
+
+	// Erase line ($03): whole row blank, column preserved.
+	v.write(DATA, 0x03);
+	v.write(DATA, 'Z');
+	v.tick(1);
+	CHECK(check_cell(0, 0, ' '));	// 'A' erased too
+	CHECK(check_cell(2, 0, 'Z'));	// column was preserved
+
+	// Cursor right ($06) skips a cell; cursor up ($09) climbs a row.
+	v.write(DATA, 0x0C);
+	v.write(DATA, 'A');
+	v.write(DATA, 0x06);
+	v.write(DATA, 'B');
+	v.tick(1);
+	CHECK(check_cell(0, 0, 'A'));
+	CHECK(check_cell(1, 0, ' '));
+	CHECK(check_cell(2, 0, 'B'));
+	v.write(DATA, 0x02);
+	v.write(DATA, 0x20 + 3);
+	v.write(DATA, 0x20 + 4);
+	v.write(DATA, 0x09);
+	v.write(DATA, 'U');
+	v.tick(1);
+	CHECK(check_cell(3, 3, 'U'));
+
+	// Cursor on/off ($05 $21/$20): argument consumed, not printed.
+	v.write(DATA, 0x0C);
+	v.write(DATA, 'A');
+	v.write(DATA, 0x05);
+	v.write(DATA, 0x20);
+	v.write(DATA, 'B');
+	v.tick(1);
+	CHECK(check_cell(1, 0, 'B'));
+
+	// Bell ($07) is a no-op on this device.
+	v.write(DATA, 0x07);
+	v.write(DATA, 'C');
+	v.tick(1);
+	CHECK(check_cell(2, 0, 'C'));
+
+	// Erase to end of window ($0B): below and right clear, above stays.
+	v.write(DATA, 0x0C);
+	v.write(DATA, 'T');			// top-left marker
+	v.write(DATA, 0x02);
+	v.write(DATA, 0x20 + 0);
+	v.write(DATA, 0x20 + 10);
+	for (const char* s = "MID"; *s; s++)
+		v.write(DATA, (Byte)*s);
+	v.write(DATA, 0x02);
+	v.write(DATA, 0x20 + 0);
+	v.write(DATA, 0x20 + 20);
+	v.write(DATA, 'L');			// low marker
+	v.write(DATA, 0x02);
+	v.write(DATA, 0x20 + 1);
+	v.write(DATA, 0x20 + 10);
+	v.write(DATA, 0x0B);
+	v.tick(1);
+	CHECK(check_cell(0, 0, 'T'));		// above: intact
+	CHECK(check_cell(0, 10, 'M'));		// left of cursor: intact
+	CHECK(check_cell(1, 10, ' '));		// from cursor: erased
+	CHECK(check_cell(2, 10, ' '));
+	CHECK(check_cell(0, 20, ' '));		// rows below: erased
+
 	// M0 loopback still works after M1 (the vlink test must keep passing).
 	v.write(STAT, VID_CTL_LOOPBACK);
 	v.write(DATA, 0x55);
