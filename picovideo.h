@@ -24,6 +24,7 @@
 #pragma once
 
 #include <cstring>
+#include <string>
 #include "device.h"
 #include "usim.h"
 
@@ -37,9 +38,19 @@ class PicoVideo : public ActiveMappedDevice {
 	const char*		shot_path;	// --screenshot=FILE (or null)
 	uint32_t		cycles = 0;
 
+	// --video-input: cycle-scheduled keystroke injection into the
+	// guest-input FIFO (the sim-side equivalent of typing on the USB
+	// keyboard), mirroring --input's scheduling for the serial console.
+	std::string		inject;
+	uint64_t		inject_first = 0;
+	uint64_t		inject_step = 0;
+	size_t			inject_pos = 0;
+
 public:
 			PicoVideo(USim& sys, bool window, int scale,
 			    const char* shot_path);
+
+	void		set_input(const char* s, uint64_t first, uint64_t step);
 	virtual		~PicoVideo();
 
 	void		reset() override;

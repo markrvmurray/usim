@@ -356,6 +356,30 @@ int main()
 	v.tick(1);
 	CHECK(check_cell(2, 0, 'C'));
 
+	// ---- M4: guest input path (the USB keyboard's entry point) ----
+
+	// vid_link_input feeds the RX FIFO exactly as the HID cooker does:
+	// RDRF rises, reads pop in order, RDRF clears when drained.
+	v.write(STAT, 0x00);			// loopback off
+	v.tick(1);
+	CHECK(!(v.read(STAT) & VID_STAT_RDRF));
+	vid_link_input('l');
+	vid_link_input('s');
+	vid_link_input(0x0D);
+	v.tick(1);
+	CHECK(v.read(STAT) & VID_STAT_RDRF);
+	CHECK(v.read(DATA) == 'l');
+	CHECK(v.read(DATA) == 's');
+	CHECK(v.read(DATA) == 0x0D);
+	CHECK(!(v.read(STAT) & VID_STAT_RDRF));
+
+	// Input bytes are for the guest only — they must not render.
+	v.write(DATA, 0x0C);
+	vid_link_input('k');
+	v.tick(1);
+	CHECK(check_cell(0, 0, ' '));
+	CHECK(v.read(DATA) == 'k');
+
 	// M0 loopback still works after M1 (the vlink test must keep passing).
 	v.write(STAT, VID_CTL_LOOPBACK);
 	v.write(DATA, 0x55);

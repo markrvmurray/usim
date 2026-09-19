@@ -14,9 +14,11 @@
 
 #include "picovideo_display.h"
 
-// From the pico-thing-video firmware tree (portable renderer half).
+// From the pico-thing-video firmware tree (portable renderer half + the
+// guest-link input entry, so window keystrokes reach the guest console).
 #include "video.h"
 #include "video_render.h"
+#include "vid_link.h"
 
 static SDL_Window*	win;
 static SDL_Renderer*	ren;
@@ -77,6 +79,7 @@ static bool display_init(int scale)
 		return false;
 	}
 	build_lut();
+	SDL_StartTextInput();
 	return true;
 }
 
@@ -94,9 +97,35 @@ bool picovideo_display_service(int scale)
 
 	SDL_Event ev;
 	while (SDL_PollEvent(&ev)) {
-		if (ev.type == SDL_QUIT) {
+		switch (ev.type) {
+		case SDL_QUIT:
 			closed = true;
 			return false;
+		case SDL_TEXTINPUT:
+			// Printable typing goes to the guest console as the
+			// plain bytes the USB keyboard cooker would produce.
+			for (const char* c = ev.text.text; *c != '\0'; c++)
+				vid_link_input((uint8_t)*c);
+			break;
+		case SDL_KEYDOWN: {
+			// Non-text keys and Ctrl chords (SDL_TEXTINPUT covers
+			// the printables).
+			SDL_Keycode k = ev.key.keysym.sym;
+			if (k == SDLK_RETURN || k == SDLK_KP_ENTER)
+				vid_link_input(0x0D);
+			else if (k == SDLK_BACKSPACE)
+				vid_link_input(0x08);
+			else if (k == SDLK_TAB)
+				vid_link_input(0x09);
+			else if (k == SDLK_ESCAPE)
+				vid_link_input(0x1B);
+			else if ((ev.key.keysym.mod & KMOD_CTRL) != 0 &&
+			    k >= SDLK_a && k <= SDLK_z)
+				vid_link_input((uint8_t)(k - SDLK_a + 1));
+			break;
+		}
+		default:
+			break;
 		}
 	}
 

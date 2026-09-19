@@ -209,6 +209,13 @@ static void usage(const char* prog)
 		"  --screenshot=FILE   write the video framebuffer as a PNG on clean\n"
 		"                      exit (halt or --timeout); works headless, no\n"
 		"                      --video needed\n"
+		"  --video-input=STR   inject STR as guest-console keystrokes (the\n"
+		"                      video Pico's input FIFO, as if typed on the\n"
+		"                      USB keyboard); cycle-scheduled like --input\n"
+		"  --video-input-first=N  cycles before the first injected byte\n"
+		"                      (default 30000000)\n"
+		"  --video-input-step=N   cycles between injected bytes\n"
+		"                      (default 200000)\n"
 		"  --cycles            print total cycles to stderr on exit\n"
 		"  --trace             per-instruction CPU trace\n"
 		"  --trace-from=N      enable trace at instruction N (windowed)\n"
@@ -277,6 +284,9 @@ int main(int argc, char* argv[])
 	bool			video_window = false;
 	int			video_scale = 1;
 	const char*		video_shot = nullptr;
+	const char*		video_input = nullptr;
+	uint64_t		video_input_first = 30000000;
+	uint64_t		video_input_step = 200000;
 	bool			report_cycles = false;
 	bool			trace = false;
 	unsigned long		trace_from = 0;		// 0 = unset
@@ -320,6 +330,12 @@ int main(int argc, char* argv[])
 			if (video_scale < 1) video_scale = 1;
 		} else if (strncmp(argv[i], "--screenshot=", 13) == 0) {
 			video_shot = argv[i] + 13;
+		} else if (strncmp(argv[i], "--video-input=", 14) == 0) {
+			video_input = argv[i] + 14;
+		} else if (strncmp(argv[i], "--video-input-first=", 20) == 0) {
+			video_input_first = strtoull(argv[i] + 20, nullptr, 10);
+		} else if (strncmp(argv[i], "--video-input-step=", 19) == 0) {
+			video_input_step = strtoull(argv[i] + 19, nullptr, 10);
 		} else if (strcmp(argv[i], "--cycles") == 0) {
 			report_cycles = true;
 		} else if (strcmp(argv[i], "--trace") == 0) {
@@ -519,6 +535,8 @@ int main(int argc, char* argv[])
 	auto ide        = std::make_shared<PicoIDE>(disk_path, slave_path);
 	auto fram       = std::make_shared<PicoFRAM>(fram_path);
 	auto video      = std::make_shared<PicoVideo>(cpu, video_window, video_scale, video_shot);
+	if (video_input != nullptr)
+		video->set_input(video_input, video_input_first, video_input_step);
 	auto tracectl   = std::make_shared<TraceCtl>(cpu, &brk_enabled);
 	auto watch      = std::make_shared<SystemWatchpoint>(cpu);
 	auto watch_ctrl = std::make_shared<SystemWatchpointCtrl>(*watch);

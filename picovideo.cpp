@@ -57,8 +57,25 @@ void PicoVideo::reset()
 	vid_link_init();
 }
 
+void PicoVideo::set_input(const char* s, uint64_t first, uint64_t step)
+{
+	inject = s;
+	inject_first = first;
+	inject_step = step;
+	inject_pos = 0;
+}
+
 void PicoVideo::tick(uint32_t ticks)
 {
+	// Cycle-scheduled keystroke injection (--video-input), released one
+	// byte per step like the serial console's ScriptTerminal — through
+	// the same vid_link_input() entry the real USB HID cooker uses.
+	while (inject_pos < inject.size() &&
+	    sys.get_total_cycles() >= inject_first + inject_pos * inject_step) {
+		vid_link_input((uint8_t)inject[inject_pos]);
+		inject_pos++;
+	}
+
 	// The Core 1 dispatch loop's role: drain the command FIFO, restage
 	// Data/Stat. Runs headless too — the link must work without a window.
 	vid_link_task();
