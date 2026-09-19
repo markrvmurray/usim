@@ -25,7 +25,7 @@ LIB_SRCS	= usim.cpp memory.cpp \
 
 OBJS		= $(LIB_SRCS:.cpp=.o)
 BIN		= usim09 usim09batch usim09pt tests/test6809 tests/test6309 \
-		  tests/test_cycles6309
+		  tests/test_cycles6309 tests/test_picovideo
 
 LIB		= libusim.a
 
@@ -37,7 +37,7 @@ LIB		= libusim.a
 PICOVIDEO	?= $(HOME)/Documents/PICO/pico-thing-video
 SDL_CFLAGS	:= $(shell pkg-config --cflags sdl2 | sed 's/-I/-isystem /g')
 SDL_LIBS	:= $(shell pkg-config --libs sdl2)
-PV_OBJS		= picovideo.o picovideo_display.o pv_render.o
+PV_OBJS		= picovideo.o picovideo_display.o pv_render.o pv_link.o pv_registers.o
 
 all: $(BIN)
 
@@ -88,13 +88,22 @@ usim09pt: $(LIB) main_picothing.o term.o ptyserial.o $(PV_OBJS)
 # Firmware renderer, compiled from the pico-thing-video tree (VIDEO_DEMO
 # gates the built-in test pattern the simulator shows at reset).
 pv_render.o: $(PICOVIDEO)/src/video_render.cpp
-	$(CXX) $(CPPFLAGS) $(CCFLAGS) -I$(PICOVIDEO)/include -Ipico_shim -DVIDEO_DEMO=1 -c -o $(@) $<
+	$(CXX) -I$(PICOVIDEO)/include -Ipico_shim $(CPPFLAGS) $(CCFLAGS) -DVIDEO_DEMO=1 -c -o $(@) $<
 
 picovideo.o: picovideo.cpp
-	$(CXX) $(CPPFLAGS) $(CCFLAGS) -I$(PICOVIDEO)/include -DVIDEO_DEMO=1 -c -o $(@) $<
+	$(CXX) -I$(PICOVIDEO)/include -Ipico_shim $(CPPFLAGS) $(CCFLAGS) -DVIDEO_DEMO=1 -c -o $(@) $<
+
+# The firmware's guest-link protocol and register window, compiled
+# unchanged from the pico-thing-video tree (pico_shim no-ops the SDK
+# decorations they use).
+pv_link.o: $(PICOVIDEO)/src/vid_link.cpp
+	$(CXX) -I$(PICOVIDEO)/include -Ipico_shim $(CPPFLAGS) $(CCFLAGS) -c -o $(@) $<
+
+pv_registers.o: $(PICOVIDEO)/src/registers.cpp
+	$(CXX) -I$(PICOVIDEO)/include -Ipico_shim $(CPPFLAGS) $(CCFLAGS) -c -o $(@) $<
 
 picovideo_display.o: picovideo_display.cpp
-	$(CXX) $(CPPFLAGS) $(CCFLAGS) -I$(PICOVIDEO)/include $(SDL_CFLAGS) -c -o $(@) $<
+	$(CXX) -I$(PICOVIDEO)/include -Ipico_shim $(CPPFLAGS) $(CCFLAGS) $(SDL_CFLAGS) -c -o $(@) $<
 
 .SUFFIXES: .cpp
 
@@ -106,12 +115,13 @@ picovideo_display.o: picovideo_display.cpp
 .PHONY: test
 test: tests/test6809 tests/test6809.bin tests/test6309 tests/test6309.bin \
       tests/test_mmu_tick tests/test_system_watchpoint tests/test_picoide \
-      tests/test_cycles6309
+      tests/test_cycles6309 tests/test_picovideo
 	./tests/test6809
 	./tests/test6309
 	./tests/test_mmu_tick
 	./tests/test_system_watchpoint
 	./tests/test_picoide
+	./tests/test_picovideo
 	./tests/test_cycles6309
 	@$(MAKE) --no-print-directory cycles
 	@$(MAKE) --no-print-directory cycles6309
@@ -124,6 +134,11 @@ tests/test_system_watchpoint: tests/test_system_watchpoint.cpp $(LIB)
 
 tests/test_picoide: tests/test_picoide.cpp $(LIB)
 	$(CXX) $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_picoide.cpp -L. -lusim -o $(@)
+
+# Links the real firmware link/renderer objects; the SDL display TU is
+# replaced by stubs inside the test, so no SDL dependency here.
+tests/test_picovideo: tests/test_picovideo.cpp picovideo.o pv_link.o pv_registers.o pv_render.o $(LIB)
+	$(CXX) -I$(PICOVIDEO)/include -Ipico_shim $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_picovideo.cpp picovideo.o pv_link.o pv_registers.o pv_render.o -L. -lusim -o $(@)
 
 # Per-instruction timing, both MD modes. Unlike the two aggregate gates
 # below, this one names the instruction that moved, and it is the only
@@ -222,7 +237,7 @@ cycles6309: tests/test6309 tests/test6309.bin
 
 .PHONY: clean
 clean:
-	$(RM) $(BIN) $(LIB) *.o *.d tests/test_mmu_tick tests/*.o tests/*.d tests/test6809.bin tests/test_system_watchpoint tests/test_picoide tests/test_cycles6309
+	$(RM) $(BIN) $(LIB) *.o *.d tests/test_mmu_tick tests/*.o tests/*.d tests/test6809.bin tests/test_system_watchpoint tests/test_picoide tests/test_cycles6309 tests/test_picovideo
 
 # Compiler-generated header dependencies (see CPPFLAGS -MMD -MP). Pulling
 # these in means editing any header recompiles exactly the objects that

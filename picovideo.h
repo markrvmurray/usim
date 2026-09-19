@@ -2,12 +2,14 @@
 //	picovideo.h
 //	Pico-Thing video Pico at $FF10-$FF17
 //
-//	Iteration 1: the eight registers behave as plain RAM (write, read
-//	back — no protocol yet), and the optional SDL window shows whatever
-//	the pico-thing-video firmware's PORTABLE renderer (video_render.cpp,
-//	compiled into this binary unchanged) has drawn — at reset, its
-//	built-in test pattern. The register protocol (the MC6850-shaped
-//	VID.Data/VID.Stat link) replaces the RAM behaviour in iteration 2.
+//	The registers speak the firmware's own guest-link protocol: the
+//	MC6850-shaped VID.Data/VID.Stat mailbox, served by the REAL
+//	vid_link.cpp + registers.cpp compiled unchanged from the
+//	pico-thing-video tree — reads pop the input FIFO exactly as the
+//	board's bus-read ISR does, writes replicate its write ISR (store,
+//	mirror for the reserved offsets, dispatch). The optional SDL window
+//	shows whatever the firmware's PORTABLE renderer has drawn — at
+//	reset, its built-in test pattern.
 //
 //	The window is strictly opt-in (--video): scripted/batch runs must
 //	never open one. Display service happens in tick() and costs zero
@@ -24,10 +26,8 @@
 
 class PicoVideo : public ActiveMappedDevice {
 
-	static const size_t	NREGS = 8;
 	static const uint32_t	SERVICE_INTERVAL = 20000;	// guest cycles (~50Hz at 1MHz)
 
-	Byte			regs[NREGS];
 	USim&			sys;
 	bool			window;		// --video given
 	int			scale;		// --video=N
