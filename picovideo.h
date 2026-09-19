@@ -12,7 +12,10 @@
 //	reset, its built-in test pattern.
 //
 //	The window is strictly opt-in (--video): scripted/batch runs must
-//	never open one. Display service happens in tick() and costs zero
+//	never open one. --screenshot=FILE writes the framebuffer as a PNG
+//	when the emulator exits cleanly (halt or --timeout — not a signal),
+//	window or no window, so scripted runs can capture what the guest
+//	drew. Display service happens in tick() and costs zero
 //	guest cycles, so attaching this device cannot drift cycle counts.
 //
 //	vim: ts=8 sw=8 noet:
@@ -31,10 +34,12 @@ class PicoVideo : public ActiveMappedDevice {
 	USim&			sys;
 	bool			window;		// --video given
 	int			scale;		// --video=N
+	const char*		shot_path;	// --screenshot=FILE (or null)
 	uint32_t		cycles = 0;
 
 public:
-			PicoVideo(USim& sys, bool window, int scale);
+			PicoVideo(USim& sys, bool window, int scale,
+			    const char* shot_path);
 	virtual		~PicoVideo();
 
 	void		reset() override;

@@ -36,7 +36,7 @@ LIB		= libusim.a
 # touches libusim or the other binaries.
 PICOVIDEO	?= $(HOME)/Documents/PICO/pico-thing-video
 SDL_CFLAGS	:= $(shell pkg-config --cflags sdl2 | sed 's/-I/-isystem /g')
-SDL_LIBS	:= $(shell pkg-config --libs sdl2)
+SDL_LIBS	:= $(shell pkg-config --libs sdl2) -lz
 PV_OBJS		= picovideo.o picovideo_display.o pv_render.o pv_link.o pv_registers.o pv_console.o
 
 all: $(BIN)

@@ -206,6 +206,9 @@ static void usage(const char* prog)
 		"                      firmware's own renderer; SCALE is an integer\n"
 		"                      window zoom, default 1). Default off: scripted\n"
 		"                      and batch runs stay windowless\n"
+		"  --screenshot=FILE   write the video framebuffer as a PNG on clean\n"
+		"                      exit (halt or --timeout); works headless, no\n"
+		"                      --video needed\n"
 		"  --cycles            print total cycles to stderr on exit\n"
 		"  --trace             per-instruction CPU trace\n"
 		"  --trace-from=N      enable trace at instruction N (windowed)\n"
@@ -273,6 +276,7 @@ int main(int argc, char* argv[])
 	unsigned long		timeout = 0;
 	bool			video_window = false;
 	int			video_scale = 1;
+	const char*		video_shot = nullptr;
 	bool			report_cycles = false;
 	bool			trace = false;
 	unsigned long		trace_from = 0;		// 0 = unset
@@ -314,6 +318,8 @@ int main(int argc, char* argv[])
 			video_window = true;
 			video_scale = (int)strtoul(argv[i] + 8, nullptr, 10);
 			if (video_scale < 1) video_scale = 1;
+		} else if (strncmp(argv[i], "--screenshot=", 13) == 0) {
+			video_shot = argv[i] + 13;
 		} else if (strcmp(argv[i], "--cycles") == 0) {
 			report_cycles = true;
 		} else if (strcmp(argv[i], "--trace") == 0) {
@@ -512,7 +518,7 @@ int main(int argc, char* argv[])
 	auto tick       = std::make_shared<PicoTick>((uint32_t)tick_cycles);	// default 50Hz at ~1MHz; --tick to amplify IRQ-race pressure
 	auto ide        = std::make_shared<PicoIDE>(disk_path, slave_path);
 	auto fram       = std::make_shared<PicoFRAM>(fram_path);
-	auto video      = std::make_shared<PicoVideo>(cpu, video_window, video_scale);
+	auto video      = std::make_shared<PicoVideo>(cpu, video_window, video_scale, video_shot);
 	auto tracectl   = std::make_shared<TraceCtl>(cpu, &brk_enabled);
 	auto watch      = std::make_shared<SystemWatchpoint>(cpu);
 	auto watch_ctrl = std::make_shared<SystemWatchpointCtrl>(*watch);

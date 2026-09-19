@@ -5,6 +5,8 @@
 //	vim: ts=8 sw=8 noet:
 //
 
+#include <cstdio>
+
 #include "picovideo.h"
 #include "picovideo_display.h"
 
@@ -21,13 +23,22 @@
 
 extern registers &reg;	// the read-side proxy singleton (registers.cpp)
 
-PicoVideo::PicoVideo(USim& sys, bool window, int scale)
-	: sys(sys), window(window), scale(scale)
+PicoVideo::PicoVideo(USim& sys, bool window, int scale,
+    const char* shot_path)
+	: sys(sys), window(window), scale(scale), shot_path(shot_path)
 {
 }
 
 PicoVideo::~PicoVideo()
 {
+	// Capture before teardown: on a clean exit (halt or timeout) the
+	// framebuffer still holds whatever the guest last drew.
+	if (shot_path != nullptr) {
+		if (picovideo_screenshot(shot_path))
+			fprintf(stderr, "picovideo: screenshot written to %s\n", shot_path);
+		else
+			fprintf(stderr, "picovideo: screenshot to %s FAILED\n", shot_path);
+	}
 	picovideo_display_shutdown();
 }
 

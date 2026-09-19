@@ -15,3 +15,7 @@ bool picovideo_display_service(int scale);
 
 // Tear the window and SDL down (idempotent; safe if never initialised).
 void picovideo_display_shutdown();
+
+// Write the firmware framebuffer as a PNG. zlib only — no SDL, no window;
+// works in fully headless runs. Returns true on success.
+bool picovideo_screenshot(const char* path);

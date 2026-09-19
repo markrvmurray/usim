@@ -40,6 +40,11 @@ void picovideo_display_shutdown()
 {
 }
 
+bool picovideo_screenshot(const char*)
+{
+	return true;
+}
+
 static const Word DATA = 0;	// $FF10
 static const Word STAT = 1;	// $FF11
 
@@ -62,7 +67,7 @@ static bool check_cell(int col, int row, uint8_t ch)
 int main()
 {
 	mc6809 cpu;
-	PicoVideo v(cpu, false, 1);
+	PicoVideo v(cpu, false, 1, nullptr);
 
 	v.reset();
 
