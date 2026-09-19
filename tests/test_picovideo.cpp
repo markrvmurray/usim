@@ -11,6 +11,7 @@
 //
 
 #include <cstdio>
+#include <initializer_list>
 
 #include "mc6809.h"
 #include "picovideo.h"
@@ -286,6 +287,74 @@ int main()
 	CHECK(check_cell(1, 10, ' '));		// from cursor: erased
 	CHECK(check_cell(2, 10, ' '));
 	CHECK(check_cell(0, 20, ' '));		// rows below: erased
+
+	// ---- M3: the $1B graphics dispatcher ----
+
+	auto esc = [&](std::initializer_list<int> bytes) {
+		v.write(DATA, 0x1B);
+		for (int b : bytes)
+			v.write(DATA, (Byte)b);
+	};
+
+	// Point with the default palette (FColor=7 -> white 0xFF).
+	v.write(DATA, 0x0C);			// clean screen
+	esc({0x42, 0, 200, 0, 100});		// Point (200,100)
+	v.tick(1);
+	CHECK(video_framebuffer[100][200] == 0xFF);
+
+	// Palette + FColor: register 1 := GIME 36 (full red) -> 0xE0.
+	esc({0x31, 1, 36});			// Palette reg1, colourValue 36
+	esc({0x32, 1});				// FColor 1
+	esc({0x42, 0, 210, 0, 100});		// Point (210,100)
+	v.tick(1);
+	CHECK(video_framebuffer[100][210] == 0xE0);
+
+	// SetDPtr + LineM: a diagonal, and the pointer must follow.
+	esc({0x32, 7});				// FColor back to white
+	esc({0x40, 0, 50, 0, 200});		// SetDPtr (50,200)
+	esc({0x46, 0, 60, 0, 210});		// LineM to (60,210)
+	v.tick(1);
+	for (int k = 0; k <= 10; k++)
+		CHECK(video_framebuffer[200 + k][50 + k] == 0xFF);
+	esc({0x4B, 0, 3, 0, 3});		// RBar +3,+3 from the MOVED pointer
+	v.tick(1);
+	CHECK(video_framebuffer[211][61] == 0xFF);	// inside (60..63,210..213)
+	CHECK(video_framebuffer[213][63] == 0xFF);
+
+	// Bar (absolute) fills the normalised rectangle.
+	esc({0x40, 1, 44, 0, 150});		// SetDPtr (300,150)
+	esc({0x4A, 1, 34, 0, 140});		// Bar to (290,140) — inverted corners
+	v.tick(1);
+	CHECK(video_framebuffer[140][290] == 0xFF);
+	CHECK(video_framebuffer[150][300] == 0xFF);
+	CHECK(video_framebuffer[145][295] == 0xFF);
+	CHECK(video_framebuffer[139][290] == 0x00);	// outside
+
+	// Framing: an implemented-later command (Circle, 2 params) is
+	// consumed; the next byte prints as a glyph at the text cursor.
+	v.write(DATA, 0x0C);
+	esc({0x50, 30, 30});			// Circle — ignored, framed
+	v.write(DATA, 'A');
+	v.tick(1);
+	CHECK(check_cell(0, 0, 'A'));
+
+	// Framing: GPLoad's variable payload is swallowed — printable bytes
+	// inside the payload must NOT render.
+	esc({0x2B, 0, 1, 0, 0, 8, 0, 8, 0, 4});	// header: bufSize = 4
+	v.write(DATA, 'W');			// payload...
+	v.write(DATA, 'X');
+	v.write(DATA, 'Y');
+	v.write(DATA, 'Z');			// ...last payload byte
+	v.write(DATA, 'B');			// first REAL byte again
+	v.tick(1);
+	CHECK(check_cell(1, 0, 'B'));
+	CHECK(check_cell(2, 0, ' '));
+
+	// Framing: a reserved sub-code is dropped without params.
+	esc({0x26});
+	v.write(DATA, 'C');
+	v.tick(1);
+	CHECK(check_cell(2, 0, 'C'));
 
 	// M0 loopback still works after M1 (the vlink test must keep passing).
 	v.write(STAT, VID_CTL_LOOPBACK);
