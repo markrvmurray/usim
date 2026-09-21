@@ -54,6 +54,12 @@ static const Word STAT = 1;	// $FF11
 // the same table the renderer blits from.
 static bool check_cell(int col, int row, uint8_t ch)
 {
+	// The cursor lives in the framebuffer and inverts the cell it sits on,
+	// so lift it first: these checks are about text content, not the
+	// overlay. Cursor behaviour itself is asserted against the framebuffer
+	// directly, after an explicit vidterm_cursor_service().
+	vidterm_cursor_hide();
+
 	for (int gy = 0; gy < CHAR_H; gy++) {
 		uint8_t mask = font_spleen_8x16[ch][gy];
 		for (int gx = 0; gx < CHAR_W; gx++) {
@@ -379,6 +385,60 @@ int main()
 	v.tick(1);
 	CHECK(check_cell(0, 0, ' '));
 	CHECK(v.read(DATA) == 'k');
+
+	// ---- Cursor: drawn into the framebuffer, with save-under ----
+
+	// A console byte claims the screen and enables the cursor. (An earlier
+	// case above turned the cursor off, so re-enable it explicitly rather
+	// than inheriting that state.)
+	v.write(DATA, 0x0C);
+	v.write(DATA, 0x05);
+	v.write(DATA, 0x21);
+	v.write(DATA, 'A');
+	v.tick(1);
+	CHECK(video_cursor_enabled);
+	CHECK(video_cursor_col == 1 && video_cursor_row == 0);  // parked after 'A'
+
+	// The service loop draws it: the cell it sits on is inverted, and the
+	// glyph to its left is untouched.
+	vidterm_cursor_service();
+	CHECK(video_framebuffer[4][CHAR_W + 0] == 0xFF);        // blank cell, inverted
+	CHECK(check_cell(0, 0, 'A'));                           // 'A' unaffected
+
+	// Hiding puts the covered pixels back exactly.
+	vidterm_cursor_hide();
+	CHECK(check_cell(1, 0, ' '));
+
+	// It must not corrupt a glyph drawn where it was sitting: draw the
+	// cursor, then let the console write over that very cell.
+	vidterm_cursor_service();
+	v.write(DATA, 'B');
+	v.tick(1);
+	vidterm_cursor_hide();
+	CHECK(check_cell(1, 0, 'B'));   // no stale save-under painted over it
+
+	// Turning the cursor off removes it from the framebuffer immediately.
+	vidterm_cursor_service();
+	v.write(DATA, 0x05);
+	v.write(DATA, 0x20);
+	v.tick(1);
+	CHECK(!video_cursor_enabled);
+	CHECK(check_cell(2, 0, ' '));   // where it had parked, now clean
+	v.write(DATA, 0x05);
+	v.write(DATA, 0x21);
+	v.tick(1);
+
+	// Blink: half a cycle later it is gone, a full cycle later it is back.
+	vidterm_cursor_service();
+	const int cx = video_cursor_col * CHAR_W;
+	CHECK(video_framebuffer[4][cx] == 0xFF);
+	video_frames += VIDEO_CURSOR_BLINK_FRAMES;
+	vidterm_cursor_service();
+	CHECK(video_framebuffer[4][cx] == 0x00);
+	video_frames += VIDEO_CURSOR_BLINK_FRAMES;
+	vidterm_cursor_service();
+	CHECK(video_framebuffer[4][cx] == 0xFF);
+	vidterm_cursor_hide();
 
 	// M0 loopback still works after M1 (the vlink test must keep passing).
 	v.write(STAT, VID_CTL_LOOPBACK);

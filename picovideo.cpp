@@ -77,8 +77,10 @@ void PicoVideo::tick(uint32_t ticks)
 	}
 
 	// The Core 1 dispatch loop's role: drain the command FIFO, restage
-	// Data/Stat. Runs headless too — the link must work without a window.
+	// Data/Stat, and run the cursor. Runs headless too — the link must
+	// work without a window.
 	vid_link_task();
+	vidterm_cursor_service();
 
 	if (!window)
 		return;

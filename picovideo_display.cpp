@@ -136,6 +136,9 @@ bool picovideo_display_service(int scale)
 		return true;
 	last_present_ms = now;
 
+	// One frame of the blink clock; on hardware this comes from vsync.
+	video_frames = video_frames + 1;
+
 	void* pixels;
 	int pitch;
 	if (SDL_LockTexture(tex, nullptr, &pixels, &pitch) == 0) {
