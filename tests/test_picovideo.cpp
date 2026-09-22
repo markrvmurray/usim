@@ -440,6 +440,139 @@ int main()
 	CHECK(video_framebuffer[4][cx] == 0xFF);
 	vidterm_cursor_hide();
 
+	// ---- Mouse: polled snapshot on $FF12, change flag in Stat bit6 ----
+	{
+		const Word MOUSE = 2;   // $FF12
+
+		// Drain whatever the boot state left staged, so the next pass
+		// starts at byte 0 of a fresh latch.
+		for (int i = 0; i < (int)VID_MOUSE_SNAPSHOT_LEN; i++)
+			(void)v.read(MOUSE);
+
+		vid_link_mouse_update(300, 200, VID_MOUSE_BTN_LEFT, 0);
+		v.tick(1);
+		CHECK(v.read(STAT) & VID_STAT_MOUSE);   // something moved
+
+		Byte s[VID_MOUSE_SNAPSHOT_LEN];
+		for (int i = 0; i < (int)VID_MOUSE_SNAPSHOT_LEN; i++)
+			s[i] = v.read(MOUSE);
+		CHECK(s[0] == VID_MOUSE_BTN_LEFT);
+		CHECK(s[1] == VID_MOUSE_BTN_LEFT);          // press recorded
+		CHECK(((s[2] << 8) | s[3]) == 300);         // X, big-endian
+		CHECK(((s[4] << 8) | s[5]) == 200);         // Y
+		CHECK((int8_t)s[6] == 0);
+
+		// Reading the snapshot answers the change flag.
+		v.tick(1);
+		CHECK(!(v.read(STAT) & VID_STAT_MOUSE));
+
+		// Sticky and wheel are cleared by the latch, so a second pass
+		// over an unchanged mouse reports no new press.
+		vid_link_mouse_update(300, 200, VID_MOUSE_BTN_LEFT, 0);
+		v.tick(1);
+		for (int i = 0; i < (int)VID_MOUSE_SNAPSHOT_LEN; i++)
+			s[i] = v.read(MOUSE);
+		CHECK(s[0] == VID_MOUSE_BTN_LEFT);          // still held
+		CHECK(s[1] == 0);                           // but not newly pressed
+
+		// THE POINT OF BYTE 1: a click entirely between two polls must
+		// still be seen. Press and release with no read in between.
+		vid_link_mouse_update(300, 200, 0, 0);              // release
+		vid_link_mouse_update(300, 200, VID_MOUSE_BTN_RIGHT, 0);
+		vid_link_mouse_update(300, 200, 0, 0);              // released again
+		v.tick(1);
+		for (int i = 0; i < (int)VID_MOUSE_SNAPSHOT_LEN; i++)
+			s[i] = v.read(MOUSE);
+		CHECK(s[0] == 0);                           // up by the time we look
+		CHECK(s[1] & VID_MOUSE_BTN_RIGHT);          // yet the press survived
+
+		// Wheel accumulates between latches and clears after one.
+		vid_link_mouse_update(300, 200, 0, 2);
+		vid_link_mouse_update(300, 200, 0, -1);
+		v.tick(1);
+		for (int i = 0; i < (int)VID_MOUSE_SNAPSHOT_LEN; i++)
+			s[i] = v.read(MOUSE);
+		CHECK((int8_t)s[6] == 1);
+		vid_link_mouse_update(300, 200, 0, 0);
+		v.tick(1);
+		for (int i = 0; i < (int)VID_MOUSE_SNAPSHOT_LEN; i++)
+			s[i] = v.read(MOUSE);
+		CHECK((int8_t)s[6] == 0);
+
+		// Writing $FF12 must not disturb the snapshot (no scratch mirror).
+		v.write(MOUSE, 0x5A);
+		v.tick(1);
+		CHECK(v.read(MOUSE) != 0x5A);
+
+		// RESYNC. A guest that loses count cannot detect it -- every
+		// byte is an arbitrary value -- so it must be able to regain
+		// phase unconditionally and cheaply. A write to $FF12 homes the
+		// index, WITHOUT the link reset's collateral damage to the
+		// command and input FIFOs.
+		vid_link_mouse_update(111, 222, 0, 0);
+		v.tick(1);
+		(void)v.read(MOUSE);            // byte 0, then give up
+		(void)v.read(MOUSE);            // byte 1; now out of phase
+		v.write(MOUSE, 0x00);           // resync, no tick in between
+		for (int i = 0; i < (int)VID_MOUSE_SNAPSHOT_LEN; i++)
+			s[i] = v.read(MOUSE);
+		CHECK(((s[2] << 8) | s[3]) == 111);     // reading byte 0 again
+		CHECK(((s[4] << 8) | s[5]) == 222);
+
+		// The resync must not need a tick to take effect: on hardware
+		// the guest can read $FF12 in the instruction after the write,
+		// which would race Core 1's drain.
+		(void)v.read(MOUSE);
+		(void)v.read(MOUSE);
+		(void)v.read(MOUSE);
+		v.write(MOUSE, 0xFF);           // any value will do
+		CHECK(v.read(MOUSE) == 0);      // byte 0: buttons, none held
+
+		// The write TAKES A SAMPLE, and that sample is the guest's until
+		// it reads it: later motion must not rewrite the pass underneath
+		// the guest.
+		vid_link_mouse_update(400, 300, 0, 0);
+		v.write(MOUSE, 0x00);           // sample here
+		vid_link_mouse_update(500, 350, 0, 0);  // moves on afterwards
+		v.tick(1);
+		for (int i = 0; i < (int)VID_MOUSE_SNAPSHOT_LEN; i++)
+			s[i] = v.read(MOUSE);
+		CHECK(((s[2] << 8) | s[3]) == 400);     // the sample, not the move
+		CHECK(((s[4] << 8) | s[5]) == 300);
+
+		// A soft reset also homes the index (belt and braces).
+		vid_link_mouse_update(111, 222, 0, 0);
+		v.tick(1);
+		(void)v.read(MOUSE);
+		v.write(STAT, 0x01);            // Ctl: soft reset
+		v.tick(1);
+		for (int i = 0; i < (int)VID_MOUSE_SNAPSHOT_LEN; i++)
+			s[i] = v.read(MOUSE);
+		CHECK(((s[2] << 8) | s[3]) == 111);
+	}
+
+	// ---- Pointer: drawn by the firmware, save-under restores ----
+	{
+		v.write(DATA, 0x0C);            // clean screen
+		v.tick(1);
+		vidterm_pointer_set(400, 300);
+		vidterm_cursor_service();
+		// Row 7 of the arrow is solid fill; the tip itself is outline,
+		// which is drawn black and so invisible on a cleared screen.
+		CHECK(video_framebuffer[300 + 7][400] == 0xFF);
+		vidterm_cursor_hide();
+		CHECK(video_framebuffer[300 + 7][400] == 0x00); // put back exactly
+
+		// The guest can place it too (PutGC = $1B $4E, X then Y).
+		v.write(DATA, 0x1B); v.write(DATA, 0x4E);
+		v.write(DATA, 0x00); v.write(DATA, 0x64);       // X = 100
+		v.write(DATA, 0x00); v.write(DATA, 0x32);       // Y = 50
+		v.tick(1);
+		vidterm_cursor_service();
+		CHECK(video_framebuffer[50 + 7][100] == 0xFF);
+		vidterm_cursor_hide();
+	}
+
 	// M0 loopback still works after M1 (the vlink test must keep passing).
 	v.write(STAT, VID_CTL_LOOPBACK);
 	v.write(DATA, 0x55);
