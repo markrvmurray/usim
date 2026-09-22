@@ -736,6 +736,53 @@ int main()
 		v.write(STAT, VID_CTL_RESET);                   // back to normal
 	}
 
+	// ---- !IRQ: RIE-gated, follows RDRF, MC6850-shaped ----
+	{
+		v.write(STAT, VID_CTL_RESET);
+		v.tick(1);
+		CHECK(picovideo_irq_released());        // reset leaves it idle
+		CHECK(!(v.read(STAT) & VID_STAT_IRQ));
+
+		// A polling guest must never be interrupted by a line it did
+		// not ask for: input with RIE off changes nothing.
+		vid_link_input('x');
+		v.tick(1);
+		CHECK(v.read(STAT) & VID_STAT_RDRF);    // byte is waiting
+		CHECK(picovideo_irq_released());        // but the line is idle
+		CHECK(!(v.read(STAT) & VID_STAT_IRQ));
+
+		// Enabling RIE with a byte already waiting asserts immediately.
+		v.write(STAT, VID_CTL_RIE);
+		v.tick(1);
+		CHECK(!picovideo_irq_released());
+		CHECK(v.read(STAT) & VID_STAT_IRQ);     // bit 7 mirrors the pin
+
+		// Reading the byte drains the FIFO, so RDRF clears and the line
+		// releases -- the MC6850 behaviour the guest driver expects.
+		CHECK(v.read(DATA) == 'x');
+		v.tick(1);
+		CHECK(!(v.read(STAT) & VID_STAT_RDRF));
+		CHECK(picovideo_irq_released());
+		CHECK(!(v.read(STAT) & VID_STAT_IRQ));
+
+		// More input re-asserts while RIE stays on.
+		vid_link_input('y');
+		v.tick(1);
+		CHECK(!picovideo_irq_released());
+
+		// Reset drops the line: it flushes the very input that
+		// justified asserting, and clears RIE with it.
+		v.write(STAT, VID_CTL_RESET);
+		v.tick(1);
+		CHECK(picovideo_irq_released());
+		vid_link_input('z');
+		v.tick(1);
+		CHECK(picovideo_irq_released());        // RIE cleared by reset
+		(void)v.read(DATA);
+		v.write(STAT, VID_CTL_RESET);
+		v.tick(1);
+	}
+
 	// M0 loopback still works after M1 (the vlink test must keep passing).
 	v.write(STAT, VID_CTL_LOOPBACK);
 	v.write(DATA, 0x55);

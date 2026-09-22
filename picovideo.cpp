@@ -117,6 +117,25 @@ Byte PicoVideo::read(Word offset)
 	return val;
 }
 
+/* The portable link code calls this when its !IRQ state changes; see
+ * vid_link.h. On the board it drives GP21 as a simulated open collector. Here
+ * it feeds the wired-OR chain that main_picothing binds to cpu.IRQ, so the
+ * emulated 6809 genuinely takes the interrupt -- which is what lets the guest
+ * side of this be tested rather than merely the wire. */
+static bool pv_irq_released = true;	/* active low, as on the bus */
+
+extern "C" void
+vid_link_irq_out(bool assert)
+{
+	pv_irq_released = !assert;
+}
+
+bool
+picovideo_irq_released(void)
+{
+	return pv_irq_released;
+}
+
 void PicoVideo::write(Word offset, Byte val)
 {
 	// Replicate the write ISR: store to the write side, mirror the

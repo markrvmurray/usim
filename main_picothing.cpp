@@ -581,7 +581,8 @@ int main(int argc, char* argv[])
 	// the pins: if any one asserts (false), the AND chain is false,
 	// the CPU's c_irq is false, and !c_irq triggers do_irq.
 	cpu.IRQ.bind([&]() {
-		return (bool)console->IRQ && (bool)aux_acia->IRQ && (bool)tick->IRQ;
+		return (bool)console->IRQ && (bool)aux_acia->IRQ &&
+		    (bool)tick->IRQ && picovideo_irq_released();
 	});
 	// NMI is wired-OR (active-low) between the SystemWatchpoint and
 	// DATRAM's "page-unavailable" trap. Each OutputPin reads false

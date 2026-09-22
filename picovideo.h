@@ -28,6 +28,11 @@
 #include "device.h"
 #include "usim.h"
 
+/* The video device's !IRQ contribution to the bus's wired-OR line: true when
+ * released, false while it is asserting, matching the other devices' pins so
+ * it can be AND-ed with them. */
+bool picovideo_irq_released(void);
+
 class PicoVideo : public ActiveMappedDevice {
 
 	static const uint32_t	SERVICE_INTERVAL = 20000;	// guest cycles (~50Hz at 1MHz)
