@@ -76,11 +76,18 @@ void PicoVideo::tick(uint32_t ticks)
 		inject_pos++;
 	}
 
-	// The Core 1 dispatch loop's role: drain the command FIFO, restage
-	// Data/Stat, and run the cursor. Runs headless too — the link must
-	// work without a window.
-	vid_link_task();
+	// The firmware splits this across two cores — staging on the bus core,
+	// rendering and the cursor on the other — so that rendering never
+	// shares a core with the scanline deadline. The simulator has one
+	// thread and no such deadline, so it simply runs both halves here, in
+	// the same order and through the same entry points.
+	// Render first, then stage: on hardware the bus core stages
+	// continuously and so always publishes the result of whatever the
+	// render core just did. Doing it in that order here reaches the same
+	// state within a single tick.
+	vid_link_render();
 	vidterm_cursor_service();
+	vid_link_stage();
 
 	if (!window)
 		return;
