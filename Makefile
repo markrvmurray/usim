@@ -37,7 +37,7 @@ LIB		= libusim.a
 PICOVIDEO	?= $(HOME)/Documents/PICO/pico-thing-video
 SDL_CFLAGS	:= $(shell pkg-config --cflags sdl2 | sed 's/-I/-isystem /g')
 SDL_LIBS	:= $(shell pkg-config --libs sdl2) -lz
-PV_OBJS		= picovideo.o picovideo_display.o pv_render.o pv_link.o pv_registers.o pv_console.o pv_hidcook.o
+PV_OBJS		= picovideo.o picovideo_display.o pv_render.o pv_link.o pv_registers.o pv_console.o
 
 all: $(BIN)
 
@@ -106,9 +106,12 @@ pv_console.o: $(PICOVIDEO)/src/vid_console.cpp
 	$(CXX) -I$(PICOVIDEO)/include -Ipico_shim $(CPPFLAGS) $(CCFLAGS) -c -o $(@) $<
 
 # The firmware's HID cooking -- UK keyboard layout and the absolute mouse
-# cursor -- so synthetic reports can drive the whole guest input path. The
-# console echo is off here: it is a bring-up aid on the board, and noise in a
-# test run.
+# cursor -- so synthetic reports can drive the whole guest input path. Linked
+# into the TESTS only: the window feeds vid_link_input() directly, because SDL
+# hands over characters rather than HID usages, so routing them through the
+# cooker would mean inventing a keysym-to-usage table that exists nowhere on
+# the hardware. Add it to PV_OBJS when something in usim09pt actually calls it.
+# The console echo is off here: a bring-up aid on the board, noise in a test.
 pv_hidcook.o: $(PICOVIDEO)/src/hid_cook.cpp
 	$(CXX) -I$(PICOVIDEO)/include -Ipico_shim $(CPPFLAGS) $(CCFLAGS) -DUSB_HOST_ECHO=0 -c -o $(@) $<
 
