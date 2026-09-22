@@ -111,9 +111,12 @@ pv_console.o: $(PICOVIDEO)/src/vid_console.cpp
 # hands over characters rather than HID usages, so routing them through the
 # cooker would mean inventing a keysym-to-usage table that exists nowhere on
 # the hardware. Add it to PV_OBJS when something in usim09pt actually calls it.
-# The console echo is off here: a bring-up aid on the board, noise in a test.
+#
+# The console echo is compiled IN here (USB_HOST_ECHO defaults on) even though
+# this is a test build, because it is silent until switched on at runtime --
+# and that switch is itself worth testing: it spent months wired to nothing.
 pv_hidcook.o: $(PICOVIDEO)/src/hid_cook.cpp
-	$(CXX) -I$(PICOVIDEO)/include -Ipico_shim $(CPPFLAGS) $(CCFLAGS) -DUSB_HOST_ECHO=0 -c -o $(@) $<
+	$(CXX) -I$(PICOVIDEO)/include -Ipico_shim $(CPPFLAGS) $(CCFLAGS) -c -o $(@) $<
 
 picovideo_display.o: picovideo_display.cpp
 	$(CXX) -I$(PICOVIDEO)/include -Ipico_shim $(CPPFLAGS) $(CCFLAGS) $(SDL_CFLAGS) -c -o $(@) $<

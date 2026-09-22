@@ -11,7 +11,9 @@
 //
 
 #include <cstdio>
+#include <unistd.h>
 #include <initializer_list>
+#include <string>
 
 #include "mc6809.h"
 #include "picovideo.h"
@@ -687,6 +689,49 @@ int main()
 		const uint8_t stub[4] = { 0, 0, 0x04, 0 };
 		hid_cook_keyboard(stub, 4);
 		CHECK(typed() == -1);
+
+		// THE ECHO SWITCH ACTUALLY SWITCHES SOMETHING. The console's
+		// verbose command drives this, and for months it drove nothing
+		// at all -- a control the operator could set with no way to
+		// tell "quiet" from "broken". Capture stdout and prove both
+		// states.
+		auto echo_output = [&](bool on) -> std::string {
+			hid_cook_set_echo(on);
+			fflush(stdout);
+			FILE *tmp = tmpfile();
+			const int saved = dup(1);
+			dup2(fileno(tmp), 1);
+			kbd(0x00, 0x04); released();    // 'a'
+			// Release then press: the button echo reports EDGES, so
+			// each pass must make one of its own -- the silent pass
+			// would otherwise leave the button down and the loud one
+			// would have nothing to report.
+			const uint8_t up[]   = { 0x00, 0, 0 };
+			const uint8_t down[] = { 0x01, 0, 0 };
+			hid_cook_mouse(up, 3);
+			hid_cook_mouse(down, 3);
+			fflush(stdout);
+			dup2(saved, 1);
+			close(saved);
+			rewind(tmp);
+			std::string out;
+			char c;
+			while (fread(&c, 1, 1, tmp) == 1)
+				out += c;
+			fclose(tmp);
+			return out;
+		};
+
+		const std::string quiet = echo_output(false);
+		CHECK(quiet.empty());               // off means silent
+
+		const std::string loud = echo_output(true);
+		CHECK(loud.find("KEY") != std::string::npos);
+		CHECK(loud.find("MOUSE") != std::string::npos);
+
+		hid_cook_set_echo(false);           // leave the suite quiet
+		while (typed() != -1)               // drain what the echo typed
+			;
 
 		v.write(STAT, VID_CTL_RESET);                   // back to normal
 	}
