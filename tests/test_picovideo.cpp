@@ -15,6 +15,7 @@
 
 #include "mc6809.h"
 #include "picovideo.h"
+#include "hid_cook.h"
 #include "vid_link.h"
 #include "video.h"
 #include "video_render.h"
@@ -571,6 +572,123 @@ int main()
 		vidterm_cursor_service();
 		CHECK(video_framebuffer[50 + 7][100] == 0xFF);
 		vidterm_cursor_hide();
+	}
+
+	// ---- HID cooking: synthetic boot reports drive the guest path ----
+	// This is the code that had no coverage at all until the split, and
+	// the reason it had none was that it could not compile host-side.
+	{
+		const Word MOUSE = 2;   // $FF12
+		hid_cook_reset();
+
+		// -- Mouse: report LENGTH. A boot mouse sends three bytes; wheel
+		// and pan are optional extras. Requiring the full struct size
+		// discarded every report from an ordinary mouse on real
+		// hardware, which is the defect this test exists to prevent.
+		const int cx0 = hid_cook_cursor_x(), cy0 = hid_cook_cursor_y();
+		const uint8_t three[] = { 0x00, 10, (uint8_t)(int8_t)-5 };
+		hid_cook_mouse(three, 3);
+		CHECK(hid_cook_cursor_x() == cx0 + 10);
+		CHECK(hid_cook_cursor_y() == cy0 - 5);
+
+		const uint8_t four[] = { 0x00, 0, 0, 1 };        // + wheel
+		hid_cook_mouse(four, 4);
+		const uint8_t five[] = { 0x00, 0, 0, 0, 0 };     // + pan
+		hid_cook_mouse(five, 5);
+		CHECK(hid_cook_cursor_x() == cx0 + 10);         // no spurious motion
+
+		// Too short is ignored rather than read past the end.
+		const uint8_t two[] = { 0x00, 99 };
+		hid_cook_mouse(two, 2);
+		CHECK(hid_cook_cursor_x() == cx0 + 10);
+
+		// -- Mouse: deltas are SIGNED, and the cursor clamps to screen.
+		const uint8_t hard_left[] = { 0x00, (uint8_t)(int8_t)-128, 0 };
+		for (int i = 0; i < 20; i++)
+			hid_cook_mouse(hard_left, 3);
+		CHECK(hid_cook_cursor_x() == 0);                // clamped, not wrapped
+
+		// -- Mouse: buttons reach the guest snapshot, through the link.
+		hid_cook_reset();
+		const uint8_t left_down[] = { 0x01, 0, 0 };
+		hid_cook_mouse(left_down, 3);
+		v.tick(1);
+		v.write(MOUSE, 0);                              // sample and home
+		Byte s[VID_MOUSE_SNAPSHOT_LEN];
+		for (int i = 0; i < (int)VID_MOUSE_SNAPSHOT_LEN; i++)
+			s[i] = v.read(MOUSE);
+		CHECK(s[0] == VID_MOUSE_BTN_LEFT);
+		CHECK(((s[2] << 8) | s[3]) == hid_cook_cursor_x());
+		CHECK(((s[4] << 8) | s[5]) == hid_cook_cursor_y());
+
+		// -- Keyboard: a keystroke becomes a guest input byte. Reports
+		// are modifier, reserved, then up to six held usages.
+		auto kbd = [&](uint8_t mod, uint8_t usage) {
+			const uint8_t r[8] = { mod, 0, usage, 0, 0, 0, 0, 0 };
+			hid_cook_keyboard(r, 8);
+		};
+		auto released = [&]() {
+			const uint8_t r[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+			hid_cook_keyboard(r, 8);
+		};
+		auto typed = [&]() -> int {
+			v.tick(1);
+			if (!(v.read(STAT) & VID_STAT_RDRF))
+				return -1;
+			return v.read(DATA);
+		};
+
+		hid_cook_reset();
+		v.write(STAT, VID_CTL_RESET | VID_CTL_LOOPBACK); // divert to input
+		v.write(STAT, VID_CTL_LOOPBACK);
+		kbd(0x00, 0x04); released();                    // 'a'
+		CHECK(typed() == 'a');
+		kbd(0x02, 0x04); released();                    // shift -> 'A'
+		CHECK(typed() == 'A');
+
+		// A key HELD across reports must not repeat: the second report
+		// still lists it, and only new-downs produce a byte.
+		kbd(0x00, 0x04);
+		CHECK(typed() == 'a');
+		kbd(0x00, 0x04);                                // still held
+		CHECK(typed() == -1);
+		released();
+
+		// UK layout, the part that differs from US and was never tested.
+		kbd(0x02, 0x1F); released(); CHECK(typed() == '"');   // shift-2
+		kbd(0x02, 0x20); released(); CHECK(typed() == 0x9C);  // shift-3 = GBP
+		kbd(0x02, 0x34); released(); CHECK(typed() == '@');   // shift-'
+		kbd(0x00, 0x31); released(); CHECK(typed() == '#');   // hash key
+		kbd(0x02, 0x31); released(); CHECK(typed() == '~');
+		kbd(0x02, 0x35); released(); CHECK(typed() == 0xAA);  // shift-` = not
+		kbd(0x00, 0x64); released(); CHECK(typed() == '\\');  // ISO backslash
+
+		// Enter is CR, not LF: OS-9's line terminator, and the guest
+		// input contract. This was found by reading the code, not by
+		// running it -- exactly the gap the split closes.
+		kbd(0x00, 0x28); released(); CHECK(typed() == 0x0D);
+
+		// Ctrl chords fold onto the C0 controls the shell edits with.
+		kbd(0x01, 0x04); released(); CHECK(typed() == 0x01);  // ctrl-A
+		kbd(0x01, 0x06); released(); CHECK(typed() == 0x03);  // ctrl-C
+
+		// Caps lock is a toggle on press, and XORs with shift.
+		kbd(0x00, 0x39); released();                    // caps on
+		CHECK(hid_cook_caps_lock());
+		kbd(0x00, 0x04); released(); CHECK(typed() == 'A');
+		kbd(0x02, 0x04); released(); CHECK(typed() == 'a');   // shift undoes it
+		kbd(0x00, 0x39); released();                    // caps off
+		CHECK(!hid_cook_caps_lock());
+
+		// Unmapped usages produce nothing at all (F1 here).
+		kbd(0x00, 0x3A); released(); CHECK(typed() == -1);
+
+		// A short keyboard report is ignored rather than read past.
+		const uint8_t stub[4] = { 0, 0, 0x04, 0 };
+		hid_cook_keyboard(stub, 4);
+		CHECK(typed() == -1);
+
+		v.write(STAT, VID_CTL_RESET);                   // back to normal
 	}
 
 	// M0 loopback still works after M1 (the vlink test must keep passing).
