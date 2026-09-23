@@ -114,6 +114,8 @@ Byte PicoVideo::read(Word offset)
 	vid_link_guest_read((uint8_t)offset);
 	if (offset == VID_MOUSE_OFFSET)
 		vid_link_mouse_read();
+	else if (offset == VID_INFO_OFFSET)
+		vid_link_info_read();
 	return val;
 }
 
@@ -141,7 +143,7 @@ void PicoVideo::write(Word offset, Byte val)
 	// Replicate the write ISR: store to the write side, mirror the
 	// reserved (scratch) offsets to the read side, dispatch to the link.
 	registers::write((uint16_t)offset) = val;
-	if (offset > VID_MOUSE_OFFSET)
+	if (offset > VID_INFO_OFFSET)
 		reg[(uint16_t)offset] = val;
 	// The mouse re-latch is synchronous in the ISR on hardware, ahead of
 	// the write ring, because the guest may read $FF12 in the very next
@@ -149,5 +151,7 @@ void PicoVideo::write(Word offset, Byte val)
 	// than the board.
 	if (offset == VID_MOUSE_OFFSET)
 		vid_link_mouse_write();
+	else if (offset == VID_INFO_OFFSET)
+		vid_link_info_write();
 	vid_link_guest_write((uint8_t)offset, val);
 }

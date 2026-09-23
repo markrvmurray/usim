@@ -783,6 +783,46 @@ int main()
 		v.tick(1);
 	}
 
+	// ---- VID.Info ($FF13): the drawing surface, without a round trip ----
+	{
+		const Word INFO = 3;	// $FF13
+
+		// Self-framing exactly as the mouse is: write to home, then
+		// read the block. A guest that already talks to $FF12 needs no
+		// new idiom.
+		v.write(INFO, 0x00);
+		Byte b[VID_INFO_LEN];
+		for (int i = 0; i < (int)VID_INFO_LEN; i++)
+			b[i] = v.read(INFO);
+
+		// Pixels first, big-endian, so graphics code reads four bytes
+		// and stops.
+		CHECK(((b[0] << 8) | b[1]) == FB_WIDTH);
+		CHECK(((b[2] << 8) | b[3]) == FB_HEIGHT);
+		CHECK(b[4] == TEXT_COLS);
+		CHECK(b[5] == TEXT_ROWS);
+
+		// The index wraps, so an over-long read starts the block again
+		// rather than walking into neighbouring registers.
+		CHECK(v.read(INFO) == b[0]);
+
+		// Homing needs no tick: on hardware the guest may read in the
+		// instruction after the write, which would race the drain.
+		(void)v.read(INFO);
+		(void)v.read(INFO);
+		v.write(INFO, 0xFF);
+		CHECK(v.read(INFO) == b[0]);
+
+		// Read-only: a write homes the index, it does not store.
+		CHECK(v.read(INFO) != 0xFF);
+
+		// And the scratch registers above it still behave as scratch,
+		// which is what proves the bus path from the console.
+		v.write(4, 0x5A);
+		v.tick(1);
+		CHECK(v.read(4) == 0x5A);
+	}
+
 	// M0 loopback still works after M1 (the vlink test must keep passing).
 	v.write(STAT, VID_CTL_LOOPBACK);
 	v.write(DATA, 0x55);
