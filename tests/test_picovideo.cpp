@@ -823,6 +823,180 @@ int main()
 		CHECK(v.read(4) == 0x5A);
 	}
 
+	// M5.1: a window is a text screen that swaps into the ONE live layer.
+	// The properties worth pinning are that text is CONFINED to it, that
+	// switching PRESERVES what each window held, and that VID.Info reports
+	// the window actually built rather than the panel.
+	{
+		static const uint8_t ESC = 0x1B;
+		v.write(STAT, VID_CTL_RESET);
+		v.tick(1);
+		v.write(DATA, 0x0C);		// clear, root window
+		v.tick(1);
+
+		// A window inland: id 1, at column 4 row 2, 10 x 3.
+		v.write(DATA, ESC); v.write(DATA, 0x20);
+		const uint8_t dw[8] = { 1, 0, 4, 2, 10, 3, 0, 0 };
+		for (uint8_t i = 0; i < 8; i++) v.write(DATA, dw[i]);
+		v.write(DATA, 'A');
+		v.tick(1);
+
+		// Text lands INSIDE the window, at its origin -- not at 0,0.
+		CHECK(check_cell(4, 2, 'A'));
+		CHECK(!check_cell(0, 0, 'A'));
+
+		// VID.Info now describes the WINDOW: 10x3 cells, 80x48 pixels.
+		v.write(3, 0);			// home the index
+		CHECK(v.read(3) == 0);		// width hi  (80 = 0x0050)
+		CHECK(v.read(3) == 80);		// width lo
+		CHECK(v.read(3) == 0);		// height hi (48)
+		CHECK(v.read(3) == 48);		// height lo
+		CHECK(v.read(3) == 10);		// cols
+		CHECK(v.read(3) == 3);		// rows
+
+		// Wrap happens at the WINDOW edge, not the panel edge: nine
+		// more characters fill row 0 and the tenth starts row 1.
+		for (int i = 0; i < 10; i++) v.write(DATA, 'B');
+		v.tick(1);
+		CHECK(check_cell(13, 2, 'B'));	// last column of the window
+		CHECK(check_cell(4, 3, 'B'));	// wrapped to the window's row 1
+		CHECK(!check_cell(14, 2, 'B'));	// never outside it
+
+		// Switch away and back: the window's content must survive,
+		// which is what the parked screen exists for.
+		v.write(DATA, ESC); v.write(DATA, 0x21); v.write(DATA, 0);
+		v.tick(1);
+		CHECK(!check_cell(4, 2, 'A'));	// window 1 is put away
+		v.write(DATA, ESC); v.write(DATA, 0x21); v.write(DATA, 1);
+		v.tick(1);
+		CHECK(check_cell(4, 2, 'A'));	// and comes back intact
+		CHECK(check_cell(13, 2, 'B'));	// to the end of its first row
+		CHECK(check_cell(4, 3, 'B'));	// AND on the rows below it --
+						// parking only the first row
+						// passes every check above
+
+		// Selecting the root reports the panel again.
+		v.write(DATA, ESC); v.write(DATA, 0x21); v.write(DATA, 0);
+		v.tick(1);
+		v.write(3, 0);		// home AFTER the select is consumed
+		v.read(3); v.read(3); v.read(3); v.read(3);
+		CHECK(v.read(3) == TEXT_COLS);
+		CHECK(v.read(3) == TEXT_ROWS);
+
+		// Clamping: a window asked for beyond the panel is built
+		// smaller and SAYS SO, rather than being refused or silently
+		// overrunning. Asking for 20 columns at column 120 can only
+		// have 8.
+		v.write(DATA, ESC); v.write(DATA, 0x20);
+		const uint8_t dw2[8] = { 2, 0, 120, 0, 20, 2, 0, 0 };
+		for (uint8_t i = 0; i < 8; i++) v.write(DATA, dw2[i]);
+		v.tick(1);
+		v.write(3, 0);
+		v.read(3); v.read(3); v.read(3); v.read(3);
+		CHECK(v.read(3) == 8);		// clamped, and reported
+		CHECK(v.read(3) == 2);
+
+		// Leave the console on the root window: everything after this
+		// draws full-screen and would otherwise inherit a rectangle.
+		v.write(DATA, ESC); v.write(DATA, 0x21); v.write(DATA, 0);
+		v.write(DATA, 0x0C);
+		v.tick(1);
+	}
+
+	// Region text operations -- the primitives a text window is built from.
+	// The property that matters is CONTAINMENT: what is inside the
+	// rectangle changes and what is outside does not. A region routine that
+	// quietly spans the full row width would pass any check that only
+	// looked inside it, so every case below asserts the neighbours too.
+	{
+		// 0xE0 is the console's own attribute (white on opaque black),
+		// which is what check_cell compares the rendered pixels
+		// against; the grid alone proves nothing until it is blitted.
+		vidterm_clear('#', 0xE0);
+		vidterm_clear_region(10, 5, 4, 3, '.', 0xE0);
+		vidterm_refresh();
+
+		for (int r = 5; r < 8; r++)
+			for (int c = 10; c < 14; c++)
+				CHECK(check_cell(c, r, '.'));
+		CHECK(check_cell(9, 5, '#'));	// column before
+		CHECK(check_cell(14, 5, '#'));	// column after
+		CHECK(check_cell(10, 4, '#'));	// row above
+		CHECK(check_cell(10, 8, '#'));	// row below
+
+		// Scroll that region up one row: its rows move, its last row
+		// fills, and the cells beside it stay put.
+		vidterm_clear_region(10, 5, 4, 1, 'A', 0xE0);
+		vidterm_clear_region(10, 6, 4, 1, 'B', 0xE0);
+		vidterm_clear_region(10, 7, 4, 1, 'C', 0xE0);
+		vidterm_scroll_region(10, 5, 4, 3, ' ', 0xE0);
+		vidterm_refresh();
+		CHECK(check_cell(10, 5, 'B'));
+		CHECK(check_cell(10, 6, 'C'));
+		CHECK(check_cell(10, 7, ' '));	// vacated row filled
+		CHECK(check_cell(9, 5, '#'));	// neighbours untouched
+		CHECK(check_cell(14, 6, '#'));
+	}
+
+	// Window sub-code framing: DWSet takes EIGHT params and Select ONE,
+	// both leading with a window id -- a deliberate divergence from CoCo3,
+	// where identity rides on the device path and never reaches the byte
+	// stream. Framing is the part that must be right before anything is
+	// implemented: a wrong parameter count does not draw the wrong thing,
+	// it misparses every byte that follows. Printable params make that
+	// visible -- if the count were short, a leftover param would render as
+	// a glyph and displace what comes after it.
+	{
+		v.write(DATA, 0x0C);		// clear and home
+		v.tick(1);
+
+		v.write(DATA, 0x1B);
+		v.write(DATA, 0x20);		// DWSet
+		for (uint8_t p = 'A'; p <= 'H'; p++)	// 8 params
+			v.write(DATA, p);
+		v.write(DATA, 'Z');
+		v.tick(1);
+		CHECK(check_cell(0, 0, 'Z'));	// all eight swallowed
+		CHECK(!check_cell(0, 0, 'H'));	// not one left over
+
+		v.write(DATA, 0x0C);
+		v.tick(1);
+
+		v.write(DATA, 0x1B);
+		v.write(DATA, 0x21);		// Select
+		v.write(DATA, 'A');		// 1 param: the window id
+		v.write(DATA, 'Z');
+		v.tick(1);
+		CHECK(check_cell(0, 0, 'Z'));	// the id was swallowed
+	}
+
+	// The render drain is BOUNDED per call. It used to run until the FIFO
+	// was empty, so one call could work through a full 2 KB backlog --
+	// 18 ms measured on hardware, longer than a frame, on the core that
+	// owes the overlay service. Sabotage check: remove the budget from
+	// vid_link_render() and the first CHECK below fails, because the
+	// whole burst lands in a single tick.
+	{
+		v.write(STAT, VID_CTL_RESET);	// drop loopback, flush
+		v.tick(1);
+		v.write(DATA, 0x0C);		// clear and home
+		v.tick(1);
+
+		// TEXT_COLS is 128, so exactly VID_LINK_DRAIN_MAX characters
+		// fill two rows and the next one starts row 2. That cell is
+		// the probe: it can only be drawn by a SECOND drain.
+		for (unsigned i = 0; i < VID_LINK_DRAIN_MAX + 1u; i++)
+			v.write(DATA, 'A');
+
+		v.tick(1);
+		CHECK(!check_cell(0, 2, 'A'));	// bound held: one short
+		CHECK(check_cell(0, 0, 'A'));	// but the burst did render
+		CHECK(check_cell(127, 1, 'A'));	// right up to the bound
+
+		v.tick(1);
+		CHECK(check_cell(0, 2, 'A'));	// and nothing was dropped
+	}
+
 	// M0 loopback still works after M1 (the vlink test must keep passing).
 	v.write(STAT, VID_CTL_LOOPBACK);
 	v.write(DATA, 0x55);
