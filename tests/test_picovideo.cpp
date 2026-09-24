@@ -986,6 +986,85 @@ int main()
 		v.tick(1);
 	}
 
+	// M5.3: CWArea narrows the working area within a window; DWProtSw
+	// decides whether graphics may leave it.
+	{
+		static const uint8_t ESC = 0x1B;
+		v.write(STAT, VID_CTL_RESET);
+		v.tick(1);
+		v.write(DATA, 0x0C);
+		v.tick(1);
+
+		// Window 1 at cell 4,2, 10x3.
+		v.write(DATA, ESC); v.write(DATA, 0x20);
+		const uint8_t w1[8] = { 1, 0, 4, 2, 10, 3, 0, 0 };
+		for (uint8_t i = 0; i < 8; i++) v.write(DATA, w1[i]);
+		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 1);
+		v.tick(1);
+
+		// Narrow the working area to 4x2 at offset 2,1 inside it, so
+		// the effective rectangle is cell 6,3 and the read-back must
+		// say 4x2 rather than the window's 10x3.
+		v.write(DATA, ESC); v.write(DATA, 0x25);
+		v.write(DATA, 2); v.write(DATA, 1);
+		v.write(DATA, 4); v.write(DATA, 2);
+		v.tick(1);
+		v.write(3, 0);
+		v.read(3); v.read(3); v.read(3); v.read(3);
+		CHECK(v.read(3) == 4);		// cols of the WORKING AREA
+		CHECK(v.read(3) == 2);
+
+		// Text now starts at the working area's corner, not the
+		// window's.
+		v.write(DATA, 'W');
+		v.tick(1);
+		CHECK(check_cell(6, 3, 'W'));
+		CHECK(!check_cell(4, 2, 'W'));
+
+		// CWArea is clamped to the window just as DWSet is clamped to
+		// the panel: asking for 40 columns in a 10-wide window can
+		// only get 10, and the read-back says so.
+		v.write(DATA, ESC); v.write(DATA, 0x25);
+		v.write(DATA, 0); v.write(DATA, 0);
+		v.write(DATA, 40); v.write(DATA, 40);
+		v.tick(1);
+		v.write(3, 0);
+		v.read(3); v.read(3); v.read(3); v.read(3);
+		CHECK(v.read(3) == 10);
+		CHECK(v.read(3) == 3);
+
+		// Protected first, because the graphics plane is global and
+		// accumulates: once something has painted outside the window
+		// nothing can un-paint it, so "contained" has to be checked
+		// before anything is allowed to escape.
+		v.write(DATA, ESC); v.write(DATA, 0x40);	// SetDPtr 0,0
+		v.write(DATA, 0); v.write(DATA, 0);
+		v.write(DATA, 0); v.write(DATA, 0);
+		v.write(DATA, ESC); v.write(DATA, 0x4A);	// Bar 200x200
+		v.write(DATA, 0); v.write(DATA, 200);
+		v.write(DATA, 0); v.write(DATA, 200);
+		v.tick(1);
+		CHECK(video_framebuffer[80][120] == 0x00);  // contained
+
+		// Protection off lets it out; coordinates still measure from
+		// the window's corner, so nothing appears above or left of it.
+		v.write(DATA, ESC); v.write(DATA, 0x36); v.write(DATA, 0);
+		v.write(DATA, ESC); v.write(DATA, 0x40);
+		v.write(DATA, 0); v.write(DATA, 0);
+		v.write(DATA, 0); v.write(DATA, 0);
+		v.write(DATA, ESC); v.write(DATA, 0x4A);
+		v.write(DATA, 0); v.write(DATA, 200);
+		v.write(DATA, 0); v.write(DATA, 200);
+		v.tick(1);
+		CHECK(video_framebuffer[80][120] != 0x00);  // outside, drawn
+		CHECK(video_framebuffer[20][20] == 0x00);   // still not above
+
+		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 0);
+		v.write(DATA, ESC); v.write(DATA, 0x21); v.write(DATA, 0);
+		v.write(DATA, 0x0C);
+		v.tick(1);
+	}
+
 	// Region text operations -- the primitives a text window is built from.
 	// The property that matters is CONTAINMENT: what is inside the
 	// rectangle changes and what is outside does not. A region routine that
