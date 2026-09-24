@@ -934,6 +934,58 @@ int main()
 		v.tick(1);
 	}
 
+	// M5.2: graphics primitives are window-RELATIVE and window-BOUNDED.
+	// There is still only one graphics plane -- clipping says where a
+	// primitive lands, not which surface it lands on -- so both halves
+	// need asserting: that 0,0 means the window's corner, and that pixels
+	// cannot escape its edges.
+	{
+		static const uint8_t ESC = 0x1B;
+		v.write(STAT, VID_CTL_RESET);
+		v.tick(1);
+		v.write(DATA, 0x0C);
+		v.tick(1);
+
+		// Window at cell 4,2 = pixel 32,32; 10x3 cells = 80x48 pixels.
+		v.write(DATA, ESC); v.write(DATA, 0x20);
+		const uint8_t g[8] = { 1, 0, 4, 2, 10, 3, 0, 0 };
+		for (uint8_t i = 0; i < 8; i++) v.write(DATA, g[i]);
+		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 1);
+		v.tick(1);
+
+		// Plot at window 20,20 -- it must land 20 pixels in from the
+		// WINDOW's corner (32,32), so at 52,52, not at the screen's.
+		// Deliberately not 0,0: that cell holds the text cursor, whose
+		// save-under and inversion would decide the pixel instead of
+		// the plot, and the point here is the coordinate origin.
+		v.write(DATA, ESC); v.write(DATA, 0x42);
+		v.write(DATA, 0); v.write(DATA, 20);	// x = 20
+		v.write(DATA, 0); v.write(DATA, 20);	// y = 20
+		v.tick(1);
+		CHECK(video_framebuffer[52][52] != 0x00);
+		CHECK(video_framebuffer[20][20] == 0x00);  // not screen-origin
+
+		// A bar far larger than the window must be cut off at its
+		// edges rather than painting the panel. Draw pointer to the
+		// window's corner first, then Bar ($4A, absolute) to 200,200 --
+		// four times the window's width and height.
+		v.write(DATA, ESC); v.write(DATA, 0x40);	// SetDPtr
+		v.write(DATA, 0); v.write(DATA, 0);
+		v.write(DATA, 0); v.write(DATA, 0);
+		v.write(DATA, ESC); v.write(DATA, 0x4A);	// Bar
+		v.write(DATA, 0); v.write(DATA, 200);
+		v.write(DATA, 0); v.write(DATA, 200);
+		v.tick(1);
+		CHECK(video_framebuffer[40][100] != 0x00);  // inside (32..111)
+		CHECK(video_framebuffer[40][112] == 0x00);  // past the right
+		CHECK(video_framebuffer[80][40]  == 0x00);  // past the bottom
+
+		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 0);
+		v.write(DATA, ESC); v.write(DATA, 0x21); v.write(DATA, 0);
+		v.write(DATA, 0x0C);
+		v.tick(1);
+	}
+
 	// Region text operations -- the primitives a text window is built from.
 	// The property that matters is CONTAINMENT: what is inside the
 	// rectangle changes and what is outside does not. A region routine that
