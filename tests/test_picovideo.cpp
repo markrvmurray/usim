@@ -359,8 +359,11 @@ int main()
 	CHECK(check_cell(1, 0, 'B'));
 	CHECK(check_cell(2, 0, ' '));
 
-	// Framing: a reserved sub-code is dropped without params.
-	esc({0x26});
+	// Framing: a reserved sub-code is dropped without params. $27, not
+	// $26 -- $26 became DWShow and now takes one, which is precisely why
+	// a parameter count is not a free thing to change: this check used to
+	// pass with $26 and started swallowing the byte after it.
+	esc({0x27});
 	v.write(DATA, 'C');
 	v.tick(1);
 	CHECK(check_cell(2, 0, 'C'));
@@ -838,6 +841,9 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x20);
 		const uint8_t dw[8] = { 1, 0, 4, 2, 10, 3, 0, 0 };
 		for (uint8_t i = 0; i < 8; i++) v.write(DATA, dw[i]);
+		// Defining does not display: a guest setting up several
+		// windows should not watch them flicker past. Show it.
+		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 1);
 		v.write(DATA, 'A');
 		v.tick(1);
 
@@ -862,11 +868,19 @@ int main()
 		CHECK(check_cell(4, 3, 'B'));	// wrapped to the window's row 1
 		CHECK(!check_cell(14, 2, 'B'));	// never outside it
 
-		// Switch away and back: the window's content must survive,
-		// which is what the parked screen exists for.
+		// Select does NOT change what is displayed -- that is DWShow's
+		// job. A descriptor may Select before every write burst, so a
+		// visible effect here would flicker the screen once per line
+		// of background output.
 		v.write(DATA, ESC); v.write(DATA, 0x21); v.write(DATA, 0);
 		v.tick(1);
+		CHECK(check_cell(4, 2, 'A'));	// still on screen
+
+		// Showing another window is what swaps the display.
+		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 0);
+		v.tick(1);
 		CHECK(!check_cell(4, 2, 'A'));	// window 1 is put away
+		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 1);
 		v.write(DATA, ESC); v.write(DATA, 0x21); v.write(DATA, 1);
 		v.tick(1);
 		CHECK(check_cell(4, 2, 'A'));	// and comes back intact
@@ -876,6 +890,7 @@ int main()
 						// passes every check above
 
 		// Selecting the root reports the panel again.
+		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 0);
 		v.write(DATA, ESC); v.write(DATA, 0x21); v.write(DATA, 0);
 		v.tick(1);
 		v.write(3, 0);		// home AFTER the select is consumed
@@ -896,8 +911,24 @@ int main()
 		CHECK(v.read(3) == 8);		// clamped, and reported
 		CHECK(v.read(3) == 2);
 
+		// A window that is NOT displayed still takes output: it
+		// accumulates in its parked screen and appears when shown.
+		// This is the whole point of splitting Select from DWShow --
+		// a background shell must be able to write without stealing
+		// the display.
+		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 0);
+		v.write(DATA, ESC); v.write(DATA, 0x21); v.write(DATA, 1);
+		v.write(DATA, 0x0C);		// clear window 1, off screen
+		v.write(DATA, 'Q');
+		v.tick(1);
+		CHECK(!check_cell(4, 2, 'Q'));	// nothing appeared on screen
+		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 1);
+		v.tick(1);
+		CHECK(check_cell(4, 2, 'Q'));	// and it was there all along
+
 		// Leave the console on the root window: everything after this
 		// draws full-screen and would otherwise inherit a rectangle.
+		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 0);
 		v.write(DATA, ESC); v.write(DATA, 0x21); v.write(DATA, 0);
 		v.write(DATA, 0x0C);
 		v.tick(1);
