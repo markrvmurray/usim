@@ -1112,6 +1112,50 @@ int main()
 		v.tick(1);
 	}
 
+	// A blank cell in a row where NO graphics has been drawn, while other
+	// rows HAVE been. That mixture is what every real screen looks like
+	// and what no previous test here produced: they either clear and draw
+	// nothing, so no row is materialised and the safe branch runs, or they
+	// draw over the cells they check, so the row is materialised.
+	//
+	// In between, the blitter dereferenced a null row pointer and read
+	// from address x -- the bootrom -- painting unrelated bytes into the
+	// framebuffer wherever text touched an undrawn region.
+	{
+		static const uint8_t ESC = 0x1B;
+		v.write(STAT, VID_CTL_RESET);
+		v.tick(1);
+		v.write(DATA, 0x0C);
+		v.tick(1);
+
+		// Draw a bar well down the screen, so rows near the TOP are
+		// left unmaterialised while rows lower down are real.
+		v.write(DATA, ESC); v.write(DATA, 0x40);
+		v.write(DATA, 0); v.write(DATA, 0);
+		v.write(DATA, 1); v.write(DATA, 0x2C);	// y 300
+		v.write(DATA, ESC); v.write(DATA, 0x4A);
+		v.write(DATA, 2); v.write(DATA, 0);	// to 512,400
+		v.write(DATA, 1); v.write(DATA, 0x90);
+		v.tick(1);
+
+		// Now write text near the top and erase it. The erase restores
+		// the graphics under it -- from a row nothing has drawn on.
+		v.write(DATA, 0x02); v.write(DATA, 0x28); v.write(DATA, 0x22);
+		v.write(DATA, 'X');
+		v.tick(1);
+		v.write(DATA, 0x02); v.write(DATA, 0x28); v.write(DATA, 0x22);
+		v.write(DATA, ' ');
+		v.tick(1);
+
+		// Cell 8,2 is pixels 64..71 x 32..47: nothing was ever drawn
+		// there, so every pixel must be the background the screen was
+		// cleared to -- not bootrom, and not anything else.
+		vidterm_cursor_hide();
+		for (int gy = 0; gy < CHAR_H; gy++)
+			for (int gx = 0; gx < CHAR_W; gx++)
+				CHECK(video_framebuffer[32 + gy][64 + gx] == 0x00);
+	}
+
 	// Pattern tiling checked against the graphics demo's REAL 16x16
 	// weave, at a fill origin that is not a multiple of 16.
 	//
