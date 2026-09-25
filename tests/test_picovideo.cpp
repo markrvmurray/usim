@@ -1098,6 +1098,66 @@ int main()
 		v.tick(1);
 	}
 
+	// Curves. The properties worth asserting are the ones a wrong
+	// algorithm gets wrong: that the outline is HOLLOW and the fill is
+	// not, that both are centred on the draw pointer, and that the
+	// extremes land exactly a radius away rather than one pixel out.
+	{
+		static const uint8_t ESC = 0x1B;
+		v.write(STAT, VID_CTL_RESET);
+		v.tick(1);
+		v.write(DATA, 0x0C);
+		v.tick(1);
+
+		// Circle of radius 40 centred at 200,200.
+		v.write(DATA, ESC); v.write(DATA, 0x40);
+		v.write(DATA, 0); v.write(DATA, 200);
+		v.write(DATA, 0); v.write(DATA, 200);
+		v.write(DATA, ESC); v.write(DATA, 0x50);
+		v.write(DATA, 0); v.write(DATA, 40);
+		v.tick(1);
+
+		CHECK(video_framebuffer[200][240] != 0x00);  // right extreme
+		CHECK(video_framebuffer[200][160] != 0x00);  // left
+		CHECK(video_framebuffer[240][200] != 0x00);  // bottom
+		CHECK(video_framebuffer[160][200] != 0x00);  // top
+		CHECK(video_framebuffer[200][200] == 0x00);  // HOLLOW centre
+		CHECK(video_framebuffer[200][241] == 0x00);  // nothing outside
+
+		// The filled form of the same circle fills its centre.
+		v.write(DATA, ESC); v.write(DATA, 0x40);
+		v.write(DATA, 1); v.write(DATA, 0x2C);	// 300,200
+		v.write(DATA, 0); v.write(DATA, 200);
+		v.write(DATA, ESC); v.write(DATA, 0x53);
+		v.write(DATA, 0); v.write(DATA, 40);
+		v.tick(1);
+		CHECK(video_framebuffer[200][300] != 0x00);  // centre IS filled
+		CHECK(video_framebuffer[200][340] != 0x00);  // out to the edge
+		CHECK(video_framebuffer[200][342] == 0x00);  // and no further
+
+		// An ellipse is wider than it is tall when told to be, which
+		// is the check a circle routine wearing an ellipse's name
+		// would fail.
+		v.write(DATA, ESC); v.write(DATA, 0x40);
+		v.write(DATA, 1); v.write(DATA, 0x90);	// 400,350
+		v.write(DATA, 1); v.write(DATA, 0x5E);
+		v.write(DATA, ESC); v.write(DATA, 0x54);
+		v.write(DATA, 0); v.write(DATA, 60);	// rx 60
+		v.write(DATA, 0); v.write(DATA, 20);	// ry 20
+		v.tick(1);
+		CHECK(video_framebuffer[350][455] != 0x00);  // 55 px right: in
+		CHECK(video_framebuffer[350][400] != 0x00);  // centre filled
+		// The vertical extreme is EXACTLY ry away and is part of the
+		// shape; one pixel beyond it is not. Checking both sides of
+		// that line is what catches an off-by-one, where checking
+		// only "somewhere outside" would not.
+		CHECK(video_framebuffer[330][400] != 0x00);  // ry up: the edge
+		CHECK(video_framebuffer[329][400] == 0x00);  // one further: out
+		// And it is genuinely wider than tall: 55 right is inside
+		// while 25 up is already outside.
+		CHECK(video_framebuffer[325][400] == 0x00);
+	}
+
 	// VID-025: text must not hide graphics, and erasing text must put the
 	// graphics BACK rather than leave a hole. Both halves matter -- a
 	// transparent background that never erases just ghosts, which is why
