@@ -685,8 +685,21 @@ int main()
 		kbd(0x00, 0x39); released();                    // caps off
 		CHECK(!hid_cook_caps_lock());
 
-		// Unmapped usages produce nothing at all (F1 here).
-		kbd(0x00, 0x3A); released(); CHECK(typed() == -1);
+		// Function keys reach the guest as $80-$8B, one per key. They
+		// exist for the guest to spend -- the window switch is the use
+		// in view -- and the property this end guarantees is that they
+		// are DISTINGUISHABLE: nothing else the cooker emits lands in
+		// that range.
+		kbd(0x00, 0x3A); released(); CHECK(typed() == 0x80);   // F1
+		kbd(0x00, 0x3B); released(); CHECK(typed() == 0x81);   // F2
+		kbd(0x00, 0x45); released(); CHECK(typed() == 0x8B);   // F12
+
+		// Unmapped usages still produce nothing at all. Home, here --
+		// this check used F1 until F1 acquired a meaning, which is the
+		// same trap the reserved graphics sub-code fell into: a test
+		// written about "nothing" quietly becomes a test about
+		// something.
+		kbd(0x00, 0x4A); released(); CHECK(typed() == -1);
 
 		// A short keyboard report is ignored rather than read past.
 		const uint8_t stub[4] = { 0, 0, 0x04, 0 };
