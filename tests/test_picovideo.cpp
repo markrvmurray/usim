@@ -2190,6 +2190,91 @@ int main()
 		CHECK(bad2 == 0);
 	}
 
+	// Capture a region OVER the grid and re-stamp it -- the tail of the
+	// same hardware page, and the seam the grid test above does not reach.
+	// GetBlk reads the graphics SHADOW while the grid test checked the
+	// FRAMEBUFFER, so the two together are what says those agree. If a
+	// stamp wrote pixels to one and not the other, or wrote them at
+	// different coordinates, the grid would look perfect and everything
+	// captured from it would come back displaced -- which is exactly how
+	// "the gems are misplaced" would present while every gem was in fact
+	// drawn in the right place.
+	//
+	// The region is deliberately 120x120 over a grid on a 100x40 pitch,
+	// so it straddles several stamps and lands on no boundary: a capture
+	// aligned to the pitch could be off by a whole cell and still compare
+	// equal.
+	{
+		static const uint8_t ESC = 0x1B;
+		static const int RW = 120, RH = 120;
+		static const int SX = 170, SY = 330;	// on no gem boundary
+		static const int DX = 60,  DY = 60;
+
+		// Snapshot the source region before the copy, because the
+		// destination overlaps nothing but the source must not move.
+		uint8_t want[RH][RW];
+		for (int r = 0; r < RH; r++)
+			for (int c = 0; c < RW; c++)
+				want[r][c] = video_framebuffer[SY + r][SX + c];
+
+		// The region has to contain some gem, or this proves nothing
+		// but that background copies to background.
+		int marks = 0;
+		for (int r = 0; r < RH; r++)
+			for (int c = 0; c < RW; c++)
+				if (want[r][c] == 0xFF || want[r][c] == 0xFC)
+					marks++;
+		CHECK(marks >= 4);
+
+		// DefGPB group 2 buffer 2, 120*120 = 14400 bytes.
+		v.write(DATA, ESC); v.write(DATA, 0x29);
+		v.write(DATA, 2); v.write(DATA, 2);
+		v.write(DATA, (uint8_t)((RW * RH) >> 8));
+		v.write(DATA, (uint8_t)((RW * RH) & 0xFF));
+		// GetBlk the region.
+		v.write(DATA, ESC); v.write(DATA, 0x2C);
+		v.write(DATA, 2); v.write(DATA, 2);
+		v.write(DATA, (uint8_t)(SX >> 8)); v.write(DATA, (uint8_t)SX);
+		v.write(DATA, (uint8_t)(SY >> 8)); v.write(DATA, (uint8_t)SY);
+		v.write(DATA, (uint8_t)(RW >> 8)); v.write(DATA, (uint8_t)RW);
+		v.write(DATA, (uint8_t)(RH >> 8)); v.write(DATA, (uint8_t)RH);
+		v.tick(1);
+		// PutBlk it somewhere that does not overlap the source.
+		v.write(DATA, ESC); v.write(DATA, 0x2D);
+		v.write(DATA, 2); v.write(DATA, 2);
+		v.write(DATA, (uint8_t)(DX >> 8)); v.write(DATA, (uint8_t)DX);
+		v.write(DATA, (uint8_t)(DY >> 8)); v.write(DATA, (uint8_t)DY);
+		v.tick(1);
+
+		// Pixel for pixel, and report the FIRST disagreement with both
+		// coordinates: a uniform offset and a shear look identical in a
+		// count, and the offset is the number that names the bug.
+		int diff = 0, fr = -1, fc = -1;
+		for (int r = 0; r < RH; r++)
+			for (int c = 0; c < RW; c++)
+				if (video_framebuffer[DY + r][DX + c] !=
+				    want[r][c]) {
+					if (diff == 0) { fr = r; fc = c; }
+					diff++;
+				}
+		if (diff != 0)
+			fprintf(stderr, "  region copy: %d px differ, first at "
+				"+%d,+%d (want %02X got %02X)\n", diff, fc, fr,
+				want[fr][fc],
+				video_framebuffer[DY + fr][DX + fc]);
+		CHECK(diff == 0);
+
+		// And the source is still there: a capture that read through
+		// to the framebuffer could have been damaged by its own write.
+		int moved = 0;
+		for (int r = 0; r < RH; r++)
+			for (int c = 0; c < RW; c++)
+				if (video_framebuffer[SY + r][SX + c] !=
+				    want[r][c])
+					moved++;
+		CHECK(moved == 0);
+	}
+
 	// M0 loopback still works after M1 (the vlink test must keep passing).
 	v.write(STAT, VID_CTL_LOOPBACK);
 	v.write(DATA, 0x55);
