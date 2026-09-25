@@ -1111,6 +1111,62 @@ int main()
 		v.tick(1);
 	}
 
+	// Flood fill. What a wrong one does is leak past its boundary, or
+	// fail to reach a corner, or never stop -- so the shape under test is
+	// a hollow box, and the checks are inside it, on its wall, and
+	// outside it.
+	{
+		static const uint8_t ESC = 0x1B;
+		v.write(STAT, VID_CTL_RESET);
+		v.tick(1);
+		v.write(DATA, 0x0C);
+		v.tick(1);
+
+		// A hollow box from 100,100 to 300,250, drawn in the
+		// foreground colour.
+		v.write(DATA, ESC); v.write(DATA, 0x40);
+		v.write(DATA, 0); v.write(DATA, 100);
+		v.write(DATA, 0); v.write(DATA, 100);
+		v.write(DATA, ESC); v.write(DATA, 0x48);	// Box
+		v.write(DATA, 1); v.write(DATA, 0x2C);		// 300,250
+		v.write(DATA, 0); v.write(DATA, 250);
+		v.tick(1);
+		const uint8_t wall = video_framebuffer[100][200];
+		CHECK(wall != 0x00);
+		CHECK(video_framebuffer[175][200] == 0x00);	// hollow inside
+
+		// Seed the fill in the middle of it.
+		v.write(DATA, ESC); v.write(DATA, 0x40);
+		v.write(DATA, 0); v.write(DATA, 200);
+		v.write(DATA, 0); v.write(DATA, 175);
+		v.write(DATA, ESC); v.write(DATA, 0x4F);	// FFill
+		v.tick(1);
+
+		CHECK(video_framebuffer[175][200] != 0x00);	// centre filled
+		CHECK(video_framebuffer[101][101] != 0x00);	// and the corners
+		CHECK(video_framebuffer[249][299] != 0x00);
+		// It must NOT get out. One pixel beyond each wall is the test
+		// that matters: a fill that leaks takes the whole screen.
+		CHECK(video_framebuffer[175][99]  == 0x00);
+		CHECK(video_framebuffer[175][301] == 0x00);
+		CHECK(video_framebuffer[99][200]  == 0x00);
+		CHECK(video_framebuffer[251][200] == 0x00);
+
+		// Filling with the colour already there must do nothing at
+		// all, rather than seeding itself forever -- every pixel it
+		// examined would match after being written.
+		v.write(DATA, ESC); v.write(DATA, 0x4F);
+		v.tick(1);
+		CHECK(video_framebuffer[175][200] != 0x00);	// still here
+
+		// And no seeds were dropped: this shape is nowhere near the
+		// stack bound, so a non-zero count would mean the bound is
+		// wrong rather than the shape is hard.
+		uint32_t over = 1;
+		vidterm_fill_stats(&over);
+		CHECK(over == 0);
+	}
+
 	// Curves. The properties worth asserting are the ones a wrong
 	// algorithm gets wrong: that the outline is HOLLOW and the fill is
 	// not, that both are centred on the draw pointer, and that the
