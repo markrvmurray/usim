@@ -1112,6 +1112,65 @@ int main()
 		v.tick(1);
 	}
 
+	// The graphics demo's exact scene-3 byte sequence, reproduced because
+	// it was reported as drawing nothing. A 32x32 image, loaded and
+	// stamped, at the sizes and in the order the guest sends them.
+	{
+		static const uint8_t ESC = 0x1B;
+		v.write(STAT, VID_CTL_RESET);
+		v.tick(1);
+		v.write(DATA, 0x0C);
+		v.tick(1);
+
+		// 1B 29 01 01 04 00
+		v.write(DATA, ESC); v.write(DATA, 0x29);
+		v.write(DATA, 0x01); v.write(DATA, 0x01);
+		v.write(DATA, 0x04); v.write(DATA, 0x00);
+		// 1B 2B 01 01 01 00 20 00 20 04 00 + 1024 bytes
+		v.write(DATA, ESC); v.write(DATA, 0x2B);
+		v.write(DATA, 0x01); v.write(DATA, 0x01); v.write(DATA, 0x01);
+		v.write(DATA, 0x00); v.write(DATA, 0x20);
+		v.write(DATA, 0x00); v.write(DATA, 0x20);
+		v.write(DATA, 0x04); v.write(DATA, 0x00);
+		for (int i = 0; i < 1024; i++) {
+			v.write(DATA, (uint8_t)(0x20 + (i & 0x3F)));
+			if ((i & 0x7F) == 0x7F)
+				v.tick(1);
+		}
+		for (int t = 0; t < 16; t++)
+			v.tick(1);
+
+		// 1B 2D 01 01 <X16> <Y16> at 64,64
+		v.write(DATA, ESC); v.write(DATA, 0x2D);
+		v.write(DATA, 0x01); v.write(DATA, 0x01);
+		v.write(DATA, 0x00); v.write(DATA, 0x40);
+		v.write(DATA, 0x00); v.write(DATA, 0x40);
+		v.tick(1);
+
+		CHECK(video_framebuffer[64][64] == 0x20);	// first pixel
+		CHECK(video_framebuffer[64][95] == 0x3F);	// end of its row
+		CHECK(video_framebuffer[95][64] != 0x00);	// 32 rows deep
+		CHECK(video_framebuffer[64][96] == 0x00);	// and no wider
+
+		// GetBlk that region into g1/b2 and stamp it elsewhere.
+		v.write(DATA, ESC); v.write(DATA, 0x29);
+		v.write(DATA, 0x01); v.write(DATA, 0x02);
+		v.write(DATA, 0x04); v.write(DATA, 0x00);
+		v.write(DATA, ESC); v.write(DATA, 0x2C);
+		v.write(DATA, 0x01); v.write(DATA, 0x02);
+		v.write(DATA, 0x00); v.write(DATA, 0x40);
+		v.write(DATA, 0x00); v.write(DATA, 0x40);
+		v.write(DATA, 0x00); v.write(DATA, 0x20);
+		v.write(DATA, 0x00); v.write(DATA, 0x20);
+		v.write(DATA, ESC); v.write(DATA, 0x2D);
+		v.write(DATA, 0x01); v.write(DATA, 0x02);
+		v.write(DATA, 0x01); v.write(DATA, 0x00);	// x 256
+		v.write(DATA, 0x00); v.write(DATA, 0x40);
+		v.tick(1);
+		CHECK(video_framebuffer[64][256] == 0x20);
+		CHECK(video_framebuffer[64][287] == 0x3F);
+	}
+
 	// Text face, bold, and the cursor sprite. A loaded face must actually
 	// replace the built-in one, and selecting buffer 0 must put it back --
 	// the second half is what a one-way switch would fail.
