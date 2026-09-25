@@ -1112,6 +1112,134 @@ int main()
 		v.tick(1);
 	}
 
+	// Get/put buffers: define, load, stamp, capture, and use as a fill
+	// pattern. The round trip is the test that matters -- a block taken
+	// off the screen and put back somewhere else must arrive intact.
+	{
+		static const uint8_t ESC = 0x1B;
+		v.write(STAT, VID_CTL_RESET);
+		v.tick(1);
+		v.write(DATA, 0x0C);
+		v.tick(1);
+
+		// DefGPB group 1 buffer 1, 16 bytes: a 4x4 bitmap.
+		v.write(DATA, ESC); v.write(DATA, 0x29);
+		v.write(DATA, 1); v.write(DATA, 1);
+		v.write(DATA, 0); v.write(DATA, 16);
+		// GPLoad it: type 1, 4x4, 16 bytes of payload.
+		v.write(DATA, ESC); v.write(DATA, 0x2B);
+		v.write(DATA, 1); v.write(DATA, 1); v.write(DATA, 1);
+		v.write(DATA, 0); v.write(DATA, 4);	// Xsize
+		v.write(DATA, 0); v.write(DATA, 4);	// Ysize
+		v.write(DATA, 0); v.write(DATA, 16);	// bufSize
+		for (uint8_t i = 0; i < 16; i++)
+			v.write(DATA, (uint8_t)(0x41 + i));
+		v.write(DATA, 'Z');	// the stream must still be in step
+		v.tick(1);
+		CHECK(check_cell(0, 0, 'Z'));
+
+		// PutBlk it at 500,300 and the pixels must be what was loaded.
+		v.write(DATA, ESC); v.write(DATA, 0x2D);
+		v.write(DATA, 1); v.write(DATA, 1);
+		v.write(DATA, 1); v.write(DATA, 0xF4);	// x = 500
+		v.write(DATA, 1); v.write(DATA, 0x2C);	// y = 300
+		v.tick(1);
+		CHECK(video_framebuffer[300][500] == 0x41);
+		CHECK(video_framebuffer[300][503] == 0x44);
+		CHECK(video_framebuffer[303][503] == 0x50);
+		CHECK(video_framebuffer[300][504] != 0x45);   // 4 wide, not 5
+
+		// GetBlk that same region into a second buffer, then stamp it
+		// elsewhere: a round trip through our storage.
+		v.write(DATA, ESC); v.write(DATA, 0x29);
+		v.write(DATA, 1); v.write(DATA, 2);
+		v.write(DATA, 0); v.write(DATA, 16);
+		v.write(DATA, ESC); v.write(DATA, 0x2C);
+		v.write(DATA, 1); v.write(DATA, 2);
+		v.write(DATA, 1); v.write(DATA, 0xF4);	// x 500
+		v.write(DATA, 1); v.write(DATA, 0x2C);	// y 300
+		v.write(DATA, 0); v.write(DATA, 4);	// w 4
+		v.write(DATA, 0); v.write(DATA, 4);	// h 4
+		v.write(DATA, ESC); v.write(DATA, 0x2D);
+		v.write(DATA, 1); v.write(DATA, 2);
+		v.write(DATA, 2); v.write(DATA, 0x58);	// x 600
+		v.write(DATA, 1); v.write(DATA, 0x2C);	// y 300
+		v.tick(1);
+		CHECK(video_framebuffer[300][600] == 0x41);
+		CHECK(video_framebuffer[303][603] == 0x50);
+
+		// PSet: fills take their colour from the pattern, tiled in
+		// SCREEN coordinates so a fill does not restart it at its own
+		// corner.
+		v.write(DATA, ESC); v.write(DATA, 0x2E);
+		v.write(DATA, 1); v.write(DATA, 1);
+		v.write(DATA, ESC); v.write(DATA, 0x40);
+		v.write(DATA, 0); v.write(DATA, 100);
+		v.write(DATA, 1); v.write(DATA, 0x90);	// y = 400
+		v.write(DATA, ESC); v.write(DATA, 0x4A);
+		v.write(DATA, 0); v.write(DATA, 140);
+		v.write(DATA, 1); v.write(DATA, 0xB8);	// y = 440
+		v.tick(1);
+		// 4x4 pattern tiled from the screen origin: (100,400) is a
+		// multiple of 4 in both axes, so it takes the pattern's 0,0.
+		CHECK(video_framebuffer[400][100] == 0x41);
+		CHECK(video_framebuffer[400][101] == 0x42);
+		CHECK(video_framebuffer[401][100] == 0x45);
+		CHECK(video_framebuffer[400][104] == 0x41);   // tiles
+
+		// Buffer 0 turns it off again and fills go solid.
+		v.write(DATA, ESC); v.write(DATA, 0x2E);
+		v.write(DATA, 1); v.write(DATA, 0);
+		v.write(DATA, ESC); v.write(DATA, 0x40);
+		v.write(DATA, 0); v.write(DATA, 100);
+		v.write(DATA, 1); v.write(DATA, 0x90);	// y = 400
+		v.write(DATA, ESC); v.write(DATA, 0x4A);
+		v.write(DATA, 0); v.write(DATA, 140);
+		v.write(DATA, 1); v.write(DATA, 0xB8);	// y = 440
+		v.tick(1);
+		CHECK(video_framebuffer[400][100] == video_framebuffer[400][101]);
+
+		// A GPLoad with a reserved screenType must NOT load -- that is
+		// what reserving zero is for, so an all-zero or truncated
+		// header is rejected rather than rendered as whatever it
+		// happens to contain. The payload is still counted and
+		// dropped, so the stream stays in step: the 'Y' after it must
+		// land as a character, not as pixels.
+		v.write(DATA, ESC); v.write(DATA, 0x29);
+		v.write(DATA, 1); v.write(DATA, 3);
+		v.write(DATA, 0); v.write(DATA, 16);
+		v.write(DATA, ESC); v.write(DATA, 0x2B);
+		v.write(DATA, 1); v.write(DATA, 3); v.write(DATA, 0);  // type 0
+		v.write(DATA, 0); v.write(DATA, 4);
+		v.write(DATA, 0); v.write(DATA, 4);
+		v.write(DATA, 0); v.write(DATA, 16);
+		for (uint8_t i = 0; i < 16; i++)
+			v.write(DATA, 0x77);
+		v.write(DATA, 0x0C);			// clear, then a glyph
+		v.write(DATA, 'Y');
+		v.tick(1);
+		CHECK(check_cell(0, 0, 'Y'));		// stream stayed in step
+
+		const uint8_t untouched = video_framebuffer[350][800];
+		v.write(DATA, ESC); v.write(DATA, 0x2D);
+		v.write(DATA, 1); v.write(DATA, 3);
+		v.write(DATA, 3); v.write(DATA, 0x20);	// x 800
+		v.write(DATA, 1); v.write(DATA, 0x5E);	// y 350
+		v.tick(1);
+		CHECK(video_framebuffer[350][800] == untouched);  // nothing loaded
+
+		// KillBuf then use it: accepted, does nothing, draws nothing.
+		v.write(DATA, ESC); v.write(DATA, 0x2A);
+		v.write(DATA, 1); v.write(DATA, 1);
+		const uint8_t before = video_framebuffer[300][700];
+		v.write(DATA, ESC); v.write(DATA, 0x2D);
+		v.write(DATA, 1); v.write(DATA, 1);
+		v.write(DATA, 2); v.write(DATA, 0xBC);	// x 700
+		v.write(DATA, 1); v.write(DATA, 0x2C);
+		v.tick(1);
+		CHECK(video_framebuffer[300][700] == before);
+	}
+
 	// LSet: the raster mix mode. XOR is the one that proves it, because
 	// drawing the same thing twice must return the screen to where it
 	// started -- which no other mode does and no accident reproduces.
