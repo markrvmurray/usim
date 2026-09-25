@@ -1242,6 +1242,65 @@ int main()
 		CHECK(video_framebuffer[269][179] ==
 		    weave[(269 % 16) * 16 + (179 % 16)]);
 
+		// A pattern applies to FILLS and to nothing else. It was
+		// applied in the one pixel writer every primitive passes
+		// through, so lines and outlines came out woven and PutBlk
+		// stamped the pattern instead of the image it was handed --
+		// which on a screen reads as a patch of pattern unrelated to
+		// anything around it. Meanwhile FFill, which IS a fill, was
+		// the only one that missed out, because it writes spans
+		// directly. Wrong in both directions at once, so both need
+		// asserting.
+		v.write(DATA, ESC); v.write(DATA, 0x2E);
+		v.write(DATA, 3); v.write(DATA, 1);	// pattern on
+
+		// An OUTLINE must be solid foreground, not woven. Box from
+		// 600,300 to 700,360; its top edge is one colour throughout.
+		v.write(DATA, ESC); v.write(DATA, 0x32); v.write(DATA, 7);
+		v.write(DATA, ESC); v.write(DATA, 0x40);
+		v.write(DATA, 2); v.write(DATA, 0x58);	// 600,300
+		v.write(DATA, 1); v.write(DATA, 0x2C);
+		v.write(DATA, ESC); v.write(DATA, 0x48);	// Box
+		v.write(DATA, 2); v.write(DATA, 0xBC);	// to 700,360
+		v.write(DATA, 1); v.write(DATA, 0x68);
+		v.tick(1);
+		const uint8_t edge = video_framebuffer[300][600];
+		for (int x = 601; x <= 700; x++)
+			CHECK(video_framebuffer[300][x] == edge);
+
+		// A STAMPED BLOCK must be the image, not the pattern. g3/b1 is
+		// the weave itself, so stamping it must reproduce the weave
+		// from ITS OWN corner -- which differs from the screen-tiled
+		// pattern unless the two happen to coincide, so place it
+		// somewhere they do not.
+		v.write(DATA, ESC); v.write(DATA, 0x2D);
+		v.write(DATA, 3); v.write(DATA, 1);
+		v.write(DATA, 2); v.write(DATA, 0x59);	// x 601
+		v.write(DATA, 1); v.write(DATA, 0xC3);	// y 451
+		v.tick(1);
+		for (int r = 0; r < 16; r++)
+			for (int c = 0; c < 16; c++)
+				CHECK(video_framebuffer[451 + r][601 + c] ==
+				    weave[r * 16 + c]);
+
+		// And FFill, which IS a fill, must take the pattern. Box an
+		// enclosure in solid, then flood inside it.
+		v.write(DATA, ESC); v.write(DATA, 0x40);
+		v.write(DATA, 0); v.write(DATA, 200);
+		v.write(DATA, 1); v.write(DATA, 0x90);	// 200,400
+		v.write(DATA, ESC); v.write(DATA, 0x48);
+		v.write(DATA, 1); v.write(DATA, 0x18);	// to 280,460
+		v.write(DATA, 1); v.write(DATA, 0xCC);
+		v.write(DATA, ESC); v.write(DATA, 0x40);
+		v.write(DATA, 0); v.write(DATA, 240);
+		v.write(DATA, 1); v.write(DATA, 0xAE);	// 240,430 inside it
+		v.write(DATA, ESC); v.write(DATA, 0x4F);	// FFill
+		v.tick(1);
+		CHECK(video_framebuffer[430][240] ==
+		    weave[(430 % 16) * 16 + (240 % 16)]);
+		CHECK(video_framebuffer[431][241] ==
+		    weave[(431 % 16) * 16 + (241 % 16)]);
+
 		// Killing the buffer a pattern came from must drop the
 		// pattern. It is a kept pointer now -- into an SRAM cache
 		// when it fitted, into the pool when it did not -- so a kill
