@@ -1098,6 +1098,33 @@ int main()
 		v.tick(1);
 	}
 
+	// Fills take two routes now: a full-width rectangle is one contiguous
+	// run, anything narrower is one run per row. The fast path is the one
+	// a cleared screen takes, so it needs its own check -- a length
+	// computed wrongly there would overrun into the rows below.
+	{
+		v.write(STAT, VID_CTL_RESET);
+		v.tick(1);
+		v.write(DATA, 0x0C);
+		v.tick(1);
+
+		// Root window, so the clip is the whole panel: a bar from 0,0
+		// to the far corner takes the contiguous path.
+		vidterm_fill_rect(0, 100, FB_WIDTH, 10, 0x1C);
+		CHECK(video_framebuffer[100][0]   == 0x1C);
+		CHECK(video_framebuffer[109][1023] == 0x1C);  // last row, last px
+		CHECK(video_framebuffer[99][0]   != 0x1C);    // not the row above
+		CHECK(video_framebuffer[110][0]  != 0x1C);    // nor the one below
+
+		// A narrower rectangle takes the per-row path and must not
+		// bleed past its right edge into the next row's left.
+		vidterm_fill_rect(10, 200, 20, 3, 0x1C);
+		CHECK(video_framebuffer[200][10] == 0x1C);
+		CHECK(video_framebuffer[202][29] == 0x1C);
+		CHECK(video_framebuffer[200][30] != 0x1C);    // stops at the edge
+		CHECK(video_framebuffer[203][10] != 0x1C);
+	}
+
 	// Region text operations -- the primitives a text window is built from.
 	// The property that matters is CONTAINMENT: what is inside the
 	// rectangle changes and what is outside does not. A region routine that
