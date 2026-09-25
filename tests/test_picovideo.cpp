@@ -21,6 +21,7 @@
 #include "vid_link.h"
 #include "video.h"
 #include "video_render.h"
+#include "gfx_shadow.h"
 #include "font_spleen_8x16.h"
 
 static int failures = 0;
@@ -1109,6 +1110,129 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x21); v.write(DATA, 0);
 		v.write(DATA, 0x0C);
 		v.tick(1);
+	}
+
+	// LSet: the raster mix mode. XOR is the one that proves it, because
+	// drawing the same thing twice must return the screen to where it
+	// started -- which no other mode does and no accident reproduces.
+	{
+		static const uint8_t ESC = 0x1B;
+		v.write(STAT, VID_CTL_RESET);
+		v.tick(1);
+		v.write(DATA, 0x0C);
+		v.tick(1);
+
+		// A bar to combine against, then note what is under it.
+		v.write(DATA, ESC); v.write(DATA, 0x40);
+		v.write(DATA, 0); v.write(DATA, 100);
+		v.write(DATA, 0); v.write(DATA, 100);
+		v.write(DATA, ESC); v.write(DATA, 0x4A);
+		v.write(DATA, 0); v.write(DATA, 200);
+		v.write(DATA, 0); v.write(DATA, 200);
+		v.tick(1);
+		const uint8_t under = video_framebuffer[150][150];
+		CHECK(under != 0x00);
+
+		// XOR a second bar across it, twice. The first changes the
+		// pixels; the second must put them back exactly.
+		v.write(DATA, ESC); v.write(DATA, 0x2F); v.write(DATA, 3);
+		v.write(DATA, ESC); v.write(DATA, 0x40);
+		v.write(DATA, 0); v.write(DATA, 120);
+		v.write(DATA, 0); v.write(DATA, 120);
+		v.write(DATA, ESC); v.write(DATA, 0x4A);
+		v.write(DATA, 0); v.write(DATA, 180);
+		v.write(DATA, 0); v.write(DATA, 180);
+		v.tick(1);
+		const uint8_t xored = video_framebuffer[150][150];
+		CHECK(xored != under);		// something happened
+
+		v.write(DATA, ESC); v.write(DATA, 0x40);
+		v.write(DATA, 0); v.write(DATA, 120);
+		v.write(DATA, 0); v.write(DATA, 120);
+		v.write(DATA, ESC); v.write(DATA, 0x4A);
+		v.write(DATA, 0); v.write(DATA, 180);
+		v.write(DATA, 0); v.write(DATA, 180);
+		v.tick(1);
+		CHECK(video_framebuffer[150][150] == under);   // and undone
+
+		// Back to replace, and a bar really does replace again.
+		v.write(DATA, ESC); v.write(DATA, 0x2F); v.write(DATA, 0);
+		v.write(DATA, ESC); v.write(DATA, 0x32); v.write(DATA, 2);
+		v.write(DATA, ESC); v.write(DATA, 0x40);
+		v.write(DATA, 0); v.write(DATA, 120);
+		v.write(DATA, 0); v.write(DATA, 120);
+		v.write(DATA, ESC); v.write(DATA, 0x4A);
+		v.write(DATA, 0); v.write(DATA, 180);
+		v.write(DATA, 0); v.write(DATA, 180);
+		v.tick(1);
+		const uint8_t replaced = video_framebuffer[150][150];
+		CHECK(replaced != under);
+		CHECK(replaced != xored);	// not the XOR result either
+
+		// WHAT THE LOGIC COMBINES AGAINST. A mix mode must read the
+		// GRAPHICS plane, not the framebuffer -- the framebuffer may
+		// have text on it, and a guest XORing across a window full of
+		// characters means to combine with the drawing underneath
+		// them, not with the glyphs.
+		//
+		// Reading the framebuffer instead is invisible until text is
+		// present, which is why this check puts a character in the
+		// way: XOR it twice (a no-op), then erase the character. The
+		// graphics underneath must be exactly what it was. Combining
+		// against the framebuffer feeds glyph pixels into the shadow,
+		// and erasing then paints the ghost of the character back as
+		// though it were drawing.
+		v.write(DATA, ESC); v.write(DATA, 0x2F); v.write(DATA, 0);
+		v.write(DATA, ESC); v.write(DATA, 0x32); v.write(DATA, 3);
+		v.write(DATA, ESC); v.write(DATA, 0x40);
+		v.write(DATA, 0); v.write(DATA, 100);
+		v.write(DATA, 0); v.write(DATA, 100);
+		v.write(DATA, ESC); v.write(DATA, 0x4A);
+		v.write(DATA, 0); v.write(DATA, 200);
+		v.write(DATA, 0); v.write(DATA, 200);
+		v.tick(1);
+		const uint8_t plain = video_framebuffer[176][152];
+
+		v.write(DATA, 0x02);			// cursor to cell 19,11
+		v.write(DATA, (uint8_t)(19 + 0x20));
+		v.write(DATA, (uint8_t)(11 + 0x20));
+		v.write(DATA, 'M');			// a dense glyph
+		v.tick(1);
+
+		v.write(DATA, ESC); v.write(DATA, 0x2F); v.write(DATA, 3);
+		for (int pass = 0; pass < 2; pass++) {
+			v.write(DATA, ESC); v.write(DATA, 0x40);
+			v.write(DATA, 0); v.write(DATA, 150);
+			v.write(DATA, 0); v.write(DATA, 170);
+			v.write(DATA, ESC); v.write(DATA, 0x4A);
+			v.write(DATA, 0); v.write(DATA, 170);
+			v.write(DATA, 0); v.write(DATA, 190);
+			v.tick(1);
+		}
+		v.write(DATA, ESC); v.write(DATA, 0x2F); v.write(DATA, 0);
+
+		v.write(DATA, 0x02);			// erase the character
+		v.write(DATA, (uint8_t)(19 + 0x20));
+		v.write(DATA, (uint8_t)(11 + 0x20));
+		v.write(DATA, ' ');
+		v.tick(1);
+		for (int gy = 0; gy < CHAR_H; gy++)
+			for (int gx = 0; gx < CHAR_W; gx++)
+				CHECK(video_framebuffer[176 + gy][152 + gx] == plain);
+
+		// A mode the guest should not send falls back to replace
+		// rather than doing something inventive.
+		v.write(DATA, ESC); v.write(DATA, 0x2F); v.write(DATA, 99);
+		v.write(DATA, ESC); v.write(DATA, 0x32); v.write(DATA, 1);
+		v.write(DATA, ESC); v.write(DATA, 0x40);
+		v.write(DATA, 0); v.write(DATA, 120);
+		v.write(DATA, 0); v.write(DATA, 120);
+		v.write(DATA, ESC); v.write(DATA, 0x4A);
+		v.write(DATA, 0); v.write(DATA, 180);
+		v.write(DATA, 0); v.write(DATA, 180);
+		v.tick(1);
+		CHECK(video_framebuffer[150][150] != replaced);  // it drew
+		v.write(DATA, ESC); v.write(DATA, 0x2F); v.write(DATA, 0);
 	}
 
 	// Flood fill. What a wrong one does is leak past its boundary, or
