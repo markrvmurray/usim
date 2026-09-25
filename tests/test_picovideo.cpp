@@ -1262,6 +1262,32 @@ int main()
 		CHECK(video_framebuffer[95][64] != 0x00);	// 32 rows deep
 		CHECK(video_framebuffer[64][96] == 0x00);	// and no wider
 
+		// A GetBlk whose rectangle runs off the panel must not read
+		// past the plane. Before this was bounded it indexed the
+		// row-valid map past its end and read past a shadow row --
+		// invisible on a host, where one array simply runs into the
+		// next, and a candidate bus fault on hardware where PSRAM
+		// beyond the declared region is configured to fault. Off-panel
+		// pixels come back as background.
+		v.write(DATA, ESC); v.write(DATA, 0x29);
+		v.write(DATA, 0x01); v.write(DATA, 0x09);
+		v.write(DATA, 0x04); v.write(DATA, 0x00);
+		v.write(DATA, ESC); v.write(DATA, 0x2C);
+		v.write(DATA, 0x01); v.write(DATA, 0x09);
+		v.write(DATA, 0x03); v.write(DATA, 0xF0);	// x 1008
+		v.write(DATA, 0x01); v.write(DATA, 0xD0);	// y 464
+		v.write(DATA, 0x00); v.write(DATA, 0x20);	// w 32 -> 1040
+		v.write(DATA, 0x00); v.write(DATA, 0x20);	// h 32 -> 496
+		v.tick(1);
+		// Stamping it back must not crash and must be background in
+		// the part that came from off-panel.
+		v.write(DATA, ESC); v.write(DATA, 0x2D);
+		v.write(DATA, 0x01); v.write(DATA, 0x09);
+		v.write(DATA, 0x01); v.write(DATA, 0x90);	// x 400
+		v.write(DATA, 0x00); v.write(DATA, 0x64);	// y 100
+		v.tick(1);
+		CHECK(video_framebuffer[100 + 31][400 + 31] == 0x00);
+
 		// GetBlk that region into g1/b2 and stamp it elsewhere.
 		v.write(DATA, ESC); v.write(DATA, 0x29);
 		v.write(DATA, 0x01); v.write(DATA, 0x02);
