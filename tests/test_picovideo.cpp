@@ -1112,6 +1112,104 @@ int main()
 		v.tick(1);
 	}
 
+	// Text face, bold, and the cursor sprite. A loaded face must actually
+	// replace the built-in one, and selecting buffer 0 must put it back --
+	// the second half is what a one-way switch would fail.
+	{
+		static const uint8_t ESC = 0x1B;
+		v.write(STAT, VID_CTL_RESET);
+		v.tick(1);
+		v.write(DATA, 0x0C);
+		v.tick(1);
+
+		// A face where every glyph is a solid block: 256 x 16 bytes
+		// of 0xFF. Whatever character is printed, the cell fills.
+		v.write(DATA, ESC); v.write(DATA, 0x29);
+		v.write(DATA, 2); v.write(DATA, 1);
+		v.write(DATA, 0x10); v.write(DATA, 0x00);	// 4096 bytes
+		v.write(DATA, ESC); v.write(DATA, 0x2B);
+		v.write(DATA, 2); v.write(DATA, 1); v.write(DATA, 1);
+		v.write(DATA, 0); v.write(DATA, 8);
+		v.write(DATA, 0); v.write(DATA, 16);
+		v.write(DATA, 0x10); v.write(DATA, 0x00);	// bufSize 4096
+		// Drained as it goes: the command FIFO is 2 KB and the render
+		// drain takes at most 256 bytes a pass, so a 4 KB payload
+		// pushed in one breath would overflow and desynchronise the
+		// stream. A real guest is flow-controlled by TDRE; this test
+		// has to do it by hand.
+		for (int i = 0; i < 4096; i++) {
+			v.write(DATA, 0xFF);
+			if ((i & 0x7F) == 0x7F)
+				v.tick(1);
+		}
+		for (int t = 0; t < 32; t++)
+			v.tick(1);
+
+		// Before selecting it, 'A' renders as 'A'.
+		v.write(DATA, 0x02); v.write(DATA, 0x20); v.write(DATA, 0x20);
+		v.write(DATA, 'A');
+		v.tick(1);
+		CHECK(check_cell(0, 0, 'A'));
+
+		// Select the face: now every glyph is solid, so the cell is
+		// full where the real 'A' has gaps.
+		v.write(DATA, ESC); v.write(DATA, 0x3A);
+		v.write(DATA, 2); v.write(DATA, 1);
+		v.write(DATA, 0x02); v.write(DATA, 0x21); v.write(DATA, 0x20);
+		v.write(DATA, 'A');
+		v.tick(1);
+		vidterm_cursor_hide();
+		for (int gy = 0; gy < CHAR_H; gy++)
+			for (int gx = 0; gx < CHAR_W; gx++)
+				CHECK(video_framebuffer[gy][8 + gx] == 0xFF);
+
+		// Buffer 0 puts the built-in face back.
+		v.write(DATA, ESC); v.write(DATA, 0x3A);
+		v.write(DATA, 2); v.write(DATA, 0);
+		v.write(DATA, 0x02); v.write(DATA, 0x22); v.write(DATA, 0x20);
+		v.write(DATA, 'A');
+		v.tick(1);
+		CHECK(check_cell(2, 0, 'A'));
+
+		// Killing the buffer a face came from must drop the
+		// selection, not leave a pointer into storage the pool can
+		// hand out again.
+		v.write(DATA, ESC); v.write(DATA, 0x3A);
+		v.write(DATA, 2); v.write(DATA, 1);
+		v.write(DATA, ESC); v.write(DATA, 0x2A);
+		v.write(DATA, 2); v.write(DATA, 1);
+		v.write(DATA, 0x02); v.write(DATA, 0x23); v.write(DATA, 0x20);
+		v.write(DATA, 'A');
+		v.tick(1);
+		CHECK(check_cell(3, 0, 'A'));	// built-in face, not garbage
+
+		// Bold thickens a stroke: the cell gains lit pixels and keeps
+		// every one it had.
+		v.write(DATA, 0x0C);
+		v.write(DATA, 0x02); v.write(DATA, 0x20); v.write(DATA, 0x20);
+		v.write(DATA, 'H');
+		v.tick(1);
+		vidterm_cursor_hide();
+		int plain_lit = 0;
+		for (int gy = 0; gy < CHAR_H; gy++)
+			for (int gx = 0; gx < CHAR_W; gx++)
+				if (video_framebuffer[gy][gx] == 0xFF)
+					plain_lit++;
+
+		v.write(DATA, ESC); v.write(DATA, 0x3D); v.write(DATA, 1);
+		v.write(DATA, 0x02); v.write(DATA, 0x21); v.write(DATA, 0x20);
+		v.write(DATA, 'H');
+		v.tick(1);
+		vidterm_cursor_hide();
+		int bold_lit = 0;
+		for (int gy = 0; gy < CHAR_H; gy++)
+			for (int gx = 0; gx < CHAR_W; gx++)
+				if (video_framebuffer[gy][8 + gx] == 0xFF)
+					bold_lit++;
+		CHECK(bold_lit > plain_lit);
+		v.write(DATA, ESC); v.write(DATA, 0x3D); v.write(DATA, 0);
+	}
+
 	// Get/put buffers: define, load, stamp, capture, and use as a fill
 	// pattern. The round trip is the test that matters -- a block taken
 	// off the screen and put back somewhere else must arrive intact.
