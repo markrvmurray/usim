@@ -986,6 +986,39 @@ int main()
 		v.tick(1);
 	}
 
+	// DWProtSw with an OUTLINE rather than a fill. Box and Bar reach the
+	// framebuffer by different routes -- hline/vline against fill_rect --
+	// so a clip that opens for one can stay shut for the other. These are
+	// the exact bytes a guest demo sent when it reported the escape not
+	// working, kept because a second path is what the Bar case misses.
+	{
+		static const uint8_t ESC = 0x1B;
+		v.write(STAT, VID_CTL_RESET);
+		v.tick(1);
+		v.write(DATA, 0x0C);
+		v.tick(1);
+		v.write(DATA, ESC); v.write(DATA, 0x20);
+		const uint8_t w2[8] = { 2, 0, 16, 5, 48, 16, 0, 0 };
+		for (uint8_t i = 0; i < 8; i++) v.write(DATA, w2[i]);
+		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 2);
+		v.tick(1);
+		// 1B 36 00 / 1B 32 01 / 1B 40 00 00 00 00 / 1B 48 02 58 01 F4
+		v.write(DATA, ESC); v.write(DATA, 0x36); v.write(DATA, 0x00);
+		v.write(DATA, ESC); v.write(DATA, 0x32); v.write(DATA, 0x01);
+		v.write(DATA, ESC); v.write(DATA, 0x40);
+		v.write(DATA, 0x00); v.write(DATA, 0x00);
+		v.write(DATA, 0x00); v.write(DATA, 0x00);
+		v.write(DATA, ESC); v.write(DATA, 0x48);
+		v.write(DATA, 0x02); v.write(DATA, 0x58);
+		v.write(DATA, 0x01); v.write(DATA, 0xF4);
+		v.tick(1);
+		// Window rect is px (128,80)-(512,336). The box's top edge
+		// runs to x = 128+600 = 728, well past the window's right
+		// edge at 512, so unprotected it must appear out there.
+		CHECK(video_framebuffer[80][600] != 0x00);  // outside, drawn
+		CHECK(video_framebuffer[80][400] != 0x00);  // and inside too
+	}
+
 	// M5.3: CWArea narrows the working area within a window; DWProtSw
 	// decides whether graphics may leave it.
 	{
