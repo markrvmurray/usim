@@ -1198,6 +1198,26 @@ int main()
 		CHECK(video_framebuffer[269][179] ==
 		    weave[(269 % 16) * 16 + (179 % 16)]);
 
+		// Killing the buffer a pattern came from must drop the
+		// pattern. It is a kept pointer now -- into an SRAM cache
+		// when it fitted, into the pool when it did not -- so a kill
+		// that left it selected would be drawing from storage the
+		// allocator is free to hand out again.
+		v.write(DATA, ESC); v.write(DATA, 0x2A);
+		v.write(DATA, 3); v.write(DATA, 1);
+		v.write(DATA, ESC); v.write(DATA, 0x40);
+		v.write(DATA, 1); v.write(DATA, 0x2C);	// 300,300
+		v.write(DATA, 1); v.write(DATA, 0x2C);
+		v.write(DATA, ESC); v.write(DATA, 0x4A);
+		v.write(DATA, 1); v.write(DATA, 0x5E);	// to 350,350
+		v.write(DATA, 1); v.write(DATA, 0x5E);
+		v.tick(1);
+		// Solid again: every pixel of the new fill the same.
+		for (int y = 301; y < 349; y += 7)
+			for (int x = 301; x < 349; x += 7)
+				CHECK(video_framebuffer[y][x] ==
+				    video_framebuffer[300][300]);
+
 		v.write(DATA, ESC); v.write(DATA, 0x2E);
 		v.write(DATA, 3); v.write(DATA, 0);
 	}
