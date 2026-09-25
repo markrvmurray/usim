@@ -2051,6 +2051,145 @@ int main()
 		CHECK(check_cell(0, 2, 'A'));	// and nothing was dropped
 	}
 
+	// A GRID of stamps, which is what a guest actually does with PutBlk --
+	// and the case no other test here covers. Every existing block test
+	// stamps once or twice; a fault that only appears after N stamps, or
+	// only in the last row, or only past some coordinate, would pass all
+	// of them. Hardware showed exactly that shape: a page of gems where
+	// the early stamps were right and the ones at bottom right were not.
+	//
+	// The image is deliberately NOT a smooth ramp. A ramp of row*32+col
+	// aliases under any shift where dy*32+dx is a multiple of 256, so a
+	// purely vertical slip of eight rows would leave it pixel-identical
+	// and the test would pass while the picture was wrong. (That trap has
+	// already cost a day on this renderer once, with a diagonal weave
+	// invariant under every shift summing to zero mod 8.) So the image
+	// carries four DIFFERENT corner markers plus one off-centre mark: the
+	// corners pin position, their disagreement catches shear, and the
+	// off-centre mark denies the whole thing any rotational symmetry to
+	// hide behind.
+	{
+		static const uint8_t ESC = 0x1B;
+		static const int GW = 32, GH = 32;
+		static const int COLS = 10, ROWS = 4;
+		static const int X0 = 20, Y0 = 300;
+		static const int XS = 100, YS = 40;
+		static const uint8_t BODY = 0x20;
+		static const uint8_t TL = 0xFF, TR = 0xFE;
+		static const uint8_t BL = 0xFD, BR = 0xFC, ODD = 0xF0;
+
+		v.write(STAT, VID_CTL_RESET);
+		v.tick(1);
+		v.write(DATA, 0x0C);
+		v.tick(1);
+
+		uint8_t img[GW * GH];
+		for (int i = 0; i < GW * GH; i++)
+			img[i] = BODY;
+		img[0] = TL;
+		img[GW - 1] = TR;
+		img[(GH - 1) * GW] = BL;
+		img[(GH - 1) * GW + GW - 1] = BR;
+		img[5 * GW + 1] = ODD;
+
+		// DefGPB group 2 buffer 1, 1024 bytes.
+		v.write(DATA, ESC); v.write(DATA, 0x29);
+		v.write(DATA, 2); v.write(DATA, 1);
+		v.write(DATA, 0x04); v.write(DATA, 0x00);
+		// GPLoad: type 1, 32x32, 1024 bytes.
+		v.write(DATA, ESC); v.write(DATA, 0x2B);
+		v.write(DATA, 2); v.write(DATA, 1); v.write(DATA, 1);
+		v.write(DATA, 0); v.write(DATA, (uint8_t)GW);
+		v.write(DATA, 0); v.write(DATA, (uint8_t)GH);
+		v.write(DATA, 0x04); v.write(DATA, 0x00);
+		// Drained every 128 bytes: the command FIFO is 2 KB and this
+		// payload is 1 KB, so writing it in one go without letting the
+		// render side consume overflows it -- which looks exactly like
+		// a protocol bug and is not one.
+		for (int i = 0; i < GW * GH; i++) {
+			v.write(DATA, img[i]);
+			if ((i & 127) == 127)
+				v.tick(1);
+		}
+		v.tick(1);
+
+		// Stamp the grid, rows outermost, exactly as a guest loop would.
+		for (int r = 0; r < ROWS; r++)
+			for (int c = 0; c < COLS; c++) {
+				const int x = X0 + c * XS, y = Y0 + r * YS;
+
+				v.write(DATA, ESC); v.write(DATA, 0x2D);
+				v.write(DATA, 2); v.write(DATA, 1);
+				v.write(DATA, (uint8_t)(x >> 8));
+				v.write(DATA, (uint8_t)(x & 0xFF));
+				v.write(DATA, (uint8_t)(y >> 8));
+				v.write(DATA, (uint8_t)(y & 0xFF));
+				v.tick(1);
+			}
+		v.tick(1);
+
+		// Now check every single one, and say WHICH failed rather than
+		// just that something did -- "the last eight" versus "all of
+		// them" versus "one" are three different bugs, and a bare pass
+		// or fail cannot tell them apart.
+		int bad = 0;
+		for (int r = 0; r < ROWS; r++)
+			for (int c = 0; c < COLS; c++) {
+				const int x = X0 + c * XS, y = Y0 + r * YS;
+				bool ok = true;
+
+				ok &= video_framebuffer[y][x] == TL;
+				ok &= video_framebuffer[y][x + GW - 1] == TR;
+				ok &= video_framebuffer[y + GH - 1][x] == BL;
+				ok &= video_framebuffer[y + GH - 1][x + GW - 1]
+				      == BR;
+				ok &= video_framebuffer[y + 5][x + 1] == ODD;
+				// The body, sampled away from every marker.
+				ok &= video_framebuffer[y + 16][x + 16] == BODY;
+				// And nothing written PAST the block: a stride
+				// or size error spills to the right, into the
+				// gap the grid leaves between columns.
+				ok &= video_framebuffer[y][x + GW] != TL;
+				ok &= video_framebuffer[y][x + GW] != BODY;
+				if (!ok) {
+					bad++;
+					fprintf(stderr, "  gem r%d c%d at "
+						"%d,%d misplaced\n", r, c, x, y);
+				}
+			}
+		CHECK(bad == 0);
+
+		// The same grid stamped again must be idempotent. A stamp that
+		// depended on what was already there -- a mix mode left set, a
+		// pattern flag left on by an earlier fill -- would differ on
+		// the second pass, and that is the failure mode that made the
+		// hardware page wrong twice already.
+		for (int r = 0; r < ROWS; r++)
+			for (int c = 0; c < COLS; c++) {
+				const int x = X0 + c * XS, y = Y0 + r * YS;
+
+				v.write(DATA, ESC); v.write(DATA, 0x2D);
+				v.write(DATA, 2); v.write(DATA, 1);
+				v.write(DATA, (uint8_t)(x >> 8));
+				v.write(DATA, (uint8_t)(x & 0xFF));
+				v.write(DATA, (uint8_t)(y >> 8));
+				v.write(DATA, (uint8_t)(y & 0xFF));
+				v.tick(1);
+			}
+		v.tick(1);
+		int bad2 = 0;
+		for (int r = 0; r < ROWS; r++)
+			for (int c = 0; c < COLS; c++) {
+				const int x = X0 + c * XS, y = Y0 + r * YS;
+
+				if (video_framebuffer[y][x] != TL ||
+				    video_framebuffer[y + GH - 1][x + GW - 1]
+				    != BR)
+					bad2++;
+			}
+		CHECK(bad2 == 0);
+	}
+
 	// M0 loopback still works after M1 (the vlink test must keep passing).
 	v.write(STAT, VID_CTL_LOOPBACK);
 	v.write(DATA, 0x55);
