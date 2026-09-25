@@ -1098,6 +1098,61 @@ int main()
 		v.tick(1);
 	}
 
+	// VID-025: text must not hide graphics, and erasing text must put the
+	// graphics BACK rather than leave a hole. Both halves matter -- a
+	// transparent background that never erases just ghosts, which is why
+	// the console could not use transparency before the shadow existed.
+	{
+		static const uint8_t ESC = 0x1B;
+		v.write(STAT, VID_CTL_RESET);
+		v.tick(1);
+		v.write(DATA, 0x0C);		// claim and clear both layers
+		v.tick(1);
+
+		// A bar across the middle of the screen, in the foreground
+		// colour -- whatever the palette makes that.
+		v.write(DATA, ESC); v.write(DATA, 0x40);
+		v.write(DATA, 0); v.write(DATA, 64);	// SetDPtr 64,128
+		v.write(DATA, 0); v.write(DATA, 128);
+		v.write(DATA, ESC); v.write(DATA, 0x4A);
+		v.write(DATA, 1); v.write(DATA, 0x90);	// Bar to 400,300
+		v.write(DATA, 1); v.write(DATA, 44);
+		v.tick(1);
+
+		const uint8_t gfx = video_framebuffer[168][84];
+		CHECK(gfx != 0x00);		// the bar really is there
+
+		// Put a character on top of it, at cell 10,10 = px 80,160.
+		v.write(DATA, 0x02);
+		v.write(DATA, (uint8_t)(10 + 0x20));
+		v.write(DATA, (uint8_t)(10 + 0x20));
+		v.write(DATA, 'A');
+		v.tick(1);
+
+		// The glyph is drawn, and the graphics still shows through
+		// the gaps: row 0 of 'A' is blank in this font, so the whole
+		// of that row must still be the bar's colour.
+		bool any_fg = false;
+		for (int gx = 0; gx < CHAR_W; gx++)
+			if (video_framebuffer[160 + 8][80 + gx] == 0xFF)
+				any_fg = true;
+		CHECK(any_fg);			// the character is visible
+		CHECK(video_framebuffer[160][80] == gfx);   // and so is the bar
+		CHECK(video_framebuffer[160][87] == gfx);
+
+		// Now erase it. The cell must return to the BAR, not to black:
+		// painting a background here is what used to punch a hole in
+		// the graphics.
+		v.write(DATA, 0x02);
+		v.write(DATA, (uint8_t)(10 + 0x20));
+		v.write(DATA, (uint8_t)(10 + 0x20));
+		v.write(DATA, ' ');
+		v.tick(1);
+		for (int gy = 0; gy < CHAR_H; gy++)
+			for (int gx = 0; gx < CHAR_W; gx++)
+				CHECK(video_framebuffer[160 + gy][80 + gx] == gfx);
+	}
+
 	// Fills take two routes now: a full-width rectangle is one contiguous
 	// run, anything narrower is one run per row. The fast path is the one
 	// a cleared screen takes, so it needs its own check -- a length
