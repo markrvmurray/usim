@@ -23,6 +23,7 @@
 #include "video_render.h"
 #include "gfx_shadow.h"
 #include "cmd_trace.h"
+#include "fill_log.h"
 #include "font_spleen_8x16.h"
 
 static int failures = 0;
@@ -3321,7 +3322,7 @@ int main()
 		// The byte-wise fill, exactly as it was.
 		unsigned ref_overflows = 0;
 		{
-			struct { int16_t x, y; } st[96];
+			static struct { int16_t x, y; } st[FILL_SEEDS];
 			unsigned sp = 0;
 			const uint8_t target = ref[240][500];
 			st[sp].x = 500; st[sp].y = 240; sp++;
@@ -3345,7 +3346,7 @@ int main()
 							i++;
 							continue;
 						}
-						if (sp < 96u) {
+						if (sp < FILL_SEEDS) {
 							st[sp].x = (int16_t)i;
 							st[sp].y = (int16_t)ny;
 							sp++;
@@ -3372,6 +3373,50 @@ int main()
 				filled += ref[y][x] == C;
 		CHECK(filled > 20000);		// the region is not trivial
 		CHECK(ov1 - ov0 == ref_overflows);
+		// The stack is sized so an ordinary picture cannot overflow it;
+		// this one dropped 835 seeds against the old 96-entry stack.
+		CHECK(ref_overflows == 0u);
+
+		// And the region is COMPLETE: an independent 4-connected flood
+		// over the same picture reaches exactly the pixels filled. The
+		// oracle above only says the fill matches an algorithm; this
+		// says the algorithm reached everything it should.
+		{
+			static uint8_t reach[FB_HEIGHT][FB_WIDTH];
+			static int16_t q[FB_HEIGHT * FB_WIDTH][2];
+			memset(reach, 0, sizeof(reach));
+			int qh = 0, qt = 0, bfs_bad = 0;
+			q[qt][0] = 500; q[qt][1] = 240; qt++;
+			reach[240][500] = 1;
+			while (qh < qt) {
+				const int x = q[qh][0], y = q[qh][1];
+				qh++;
+				static const int D[4][2] = { { 1, 0 }, { -1, 0 },
+				    { 0, 1 }, { 0, -1 } };
+				for (const auto &d : D) {
+					const int nx = x + d[0], ny = y + d[1];
+					if (nx < cx0 || nx >= cx1 || ny < cy0 ||
+					    ny >= cy1 || reach[ny][nx] ||
+					    video_framebuffer[ny][nx] == W)
+						continue;
+					// Unreached target pixels are U; filled
+					// ones are C. Walls stop the flood.
+					reach[ny][nx] = 1;
+					q[qt][0] = (int16_t)nx;
+					q[qt][1] = (int16_t)ny;
+					qt++;
+				}
+			}
+			for (int y = 0; y < FB_HEIGHT; y++)
+				for (int x = 0; x < FB_WIDTH; x++)
+					if ((reach[y][x] != 0) !=
+					    (video_framebuffer[y][x] == C))
+						bfs_bad++;
+			if (bfs_bad)
+				fprintf(stderr, "  flood oracle: %d px differ"
+				    " from a 4-connected flood\n", bfs_bad);
+			CHECK(bfs_bad == 0);
+		}
 		for (int pass = 0; pass < 2; pass++) {
 			if (pass == 1) {
 				(void)vidterm_clear(' ', 0x01u);

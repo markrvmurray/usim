@@ -8,9 +8,16 @@
 #include "fill_log.h"
 
 static uint32_t spans[FILL_LOG_SPANS];
+static uint32_t seeds[FILL_SEEDS];
 
 uint32_t *
 fill_log_base(void)
 {
 	return spans;
+}
+
+uint32_t *
+fill_seeds_base(void)
+{
+	return seeds;
 }
