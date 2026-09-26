@@ -730,6 +730,117 @@ int main()
 		hid_cook_keyboard(stub, 4);
 		CHECK(typed() == -1);
 
+		// AUTO-REPEAT. A USB keyboard does not repeat, and the guest sees
+		// no key-up, so the cooker repeats the held key on a clock the
+		// test drives: 500 ms before the first repeat, then every 50 ms.
+		{
+			uint32_t t = 0xFFFFF000u;	// wraps mid-test, on purpose
+			auto tick = [&](uint32_t ms) {
+				t += ms;
+				hid_cook_tick(t);
+			};
+			auto held = [&](uint8_t mod, uint8_t a, uint8_t b) {
+				const uint8_t r[8] = { mod, 0, a, b, 0, 0, 0, 0 };
+				hid_cook_keyboard(r, 8);
+			};
+			auto count = [&](int want) -> int {	// drain, tally `want`
+				int n = 0;
+				for (int c; (c = typed()) != -1;)
+					n += c == want;
+				return n;
+			};
+
+			hid_cook_reset();
+			held(0, 0x04, 0);			// 'a' down
+			tick(0);				// arms the delay
+			CHECK(typed() == 'a');
+			tick(499);
+			CHECK(typed() == -1);			// not before the delay
+			tick(1);
+			CHECK(typed() == 'a');			// the first repeat
+			int reps = 0;
+			for (int i = 0; i < 10; i++) {
+				tick(49);
+				reps += typed() != -1;		// nothing early
+				tick(1);
+				reps += typed() == 'a' ? 100 : 0;
+			}
+			CHECK(reps == 1000);			// ten, each on time
+			released();
+			tick(1000);
+			CHECK(typed() == -1);			// release stops it
+
+			// A REPEAT WAITS FOR THE GUEST: nothing is queued behind a
+			// byte the guest has not read, however long the key is
+			// held -- so there is never a backlog to keep typing after
+			// release. The moment the byte is taken, the repeat goes.
+			held(0, 0x05, 0);			// 'b'
+			tick(0);
+			for (int i = 0; i < 50; i++)
+				tick(50);			// 2.5 s, nothing read
+			CHECK(count('b') == 1);			// the press alone
+			tick(0);				// read, so the next goes
+			CHECK(typed() == 'b');
+			// ...and the one after it is a full interval later, not
+			// a burst catching up on the repeats that were held back.
+			tick(0);
+			CHECK(typed() == -1);
+			tick(49);
+			CHECK(typed() == -1);
+			tick(1);
+			CHECK(typed() == 'b');
+
+			// A new key takes the repeat over; the repeat produces
+			// what the key produces NOW, so Shift mid-repeat is 'C'.
+			held(0, 0x05, 0x06);			// 'c' down, 'b' held
+			CHECK(typed() == 'c');
+			tick(0);
+			tick(500);
+			CHECK(typed() == 'c');
+			held(0x02, 0x05, 0x06);			// Shift, no new key
+			tick(50);
+			CHECK(typed() == 'C');
+			released();
+			tick(1000);
+			CHECK(typed() == -1);
+
+			// Function keys are the guest's, e.g. to switch
+			// windows: they do not repeat.
+			held(0, 0x3A, 0);			// F1
+			CHECK(typed() == 0x80);
+			tick(0);
+			tick(2000);
+			CHECK(typed() == -1);
+			released();
+
+			// Caps Lock does not repeat, and like any new key-down it
+			// ends the repeat in progress.
+			held(0, 0x04, 0);
+			CHECK(typed() == 'a');
+			held(0, 0x04, 0x39);			// + Caps Lock
+			tick(0);
+			tick(2000);
+			CHECK(typed() == -1);
+			released();
+			held(0, 0x39, 0); released();		// caps off again
+			CHECK(!hid_cook_caps_lock());
+
+			// ErrorRollOver -- too many keys to say which -- is not a
+			// report of what is held. It used to become the previous
+			// state, so the next real report made every held key look
+			// new and typed each of them again.
+			held(0, 0x04, 0x05);
+			CHECK(count('a') == 1);
+			{
+				const uint8_t r[8] = { 0, 0, 1, 1, 1, 1, 1, 1 };
+				hid_cook_keyboard(r, 8);
+			}
+			held(0, 0x04, 0x05);			// same keys, still held
+			CHECK(typed() == -1);
+			released();
+			hid_cook_reset();
+		}
+
 		// THE ECHO SWITCH ACTUALLY SWITCHES SOMETHING. The console's
 		// verbose command drives this, and for months it drove nothing
 		// at all -- a control the operator could set with no way to
