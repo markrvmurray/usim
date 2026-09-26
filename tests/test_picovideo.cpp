@@ -718,6 +718,60 @@ int main()
 		kbd(0x00, 0x3B); released(); CHECK(typed() == 0x81);   // F2
 		kbd(0x00, 0x45); released(); CHECK(typed() == 0x8B);   // F12
 
+		// The arrows send the OS-9 cursor bytes -- what ded and the
+		// Wildbits PS/2 driver read -- whatever the modifiers.
+		kbd(0x00, 0x52); released(); CHECK(typed() == 0x0C);   // up
+		kbd(0x00, 0x51); released(); CHECK(typed() == 0x0A);   // down
+		kbd(0x00, 0x50); released(); CHECK(typed() == 0x08);   // left
+		kbd(0x00, 0x4F); released(); CHECK(typed() == 0x09);   // right
+		kbd(0x02, 0x52); released(); CHECK(typed() == 0x0C);   // Shift
+		kbd(0x01, 0x50); released(); CHECK(typed() == 0x08);   // Ctrl
+
+		// The keypad, Num Lock on (the power-on state): the same bytes
+		// as the main keys. Every key, so a slip in the table's order
+		// cannot hide behind the one or two a spot check would pick.
+		CHECK(hid_cook_num_lock());
+		{
+			static const struct { uint8_t usage; int want; } KP[] = {
+				{ 0x59, '1' }, { 0x5A, '2' }, { 0x5B, '3' },
+				{ 0x5C, '4' }, { 0x5D, '5' }, { 0x5E, '6' },
+				{ 0x5F, '7' }, { 0x60, '8' }, { 0x61, '9' },
+				{ 0x62, '0' }, { 0x63, '.' },
+				{ 0x54, '/' }, { 0x55, '*' }, { 0x56, '-' },
+				{ 0x57, '+' }, { 0x58, 0x0D },	// keypad Enter = CR
+			};
+			int bad = 0;
+			for (const auto &k : KP) {
+				kbd(0x00, k.usage); released();
+				const int got = typed();
+				if (got != k.want) {
+					fprintf(stderr, "  keypad 0x%02X sent %d, not"
+					    " %d\n", k.usage, got, k.want);
+					bad++;
+				}
+			}
+			CHECK(bad == 0);
+		}
+
+		// Num Lock off: 8/2/4/6 are the arrows, the keypad's editing
+		// keys send nothing (as the dedicated ones do), and the
+		// operators and Enter are unaffected. Num Lock itself sends
+		// nothing either way.
+		kbd(0x00, 0x53); released(); CHECK(typed() == -1);
+		CHECK(!hid_cook_num_lock());
+		kbd(0x00, 0x60); released(); CHECK(typed() == 0x0C);   // KP8 up
+		kbd(0x00, 0x5A); released(); CHECK(typed() == 0x0A);   // KP2 down
+		kbd(0x00, 0x5C); released(); CHECK(typed() == 0x08);   // KP4 left
+		kbd(0x00, 0x5E); released(); CHECK(typed() == 0x09);   // KP6 right
+		kbd(0x00, 0x5F); released(); CHECK(typed() == -1);     // KP7 Home
+		kbd(0x00, 0x5D); released(); CHECK(typed() == -1);     // KP5
+		kbd(0x00, 0x63); released(); CHECK(typed() == -1);     // KP. Del
+		kbd(0x00, 0x57); released(); CHECK(typed() == '+');
+		kbd(0x00, 0x58); released(); CHECK(typed() == 0x0D);
+		kbd(0x00, 0x53); released();
+		CHECK(hid_cook_num_lock());
+		kbd(0x00, 0x60); released(); CHECK(typed() == '8');    // back on
+
 		// Unmapped usages still produce nothing at all. Home, here --
 		// this check used F1 until F1 acquired a meaning, which is the
 		// same trap the reserved graphics sub-code fell into: a test
@@ -803,6 +857,22 @@ int main()
 			released();
 			tick(1000);
 			CHECK(typed() == -1);
+
+			// The arrows DO repeat -- holding one to walk a cursor is
+			// the reason repeat exists -- and Num Lock does not.
+			held(0, 0x52, 0);			// up arrow
+			CHECK(typed() == 0x0C);
+			tick(0);
+			tick(500);
+			CHECK(typed() == 0x0C);
+			released();
+			held(0, 0x53, 0);			// Num Lock
+			tick(0);
+			tick(2000);
+			CHECK(typed() == -1);
+			released();
+			held(0, 0x53, 0); released();		// and back on
+			CHECK(hid_cook_num_lock());
 
 			// Function keys are the guest's, e.g. to switch
 			// windows: they do not repeat.
@@ -921,6 +991,9 @@ int main()
 				kbd(0x00, 0x4A); released();	// Home: unmapped
 				kbd(0x00, 0x39); released();	// Caps Lock
 				kbd(0x00, 0x39); released();	// ...and off
+				kbd(0x00, 0x53); released();	// Num Lock off
+				kbd(0x00, 0x53); released();	// ...and on
+				kbd(0x00, 0x52); released();	// up arrow
 				const uint8_t roll[8] = { 0, 0, 1, 1, 1, 1, 1, 1 };
 				hid_cook_keyboard(roll, 8);
 				kbd(0x00, 0x05);		// 'b', held to repeat
@@ -941,6 +1014,9 @@ int main()
 			CHECK(has(e, "-> nothing: no mapping for this key"));
 			CHECK(has(e, "-> nothing: Caps Lock now ON"));
 			CHECK(has(e, "-> nothing: Caps Lock now OFF"));
+			CHECK(has(e, "-> nothing: Num Lock now OFF"));
+			CHECK(has(e, "-> nothing: Num Lock now ON"));
+			CHECK(has(e, "usage 0x52  mod 0x00 -              -> 0x0C ^L"));
 			CHECK(has(e, "KEY mods now 0x00 -"));
 			CHECK(has(e, "rollover: too many keys"));
 			CHECK(has(e, "KEY rpt  usage 0x05"));
