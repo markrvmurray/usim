@@ -880,6 +880,75 @@ int main()
 		CHECK(loud.find("KEY") != std::string::npos);
 		CHECK(loud.find("MOUSE") != std::string::npos);
 
+		// WHAT THE KEY ECHO SAYS. Each line names the HID usage (the
+		// USB "scancode"), the modifiers, and the byte the 6809 was
+		// sent -- or why none was. Releases, modifier-only changes,
+		// rollover reports and repeats are lines too: "I pressed it and
+		// nothing happened" has several causes, and the echo is how an
+		// operator tells them apart.
+		{
+			auto capture = [&](auto body) -> std::string {
+				hid_cook_set_echo(true);
+				fflush(stdout);
+				FILE *tmp = tmpfile();
+				const int saved = dup(1);
+				dup2(fileno(tmp), 1);
+				body();
+				fflush(stdout);
+				dup2(saved, 1);
+				close(saved);
+				rewind(tmp);
+				std::string out;
+				char c;
+				while (fread(&c, 1, 1, tmp) == 1)
+					out += c;
+				fclose(tmp);
+				hid_cook_set_echo(false);
+				return out;
+			};
+			auto has = [](const std::string &out, const char *want) {
+				const bool ok = out.find(want) != std::string::npos;
+				if (!ok)
+					fprintf(stderr, "  key echo lacks \"%s\" in:\n%s",
+					    want, out.c_str());
+				return ok;
+			};
+			hid_cook_reset();
+			const std::string e = capture([&]() {
+				kbd(0x02, 0x04); released();	// Shift-a
+				kbd(0x01, 0x06); released();	// Ctrl-c
+				kbd(0x00, 0x3A); released();	// F1
+				kbd(0x00, 0x4A); released();	// Home: unmapped
+				kbd(0x00, 0x39); released();	// Caps Lock
+				kbd(0x00, 0x39); released();	// ...and off
+				const uint8_t roll[8] = { 0, 0, 1, 1, 1, 1, 1, 1 };
+				hid_cook_keyboard(roll, 8);
+				kbd(0x00, 0x05);		// 'b', held to repeat
+				while (typed() != -1)		// the guest reads, or
+					;			// no repeat is queued
+				hid_cook_tick(1000);
+				hid_cook_tick(1500);
+				released();
+			});
+			CHECK(has(e, "KEY down usage 0x04  mod 0x02 LShift"));
+			CHECK(has(e, "-> 0x41 'A'"));
+			CHECK(has(e, "KEY up   usage 0x04"));
+			CHECK(has(e, "mod 0x01 LCtrl"));
+			CHECK(has(e, "-> 0x03 ^C"));
+			CHECK(has(e, "usage 0x3A"));
+			CHECK(has(e, "-> 0x80 F1"));
+			CHECK(has(e, "usage 0x4A"));
+			CHECK(has(e, "-> nothing: no mapping for this key"));
+			CHECK(has(e, "-> nothing: Caps Lock now ON"));
+			CHECK(has(e, "-> nothing: Caps Lock now OFF"));
+			CHECK(has(e, "KEY mods now 0x00 -"));
+			CHECK(has(e, "rollover: too many keys"));
+			CHECK(has(e, "KEY rpt  usage 0x05"));
+			CHECK(has(e, "-> 0x62 'b'"));
+			CHECK(!hid_cook_caps_lock());
+			hid_cook_reset();
+		}
+
 		hid_cook_set_echo(false);           // leave the suite quiet
 		while (typed() != -1)               // drain what the echo typed
 			;
