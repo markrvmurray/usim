@@ -56,6 +56,24 @@ static const Word STAT = 1;	// $FF11
 // The console renders white (0xFF) glyph pixels on an opaque black
 // (0x00) background. Compare a text cell against the font directly —
 // the same table the renderer blits from.
+// Run render passes until the device has caught up. Both the command drain
+// and the text refresh are BOUNDED per pass (a full screen of text can cost
+// more than a frame, so it is spread over several), so one tick no longer
+// means "done" -- and most checks here mean exactly "done". Those use this;
+// the tests that measure a single pass on purpose (the drain bound, the
+// refresh bound) still call tick(1). Bounded, and loud when the bound is hit:
+// a device that never settles is a hang, and a silent loop would hide it.
+static void settle(PicoVideo &v)
+{
+	for (int i = 0; i < 256; i++) {
+		v.tick(1);
+		if (vid_link_idle())
+			return;
+	}
+	fprintf(stderr, "FAIL settle: render side still busy after 256 passes\n");
+	failures++;
+}
+
 static bool check_cell(int col, int row, uint8_t ch)
 {
 	// The cursor lives in the framebuffer and inverts the cell it sits on,
@@ -91,14 +109,14 @@ int main()
 
 	// Without loopback, command bytes are consumed and vanish.
 	v.write(DATA, 'x');
-	v.tick(1);
+	settle(v);
 	CHECK(!(v.read(STAT) & VID_STAT_RDRF));
 
 	// Loopback on: bytes round-trip, in order, popped by Data reads.
 	v.write(STAT, VID_CTL_LOOPBACK);
 	v.write(DATA, 'X');
 	v.write(DATA, 'Y');
-	v.tick(1);
+	settle(v);
 	CHECK(v.read(STAT) & VID_STAT_RDRF);
 	CHECK(v.read(DATA) == 'X');
 	CHECK(v.read(STAT) & VID_STAT_RDRF);
@@ -111,7 +129,7 @@ int main()
 	// second byte because the pop restages immediately (ISR-equivalent).
 	v.write(DATA, 'A');
 	v.write(DATA, 'B');
-	v.tick(1);
+	settle(v);
 	CHECK(v.read(DATA) == 'A');
 	CHECK(v.read(DATA) == 'B');
 
@@ -120,7 +138,7 @@ int main()
 	CHECK(v.read(5) == 0x5A);
 	// ...and a Data write must NOT clobber the staged input byte.
 	v.write(DATA, 'Z');
-	v.tick(1);
+	settle(v);
 	CHECK(v.read(STAT) & VID_STAT_RDRF);
 	v.write(DATA, 0x00);	// enqueue another command byte
 	CHECK(v.read(DATA) == 'Z');
@@ -129,7 +147,7 @@ int main()
 	// write survives), and READY/version restage.
 	v.write(DATA, 'Q');
 	v.write(STAT, VID_CTL_RESET | VID_CTL_LOOPBACK);
-	v.tick(1);
+	settle(v);
 	st = v.read(STAT);
 	CHECK(!(st & VID_STAT_RDRF));
 	CHECK(st & VID_STAT_READY);
@@ -142,7 +160,7 @@ int main()
 		CHECK(v.read(STAT) & VID_STAT_TDRE);
 		v.write(DATA, (Byte)i);
 	}
-	v.tick(1);
+	settle(v);
 	for (int i = 0; i < 256; i++) {
 		CHECK(v.read(STAT) & VID_STAT_RDRF);
 		CHECK(v.read(DATA) == (Byte)i);
@@ -157,7 +175,7 @@ int main()
 	v.write(STAT, 0x00);		// loopback off
 	v.write(DATA, 'H');
 	v.write(DATA, 'i');
-	v.tick(1);
+	settle(v);
 	CHECK(check_cell(0, 0, 'H'));
 	CHECK(check_cell(1, 0, 'i'));
 	CHECK(video_framebuffer[300][700] == 0x00);	// demo gone
@@ -165,13 +183,13 @@ int main()
 	// CR returns to column 0 without a line feed: overwrite in place.
 	v.write(DATA, 0x0D);
 	v.write(DATA, 'X');
-	v.tick(1);
+	settle(v);
 	CHECK(check_cell(0, 0, 'X'));
 
 	// LF moves down, keeping the column.
 	v.write(DATA, 0x0A);
 	v.write(DATA, 'Y');
-	v.tick(1);
+	settle(v);
 	CHECK(check_cell(1, 1, 'Y'));
 
 	// Console bytes must not appear on the input FIFO when loopback is
@@ -182,10 +200,10 @@ int main()
 	// up one row, so Y (row 1) lands on row 0 and X scrolls with it.
 	for (int i = 0; i < 28; i++)
 		v.write(DATA, 0x0A);	// row 1 + 28 = the bottom row
-	v.tick(1);
+	settle(v);
 	CHECK(check_cell(1, 1, 'Y'));	// not yet scrolled
 	v.write(DATA, 0x0A);		// one beyond the bottom: scroll
-	v.tick(1);
+	settle(v);
 	CHECK(check_cell(1, 0, 'Y'));
 	CHECK(!check_cell(0, 0, 'X'));	// X's row scrolled away... to row -1
 	CHECK(check_cell(0, -1 + 1, 'X') == false);
@@ -195,7 +213,7 @@ int main()
 	// Clear/home ($0C): wipes the text, next glyph lands at the origin.
 	v.write(DATA, 0x0C);
 	v.write(DATA, 'A');
-	v.tick(1);
+	settle(v);
 	CHECK(check_cell(0, 0, 'A'));
 	CHECK(check_cell(1, 0, ' '));	// scrolled content gone
 
@@ -204,13 +222,13 @@ int main()
 	v.write(DATA, 0x20 + 10);
 	v.write(DATA, 0x20 + 5);
 	v.write(DATA, 'Q');
-	v.tick(1);
+	settle(v);
 	CHECK(check_cell(10, 5, 'Q'));
 
 	// Home ($01).
 	v.write(DATA, 0x01);
 	v.write(DATA, 'H');
-	v.tick(1);
+	settle(v);
 	CHECK(check_cell(0, 0, 'H'));
 
 	// Backspace ($08) is non-destructive cursor-left: "AB" BS 'C' -> "AC".
@@ -219,7 +237,7 @@ int main()
 	v.write(DATA, 'B');
 	v.write(DATA, 0x08);
 	v.write(DATA, 'C');
-	v.tick(1);
+	settle(v);
 	CHECK(check_cell(0, 0, 'A'));
 	CHECK(check_cell(1, 0, 'C'));
 
@@ -231,7 +249,7 @@ int main()
 	v.write(DATA, 0x20 + 2);
 	v.write(DATA, 0x20 + 0);
 	v.write(DATA, 0x04);
-	v.tick(1);
+	settle(v);
 	CHECK(check_cell(1, 0, 'B'));
 	CHECK(check_cell(2, 0, ' '));
 	CHECK(check_cell(5, 0, ' '));
@@ -239,7 +257,7 @@ int main()
 	// Erase line ($03): whole row blank, column preserved.
 	v.write(DATA, 0x03);
 	v.write(DATA, 'Z');
-	v.tick(1);
+	settle(v);
 	CHECK(check_cell(0, 0, ' '));	// 'A' erased too
 	CHECK(check_cell(2, 0, 'Z'));	// column was preserved
 
@@ -248,7 +266,7 @@ int main()
 	v.write(DATA, 'A');
 	v.write(DATA, 0x06);
 	v.write(DATA, 'B');
-	v.tick(1);
+	settle(v);
 	CHECK(check_cell(0, 0, 'A'));
 	CHECK(check_cell(1, 0, ' '));
 	CHECK(check_cell(2, 0, 'B'));
@@ -257,7 +275,7 @@ int main()
 	v.write(DATA, 0x20 + 4);
 	v.write(DATA, 0x09);
 	v.write(DATA, 'U');
-	v.tick(1);
+	settle(v);
 	CHECK(check_cell(3, 3, 'U'));
 
 	// Cursor on/off ($05 $21/$20): argument consumed, not printed.
@@ -266,13 +284,13 @@ int main()
 	v.write(DATA, 0x05);
 	v.write(DATA, 0x20);
 	v.write(DATA, 'B');
-	v.tick(1);
+	settle(v);
 	CHECK(check_cell(1, 0, 'B'));
 
 	// Bell ($07) is a no-op on this device.
 	v.write(DATA, 0x07);
 	v.write(DATA, 'C');
-	v.tick(1);
+	settle(v);
 	CHECK(check_cell(2, 0, 'C'));
 
 	// Erase to end of window ($0B): below and right clear, above stays.
@@ -291,7 +309,7 @@ int main()
 	v.write(DATA, 0x20 + 1);
 	v.write(DATA, 0x20 + 10);
 	v.write(DATA, 0x0B);
-	v.tick(1);
+	settle(v);
 	CHECK(check_cell(0, 0, 'T'));		// above: intact
 	CHECK(check_cell(0, 10, 'M'));		// left of cursor: intact
 	CHECK(check_cell(1, 10, ' '));		// from cursor: erased
@@ -309,32 +327,32 @@ int main()
 	// Point with the default palette (FColor=7 -> white 0xFF).
 	v.write(DATA, 0x0C);			// clean screen
 	esc({0x42, 0, 200, 0, 100});		// Point (200,100)
-	v.tick(1);
+	settle(v);
 	CHECK(video_framebuffer[100][200] == 0xFF);
 
 	// Palette + FColor: register 1 := GIME 36 (full red) -> 0xE0.
 	esc({0x31, 1, 36});			// Palette reg1, colourValue 36
 	esc({0x32, 1});				// FColor 1
 	esc({0x42, 0, 210, 0, 100});		// Point (210,100)
-	v.tick(1);
+	settle(v);
 	CHECK(video_framebuffer[100][210] == 0xE0);
 
 	// SetDPtr + LineM: a diagonal, and the pointer must follow.
 	esc({0x32, 7});				// FColor back to white
 	esc({0x40, 0, 50, 0, 200});		// SetDPtr (50,200)
 	esc({0x46, 0, 60, 0, 210});		// LineM to (60,210)
-	v.tick(1);
+	settle(v);
 	for (int k = 0; k <= 10; k++)
 		CHECK(video_framebuffer[200 + k][50 + k] == 0xFF);
 	esc({0x4B, 0, 3, 0, 3});		// RBar +3,+3 from the MOVED pointer
-	v.tick(1);
+	settle(v);
 	CHECK(video_framebuffer[211][61] == 0xFF);	// inside (60..63,210..213)
 	CHECK(video_framebuffer[213][63] == 0xFF);
 
 	// Bar (absolute) fills the normalised rectangle.
 	esc({0x40, 1, 44, 0, 150});		// SetDPtr (300,150)
 	esc({0x4A, 1, 34, 0, 140});		// Bar to (290,140) — inverted corners
-	v.tick(1);
+	settle(v);
 	CHECK(video_framebuffer[140][290] == 0xFF);
 	CHECK(video_framebuffer[150][300] == 0xFF);
 	CHECK(video_framebuffer[145][295] == 0xFF);
@@ -345,7 +363,7 @@ int main()
 	v.write(DATA, 0x0C);
 	esc({0x50, 30, 30});			// Circle — ignored, framed
 	v.write(DATA, 'A');
-	v.tick(1);
+	settle(v);
 	CHECK(check_cell(0, 0, 'A'));
 
 	// Framing: GPLoad's variable payload is swallowed — printable bytes
@@ -356,7 +374,7 @@ int main()
 	v.write(DATA, 'Y');
 	v.write(DATA, 'Z');			// ...last payload byte
 	v.write(DATA, 'B');			// first REAL byte again
-	v.tick(1);
+	settle(v);
 	CHECK(check_cell(1, 0, 'B'));
 	CHECK(check_cell(2, 0, ' '));
 
@@ -366,7 +384,7 @@ int main()
 	// pass with $26 and started swallowing the byte after it.
 	esc({0x27});
 	v.write(DATA, 'C');
-	v.tick(1);
+	settle(v);
 	CHECK(check_cell(2, 0, 'C'));
 
 	// ---- M4: guest input path (the USB keyboard's entry point) ----
@@ -374,12 +392,12 @@ int main()
 	// vid_link_input feeds the RX FIFO exactly as the HID cooker does:
 	// RDRF rises, reads pop in order, RDRF clears when drained.
 	v.write(STAT, 0x00);			// loopback off
-	v.tick(1);
+	settle(v);
 	CHECK(!(v.read(STAT) & VID_STAT_RDRF));
 	vid_link_input('l');
 	vid_link_input('s');
 	vid_link_input(0x0D);
-	v.tick(1);
+	settle(v);
 	CHECK(v.read(STAT) & VID_STAT_RDRF);
 	CHECK(v.read(DATA) == 'l');
 	CHECK(v.read(DATA) == 's');
@@ -389,7 +407,7 @@ int main()
 	// Input bytes are for the guest only — they must not render.
 	v.write(DATA, 0x0C);
 	vid_link_input('k');
-	v.tick(1);
+	settle(v);
 	CHECK(check_cell(0, 0, ' '));
 	CHECK(v.read(DATA) == 'k');
 
@@ -402,7 +420,7 @@ int main()
 	v.write(DATA, 0x05);
 	v.write(DATA, 0x21);
 	v.write(DATA, 'A');
-	v.tick(1);
+	settle(v);
 	CHECK(video_cursor_enabled);
 	CHECK(video_cursor_col == 1 && video_cursor_row == 0);  // parked after 'A'
 
@@ -420,7 +438,7 @@ int main()
 	// cursor, then let the console write over that very cell.
 	vidterm_cursor_service();
 	v.write(DATA, 'B');
-	v.tick(1);
+	settle(v);
 	vidterm_cursor_hide();
 	CHECK(check_cell(1, 0, 'B'));   // no stale save-under painted over it
 
@@ -428,12 +446,12 @@ int main()
 	vidterm_cursor_service();
 	v.write(DATA, 0x05);
 	v.write(DATA, 0x20);
-	v.tick(1);
+	settle(v);
 	CHECK(!video_cursor_enabled);
 	CHECK(check_cell(2, 0, ' '));   // where it had parked, now clean
 	v.write(DATA, 0x05);
 	v.write(DATA, 0x21);
-	v.tick(1);
+	settle(v);
 
 	// Blink: half a cycle later it is gone, a full cycle later it is back.
 	vidterm_cursor_service();
@@ -457,7 +475,7 @@ int main()
 			(void)v.read(MOUSE);
 
 		vid_link_mouse_update(300, 200, VID_MOUSE_BTN_LEFT, 0);
-		v.tick(1);
+		settle(v);
 		CHECK(v.read(STAT) & VID_STAT_MOUSE);   // something moved
 
 		Byte s[VID_MOUSE_SNAPSHOT_LEN];
@@ -470,13 +488,13 @@ int main()
 		CHECK((int8_t)s[6] == 0);
 
 		// Reading the snapshot answers the change flag.
-		v.tick(1);
+		settle(v);
 		CHECK(!(v.read(STAT) & VID_STAT_MOUSE));
 
 		// Sticky and wheel are cleared by the latch, so a second pass
 		// over an unchanged mouse reports no new press.
 		vid_link_mouse_update(300, 200, VID_MOUSE_BTN_LEFT, 0);
-		v.tick(1);
+		settle(v);
 		for (int i = 0; i < (int)VID_MOUSE_SNAPSHOT_LEN; i++)
 			s[i] = v.read(MOUSE);
 		CHECK(s[0] == VID_MOUSE_BTN_LEFT);          // still held
@@ -487,7 +505,7 @@ int main()
 		vid_link_mouse_update(300, 200, 0, 0);              // release
 		vid_link_mouse_update(300, 200, VID_MOUSE_BTN_RIGHT, 0);
 		vid_link_mouse_update(300, 200, 0, 0);              // released again
-		v.tick(1);
+		settle(v);
 		for (int i = 0; i < (int)VID_MOUSE_SNAPSHOT_LEN; i++)
 			s[i] = v.read(MOUSE);
 		CHECK(s[0] == 0);                           // up by the time we look
@@ -496,19 +514,19 @@ int main()
 		// Wheel accumulates between latches and clears after one.
 		vid_link_mouse_update(300, 200, 0, 2);
 		vid_link_mouse_update(300, 200, 0, -1);
-		v.tick(1);
+		settle(v);
 		for (int i = 0; i < (int)VID_MOUSE_SNAPSHOT_LEN; i++)
 			s[i] = v.read(MOUSE);
 		CHECK((int8_t)s[6] == 1);
 		vid_link_mouse_update(300, 200, 0, 0);
-		v.tick(1);
+		settle(v);
 		for (int i = 0; i < (int)VID_MOUSE_SNAPSHOT_LEN; i++)
 			s[i] = v.read(MOUSE);
 		CHECK((int8_t)s[6] == 0);
 
 		// Writing $FF12 must not disturb the snapshot (no scratch mirror).
 		v.write(MOUSE, 0x5A);
-		v.tick(1);
+		settle(v);
 		CHECK(v.read(MOUSE) != 0x5A);
 
 		// RESYNC. A guest that loses count cannot detect it -- every
@@ -517,7 +535,7 @@ int main()
 		// index, WITHOUT the link reset's collateral damage to the
 		// command and input FIFOs.
 		vid_link_mouse_update(111, 222, 0, 0);
-		v.tick(1);
+		settle(v);
 		(void)v.read(MOUSE);            // byte 0, then give up
 		(void)v.read(MOUSE);            // byte 1; now out of phase
 		v.write(MOUSE, 0x00);           // resync, no tick in between
@@ -541,7 +559,7 @@ int main()
 		vid_link_mouse_update(400, 300, 0, 0);
 		v.write(MOUSE, 0x00);           // sample here
 		vid_link_mouse_update(500, 350, 0, 0);  // moves on afterwards
-		v.tick(1);
+		settle(v);
 		for (int i = 0; i < (int)VID_MOUSE_SNAPSHOT_LEN; i++)
 			s[i] = v.read(MOUSE);
 		CHECK(((s[2] << 8) | s[3]) == 400);     // the sample, not the move
@@ -549,10 +567,10 @@ int main()
 
 		// A soft reset also homes the index (belt and braces).
 		vid_link_mouse_update(111, 222, 0, 0);
-		v.tick(1);
+		settle(v);
 		(void)v.read(MOUSE);
 		v.write(STAT, 0x01);            // Ctl: soft reset
-		v.tick(1);
+		settle(v);
 		for (int i = 0; i < (int)VID_MOUSE_SNAPSHOT_LEN; i++)
 			s[i] = v.read(MOUSE);
 		CHECK(((s[2] << 8) | s[3]) == 111);
@@ -561,7 +579,7 @@ int main()
 	// ---- Pointer: drawn by the firmware, save-under restores ----
 	{
 		v.write(DATA, 0x0C);            // clean screen
-		v.tick(1);
+		settle(v);
 		vidterm_pointer_set(400, 300);
 		vidterm_cursor_service();
 		// Row 7 of the arrow is solid fill; the tip itself is outline,
@@ -574,7 +592,7 @@ int main()
 		v.write(DATA, 0x1B); v.write(DATA, 0x4E);
 		v.write(DATA, 0x00); v.write(DATA, 0x64);       // X = 100
 		v.write(DATA, 0x00); v.write(DATA, 0x32);       // Y = 50
-		v.tick(1);
+		settle(v);
 		vidterm_cursor_service();
 		CHECK(video_framebuffer[50 + 7][100] == 0xFF);
 		vidterm_cursor_hide();
@@ -618,7 +636,7 @@ int main()
 		hid_cook_reset();
 		const uint8_t left_down[] = { 0x01, 0, 0 };
 		hid_cook_mouse(left_down, 3);
-		v.tick(1);
+		settle(v);
 		v.write(MOUSE, 0);                              // sample and home
 		Byte s[VID_MOUSE_SNAPSHOT_LEN];
 		for (int i = 0; i < (int)VID_MOUSE_SNAPSHOT_LEN; i++)
@@ -638,7 +656,7 @@ int main()
 			hid_cook_keyboard(r, 8);
 		};
 		auto typed = [&]() -> int {
-			v.tick(1);
+			settle(v);
 			if (!(v.read(STAT) & VID_STAT_RDRF))
 				return -1;
 			return v.read(DATA);
@@ -756,48 +774,48 @@ int main()
 	// ---- !IRQ: RIE-gated, follows RDRF, MC6850-shaped ----
 	{
 		v.write(STAT, VID_CTL_RESET);
-		v.tick(1);
+		settle(v);
 		CHECK(picovideo_irq_released());        // reset leaves it idle
 		CHECK(!(v.read(STAT) & VID_STAT_IRQ));
 
 		// A polling guest must never be interrupted by a line it did
 		// not ask for: input with RIE off changes nothing.
 		vid_link_input('x');
-		v.tick(1);
+		settle(v);
 		CHECK(v.read(STAT) & VID_STAT_RDRF);    // byte is waiting
 		CHECK(picovideo_irq_released());        // but the line is idle
 		CHECK(!(v.read(STAT) & VID_STAT_IRQ));
 
 		// Enabling RIE with a byte already waiting asserts immediately.
 		v.write(STAT, VID_CTL_RIE);
-		v.tick(1);
+		settle(v);
 		CHECK(!picovideo_irq_released());
 		CHECK(v.read(STAT) & VID_STAT_IRQ);     // bit 7 mirrors the pin
 
 		// Reading the byte drains the FIFO, so RDRF clears and the line
 		// releases -- the MC6850 behaviour the guest driver expects.
 		CHECK(v.read(DATA) == 'x');
-		v.tick(1);
+		settle(v);
 		CHECK(!(v.read(STAT) & VID_STAT_RDRF));
 		CHECK(picovideo_irq_released());
 		CHECK(!(v.read(STAT) & VID_STAT_IRQ));
 
 		// More input re-asserts while RIE stays on.
 		vid_link_input('y');
-		v.tick(1);
+		settle(v);
 		CHECK(!picovideo_irq_released());
 
 		// Reset drops the line: it flushes the very input that
 		// justified asserting, and clears RIE with it.
 		v.write(STAT, VID_CTL_RESET);
-		v.tick(1);
+		settle(v);
 		CHECK(picovideo_irq_released());
 		vid_link_input('z');
-		v.tick(1);
+		settle(v);
 		CHECK(picovideo_irq_released());        // RIE cleared by reset
 		(void)v.read(DATA);
 		v.write(STAT, VID_CTL_RESET);
-		v.tick(1);
+		settle(v);
 	}
 
 	// ---- VID.Info ($FF13): the drawing surface, without a round trip ----
@@ -836,7 +854,7 @@ int main()
 		// And the scratch registers above it still behave as scratch,
 		// which is what proves the bus path from the console.
 		v.write(4, 0x5A);
-		v.tick(1);
+		settle(v);
 		CHECK(v.read(4) == 0x5A);
 	}
 
@@ -847,9 +865,9 @@ int main()
 	{
 		static const uint8_t ESC = 0x1B;
 		v.write(STAT, VID_CTL_RESET);
-		v.tick(1);
+		settle(v);
 		v.write(DATA, 0x0C);		// clear, root window
-		v.tick(1);
+		settle(v);
 
 		// A window inland: id 1, at column 4 row 2, 10 x 3.
 		v.write(DATA, ESC); v.write(DATA, 0x20);
@@ -859,7 +877,7 @@ int main()
 		// windows should not watch them flicker past. Show it.
 		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 1);
 		v.write(DATA, 'A');
-		v.tick(1);
+		settle(v);
 
 		// Text lands INSIDE the window, at its origin -- not at 0,0.
 		CHECK(check_cell(4, 2, 'A'));
@@ -877,7 +895,7 @@ int main()
 		// Wrap happens at the WINDOW edge, not the panel edge: nine
 		// more characters fill row 0 and the tenth starts row 1.
 		for (int i = 0; i < 10; i++) v.write(DATA, 'B');
-		v.tick(1);
+		settle(v);
 		CHECK(check_cell(13, 2, 'B'));	// last column of the window
 		CHECK(check_cell(4, 3, 'B'));	// wrapped to the window's row 1
 		CHECK(!check_cell(14, 2, 'B'));	// never outside it
@@ -887,16 +905,16 @@ int main()
 		// visible effect here would flicker the screen once per line
 		// of background output.
 		v.write(DATA, ESC); v.write(DATA, 0x21); v.write(DATA, 0);
-		v.tick(1);
+		settle(v);
 		CHECK(check_cell(4, 2, 'A'));	// still on screen
 
 		// Showing another window is what swaps the display.
 		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 0);
-		v.tick(1);
+		settle(v);
 		CHECK(!check_cell(4, 2, 'A'));	// window 1 is put away
 		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 1);
 		v.write(DATA, ESC); v.write(DATA, 0x21); v.write(DATA, 1);
-		v.tick(1);
+		settle(v);
 		CHECK(check_cell(4, 2, 'A'));	// and comes back intact
 		CHECK(check_cell(13, 2, 'B'));	// to the end of its first row
 		CHECK(check_cell(4, 3, 'B'));	// AND on the rows below it --
@@ -906,7 +924,7 @@ int main()
 		// Selecting the root reports the panel again.
 		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 0);
 		v.write(DATA, ESC); v.write(DATA, 0x21); v.write(DATA, 0);
-		v.tick(1);
+		settle(v);
 		v.write(3, 0);		// home AFTER the select is consumed
 		v.read(3); v.read(3); v.read(3); v.read(3);
 		CHECK(v.read(3) == TEXT_COLS);
@@ -919,7 +937,7 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x20);
 		const uint8_t dw2[8] = { 2, 0, 120, 0, 20, 2, 0, 0 };
 		for (uint8_t i = 0; i < 8; i++) v.write(DATA, dw2[i]);
-		v.tick(1);
+		settle(v);
 		v.write(3, 0);
 		v.read(3); v.read(3); v.read(3); v.read(3);
 		CHECK(v.read(3) == 8);		// clamped, and reported
@@ -934,10 +952,10 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x21); v.write(DATA, 1);
 		v.write(DATA, 0x0C);		// clear window 1, off screen
 		v.write(DATA, 'Q');
-		v.tick(1);
+		settle(v);
 		CHECK(!check_cell(4, 2, 'Q'));	// nothing appeared on screen
 		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 1);
-		v.tick(1);
+		settle(v);
 		CHECK(check_cell(4, 2, 'Q'));	// and it was there all along
 
 		// Leave the console on the root window: everything after this
@@ -945,7 +963,7 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 0);
 		v.write(DATA, ESC); v.write(DATA, 0x21); v.write(DATA, 0);
 		v.write(DATA, 0x0C);
-		v.tick(1);
+		settle(v);
 	}
 
 	// M5.2: graphics primitives are window-RELATIVE and window-BOUNDED.
@@ -956,16 +974,16 @@ int main()
 	{
 		static const uint8_t ESC = 0x1B;
 		v.write(STAT, VID_CTL_RESET);
-		v.tick(1);
+		settle(v);
 		v.write(DATA, 0x0C);
-		v.tick(1);
+		settle(v);
 
 		// Window at cell 4,2 = pixel 32,32; 10x3 cells = 80x48 pixels.
 		v.write(DATA, ESC); v.write(DATA, 0x20);
 		const uint8_t g[8] = { 1, 0, 4, 2, 10, 3, 0, 0 };
 		for (uint8_t i = 0; i < 8; i++) v.write(DATA, g[i]);
 		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 1);
-		v.tick(1);
+		settle(v);
 
 		// Plot at window 20,20 -- it must land 20 pixels in from the
 		// WINDOW's corner (32,32), so at 52,52, not at the screen's.
@@ -975,7 +993,7 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x42);
 		v.write(DATA, 0); v.write(DATA, 20);	// x = 20
 		v.write(DATA, 0); v.write(DATA, 20);	// y = 20
-		v.tick(1);
+		settle(v);
 		CHECK(video_framebuffer[52][52] != 0x00);
 		CHECK(video_framebuffer[20][20] == 0x00);  // not screen-origin
 
@@ -989,7 +1007,7 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x4A);	// Bar
 		v.write(DATA, 0); v.write(DATA, 200);
 		v.write(DATA, 0); v.write(DATA, 200);
-		v.tick(1);
+		settle(v);
 		CHECK(video_framebuffer[40][100] != 0x00);  // inside (32..111)
 		CHECK(video_framebuffer[40][112] == 0x00);  // past the right
 		CHECK(video_framebuffer[80][40]  == 0x00);  // past the bottom
@@ -997,7 +1015,7 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 0);
 		v.write(DATA, ESC); v.write(DATA, 0x21); v.write(DATA, 0);
 		v.write(DATA, 0x0C);
-		v.tick(1);
+		settle(v);
 	}
 
 	// DWProtSw with an OUTLINE rather than a fill. Box and Bar reach the
@@ -1008,14 +1026,14 @@ int main()
 	{
 		static const uint8_t ESC = 0x1B;
 		v.write(STAT, VID_CTL_RESET);
-		v.tick(1);
+		settle(v);
 		v.write(DATA, 0x0C);
-		v.tick(1);
+		settle(v);
 		v.write(DATA, ESC); v.write(DATA, 0x20);
 		const uint8_t w2[8] = { 2, 0, 16, 5, 48, 16, 0, 0 };
 		for (uint8_t i = 0; i < 8; i++) v.write(DATA, w2[i]);
 		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 2);
-		v.tick(1);
+		settle(v);
 		// 1B 36 00 / 1B 32 01 / 1B 40 00 00 00 00 / 1B 48 02 58 01 F4
 		v.write(DATA, ESC); v.write(DATA, 0x36); v.write(DATA, 0x00);
 		v.write(DATA, ESC); v.write(DATA, 0x32); v.write(DATA, 0x01);
@@ -1025,7 +1043,7 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x48);
 		v.write(DATA, 0x02); v.write(DATA, 0x58);
 		v.write(DATA, 0x01); v.write(DATA, 0xF4);
-		v.tick(1);
+		settle(v);
 		// Window rect is px (128,80)-(512,336). The box's top edge
 		// runs to x = 128+600 = 728, well past the window's right
 		// edge at 512, so unprotected it must appear out there.
@@ -1038,16 +1056,16 @@ int main()
 	{
 		static const uint8_t ESC = 0x1B;
 		v.write(STAT, VID_CTL_RESET);
-		v.tick(1);
+		settle(v);
 		v.write(DATA, 0x0C);
-		v.tick(1);
+		settle(v);
 
 		// Window 1 at cell 4,2, 10x3.
 		v.write(DATA, ESC); v.write(DATA, 0x20);
 		const uint8_t w1[8] = { 1, 0, 4, 2, 10, 3, 0, 0 };
 		for (uint8_t i = 0; i < 8; i++) v.write(DATA, w1[i]);
 		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 1);
-		v.tick(1);
+		settle(v);
 
 		// Narrow the working area to 4x2 at offset 2,1 inside it, so
 		// the effective rectangle is cell 6,3 and the read-back must
@@ -1055,7 +1073,7 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x25);
 		v.write(DATA, 2); v.write(DATA, 1);
 		v.write(DATA, 4); v.write(DATA, 2);
-		v.tick(1);
+		settle(v);
 		v.write(3, 0);
 		v.read(3); v.read(3); v.read(3); v.read(3);
 		CHECK(v.read(3) == 4);		// cols of the WORKING AREA
@@ -1064,7 +1082,7 @@ int main()
 		// Text now starts at the working area's corner, not the
 		// window's.
 		v.write(DATA, 'W');
-		v.tick(1);
+		settle(v);
 		CHECK(check_cell(6, 3, 'W'));
 		CHECK(!check_cell(4, 2, 'W'));
 
@@ -1074,7 +1092,7 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x25);
 		v.write(DATA, 0); v.write(DATA, 0);
 		v.write(DATA, 40); v.write(DATA, 40);
-		v.tick(1);
+		settle(v);
 		v.write(3, 0);
 		v.read(3); v.read(3); v.read(3); v.read(3);
 		CHECK(v.read(3) == 10);
@@ -1090,7 +1108,7 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x4A);	// Bar 200x200
 		v.write(DATA, 0); v.write(DATA, 200);
 		v.write(DATA, 0); v.write(DATA, 200);
-		v.tick(1);
+		settle(v);
 		CHECK(video_framebuffer[80][120] == 0x00);  // contained
 
 		// Protection off lets it out; coordinates still measure from
@@ -1102,14 +1120,14 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x4A);
 		v.write(DATA, 0); v.write(DATA, 200);
 		v.write(DATA, 0); v.write(DATA, 200);
-		v.tick(1);
+		settle(v);
 		CHECK(video_framebuffer[80][120] != 0x00);  // outside, drawn
 		CHECK(video_framebuffer[20][20] == 0x00);   // still not above
 
 		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 0);
 		v.write(DATA, ESC); v.write(DATA, 0x21); v.write(DATA, 0);
 		v.write(DATA, 0x0C);
-		v.tick(1);
+		settle(v);
 	}
 
 	// A blank cell in a row where NO graphics has been drawn, while other
@@ -1124,9 +1142,9 @@ int main()
 	{
 		static const uint8_t ESC = 0x1B;
 		v.write(STAT, VID_CTL_RESET);
-		v.tick(1);
+		settle(v);
 		v.write(DATA, 0x0C);
-		v.tick(1);
+		settle(v);
 
 		// Draw a bar well down the screen, so rows near the TOP are
 		// left unmaterialised while rows lower down are real.
@@ -1136,16 +1154,16 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x4A);
 		v.write(DATA, 2); v.write(DATA, 0);	// to 512,400
 		v.write(DATA, 1); v.write(DATA, 0x90);
-		v.tick(1);
+		settle(v);
 
 		// Now write text near the top and erase it. The erase restores
 		// the graphics under it -- from a row nothing has drawn on.
 		v.write(DATA, 0x02); v.write(DATA, 0x28); v.write(DATA, 0x22);
 		v.write(DATA, 'X');
-		v.tick(1);
+		settle(v);
 		v.write(DATA, 0x02); v.write(DATA, 0x28); v.write(DATA, 0x22);
 		v.write(DATA, ' ');
-		v.tick(1);
+		settle(v);
 
 		// Cell 8,2 is pixels 64..71 x 32..47: nothing was ever drawn
 		// there, so every pixel must be the background the screen was
@@ -1187,9 +1205,9 @@ int main()
 		};
 
 		v.write(STAT, VID_CTL_RESET);
-		v.tick(1);
+		settle(v);
 		v.write(DATA, 0x0C);
-		v.tick(1);
+		settle(v);
 
 		v.write(DATA, ESC); v.write(DATA, 0x29);
 		v.write(DATA, 3); v.write(DATA, 1);
@@ -1202,10 +1220,10 @@ int main()
 		for (int i = 0; i < 256; i++) {
 			v.write(DATA, weave[i]);
 			if ((i & 0x7F) == 0x7F)
-				v.tick(1);
+				settle(v);
 		}
 		for (int t = 0; t < 8; t++)
-			v.tick(1);
+			settle(v);
 
 		v.write(DATA, ESC); v.write(DATA, 0x2E);
 		v.write(DATA, 3); v.write(DATA, 1);
@@ -1224,7 +1242,7 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x4A);
 		v.write(DATA, 0); v.write(DATA, 180);
 		v.write(DATA, 1); v.write(DATA, 0x0E);		// 270
-		v.tick(1);
+		settle(v);
 
 		/* Dense over two full tiles, not sampled. The weave is
 		 * diagonal and therefore self-similar under a shift, so a
@@ -1263,7 +1281,7 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x48);	// Box
 		v.write(DATA, 2); v.write(DATA, 0xBC);	// to 700,360
 		v.write(DATA, 1); v.write(DATA, 0x68);
-		v.tick(1);
+		settle(v);
 		const uint8_t edge = video_framebuffer[300][600];
 		for (int x = 601; x <= 700; x++)
 			CHECK(video_framebuffer[300][x] == edge);
@@ -1277,7 +1295,7 @@ int main()
 		v.write(DATA, 3); v.write(DATA, 1);
 		v.write(DATA, 2); v.write(DATA, 0x59);	// x 601
 		v.write(DATA, 1); v.write(DATA, 0xC3);	// y 451
-		v.tick(1);
+		settle(v);
 		for (int r = 0; r < 16; r++)
 			for (int c = 0; c < 16; c++)
 				CHECK(video_framebuffer[451 + r][601 + c] ==
@@ -1295,7 +1313,7 @@ int main()
 		v.write(DATA, 0); v.write(DATA, 240);
 		v.write(DATA, 1); v.write(DATA, 0xAE);	// 240,430 inside it
 		v.write(DATA, ESC); v.write(DATA, 0x4F);	// FFill
-		v.tick(1);
+		settle(v);
 		CHECK(video_framebuffer[430][240] ==
 		    weave[(430 % 16) * 16 + (240 % 16)]);
 		CHECK(video_framebuffer[431][241] ==
@@ -1314,7 +1332,7 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x4A);
 		v.write(DATA, 1); v.write(DATA, 0x5E);	// to 350,350
 		v.write(DATA, 1); v.write(DATA, 0x5E);
-		v.tick(1);
+		settle(v);
 		// Solid again: every pixel of the new fill the same.
 		for (int y = 301; y < 349; y += 7)
 			for (int x = 301; x < 349; x += 7)
@@ -1331,9 +1349,9 @@ int main()
 	{
 		static const uint8_t ESC = 0x1B;
 		v.write(STAT, VID_CTL_RESET);
-		v.tick(1);
+		settle(v);
 		v.write(DATA, 0x0C);
-		v.tick(1);
+		settle(v);
 
 		// 1B 29 01 01 04 00
 		v.write(DATA, ESC); v.write(DATA, 0x29);
@@ -1348,17 +1366,17 @@ int main()
 		for (int i = 0; i < 1024; i++) {
 			v.write(DATA, (uint8_t)(0x20 + (i & 0x3F)));
 			if ((i & 0x7F) == 0x7F)
-				v.tick(1);
+				settle(v);
 		}
 		for (int t = 0; t < 16; t++)
-			v.tick(1);
+			settle(v);
 
 		// 1B 2D 01 01 <X16> <Y16> at 64,64
 		v.write(DATA, ESC); v.write(DATA, 0x2D);
 		v.write(DATA, 0x01); v.write(DATA, 0x01);
 		v.write(DATA, 0x00); v.write(DATA, 0x40);
 		v.write(DATA, 0x00); v.write(DATA, 0x40);
-		v.tick(1);
+		settle(v);
 
 		CHECK(video_framebuffer[64][64] == 0x20);	// first pixel
 		CHECK(video_framebuffer[64][95] == 0x3F);	// end of its row
@@ -1381,14 +1399,14 @@ int main()
 		v.write(DATA, 0x01); v.write(DATA, 0xD0);	// y 464
 		v.write(DATA, 0x00); v.write(DATA, 0x20);	// w 32 -> 1040
 		v.write(DATA, 0x00); v.write(DATA, 0x20);	// h 32 -> 496
-		v.tick(1);
+		settle(v);
 		// Stamping it back must not crash and must be background in
 		// the part that came from off-panel.
 		v.write(DATA, ESC); v.write(DATA, 0x2D);
 		v.write(DATA, 0x01); v.write(DATA, 0x09);
 		v.write(DATA, 0x01); v.write(DATA, 0x90);	// x 400
 		v.write(DATA, 0x00); v.write(DATA, 0x64);	// y 100
-		v.tick(1);
+		settle(v);
 		CHECK(video_framebuffer[100 + 31][400 + 31] == 0x00);
 
 		// GetBlk that region into g1/b2 and stamp it elsewhere.
@@ -1405,7 +1423,7 @@ int main()
 		v.write(DATA, 0x01); v.write(DATA, 0x02);
 		v.write(DATA, 0x01); v.write(DATA, 0x00);	// x 256
 		v.write(DATA, 0x00); v.write(DATA, 0x40);
-		v.tick(1);
+		settle(v);
 		CHECK(video_framebuffer[64][256] == 0x20);
 		CHECK(video_framebuffer[64][287] == 0x3F);
 	}
@@ -1416,9 +1434,9 @@ int main()
 	{
 		static const uint8_t ESC = 0x1B;
 		v.write(STAT, VID_CTL_RESET);
-		v.tick(1);
+		settle(v);
 		v.write(DATA, 0x0C);
-		v.tick(1);
+		settle(v);
 
 		// A face where every glyph is a solid block: 256 x 16 bytes
 		// of 0xFF. Whatever character is printed, the cell fills.
@@ -1438,15 +1456,15 @@ int main()
 		for (int i = 0; i < 4096; i++) {
 			v.write(DATA, 0xFF);
 			if ((i & 0x7F) == 0x7F)
-				v.tick(1);
+				settle(v);
 		}
 		for (int t = 0; t < 32; t++)
-			v.tick(1);
+			settle(v);
 
 		// Before selecting it, 'A' renders as 'A'.
 		v.write(DATA, 0x02); v.write(DATA, 0x20); v.write(DATA, 0x20);
 		v.write(DATA, 'A');
-		v.tick(1);
+		settle(v);
 		CHECK(check_cell(0, 0, 'A'));
 
 		// Select the face: now every glyph is solid, so the cell is
@@ -1455,7 +1473,7 @@ int main()
 		v.write(DATA, 2); v.write(DATA, 1);
 		v.write(DATA, 0x02); v.write(DATA, 0x21); v.write(DATA, 0x20);
 		v.write(DATA, 'A');
-		v.tick(1);
+		settle(v);
 		vidterm_cursor_hide();
 		for (int gy = 0; gy < CHAR_H; gy++)
 			for (int gx = 0; gx < CHAR_W; gx++)
@@ -1466,7 +1484,7 @@ int main()
 		v.write(DATA, 2); v.write(DATA, 0);
 		v.write(DATA, 0x02); v.write(DATA, 0x22); v.write(DATA, 0x20);
 		v.write(DATA, 'A');
-		v.tick(1);
+		settle(v);
 		CHECK(check_cell(2, 0, 'A'));
 
 		// Killing the buffer a face came from must drop the
@@ -1478,7 +1496,7 @@ int main()
 		v.write(DATA, 2); v.write(DATA, 1);
 		v.write(DATA, 0x02); v.write(DATA, 0x23); v.write(DATA, 0x20);
 		v.write(DATA, 'A');
-		v.tick(1);
+		settle(v);
 		CHECK(check_cell(3, 0, 'A'));	// built-in face, not garbage
 
 		// Bold thickens a stroke: the cell gains lit pixels and keeps
@@ -1486,7 +1504,7 @@ int main()
 		v.write(DATA, 0x0C);
 		v.write(DATA, 0x02); v.write(DATA, 0x20); v.write(DATA, 0x20);
 		v.write(DATA, 'H');
-		v.tick(1);
+		settle(v);
 		vidterm_cursor_hide();
 		int plain_lit = 0;
 		for (int gy = 0; gy < CHAR_H; gy++)
@@ -1497,7 +1515,7 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x3D); v.write(DATA, 1);
 		v.write(DATA, 0x02); v.write(DATA, 0x21); v.write(DATA, 0x20);
 		v.write(DATA, 'H');
-		v.tick(1);
+		settle(v);
 		vidterm_cursor_hide();
 		int bold_lit = 0;
 		for (int gy = 0; gy < CHAR_H; gy++)
@@ -1514,9 +1532,9 @@ int main()
 	{
 		static const uint8_t ESC = 0x1B;
 		v.write(STAT, VID_CTL_RESET);
-		v.tick(1);
+		settle(v);
 		v.write(DATA, 0x0C);
-		v.tick(1);
+		settle(v);
 
 		// DefGPB group 1 buffer 1, 16 bytes: a 4x4 bitmap.
 		v.write(DATA, ESC); v.write(DATA, 0x29);
@@ -1531,7 +1549,7 @@ int main()
 		for (uint8_t i = 0; i < 16; i++)
 			v.write(DATA, (uint8_t)(0x41 + i));
 		v.write(DATA, 'Z');	// the stream must still be in step
-		v.tick(1);
+		settle(v);
 		CHECK(check_cell(0, 0, 'Z'));
 
 		// PutBlk it at 500,300 and the pixels must be what was loaded.
@@ -1539,7 +1557,7 @@ int main()
 		v.write(DATA, 1); v.write(DATA, 1);
 		v.write(DATA, 1); v.write(DATA, 0xF4);	// x = 500
 		v.write(DATA, 1); v.write(DATA, 0x2C);	// y = 300
-		v.tick(1);
+		settle(v);
 		CHECK(video_framebuffer[300][500] == 0x41);
 		CHECK(video_framebuffer[300][503] == 0x44);
 		CHECK(video_framebuffer[303][503] == 0x50);
@@ -1560,7 +1578,7 @@ int main()
 		v.write(DATA, 1); v.write(DATA, 2);
 		v.write(DATA, 2); v.write(DATA, 0x58);	// x 600
 		v.write(DATA, 1); v.write(DATA, 0x2C);	// y 300
-		v.tick(1);
+		settle(v);
 		CHECK(video_framebuffer[300][600] == 0x41);
 		CHECK(video_framebuffer[303][603] == 0x50);
 
@@ -1575,7 +1593,7 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x4A);
 		v.write(DATA, 0); v.write(DATA, 140);
 		v.write(DATA, 1); v.write(DATA, 0xB8);	// y = 440
-		v.tick(1);
+		settle(v);
 		// 4x4 pattern tiled from the screen origin: (100,400) is a
 		// multiple of 4 in both axes, so it takes the pattern's 0,0.
 		CHECK(video_framebuffer[400][100] == 0x41);
@@ -1592,7 +1610,7 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x4A);
 		v.write(DATA, 0); v.write(DATA, 140);
 		v.write(DATA, 1); v.write(DATA, 0xB8);	// y = 440
-		v.tick(1);
+		settle(v);
 		CHECK(video_framebuffer[400][100] == video_framebuffer[400][101]);
 
 		// A GPLoad with a reserved screenType must NOT load -- that is
@@ -1613,7 +1631,7 @@ int main()
 			v.write(DATA, 0x77);
 		v.write(DATA, 0x0C);			// clear, then a glyph
 		v.write(DATA, 'Y');
-		v.tick(1);
+		settle(v);
 		CHECK(check_cell(0, 0, 'Y'));		// stream stayed in step
 
 		const uint8_t untouched = video_framebuffer[350][800];
@@ -1621,7 +1639,7 @@ int main()
 		v.write(DATA, 1); v.write(DATA, 3);
 		v.write(DATA, 3); v.write(DATA, 0x20);	// x 800
 		v.write(DATA, 1); v.write(DATA, 0x5E);	// y 350
-		v.tick(1);
+		settle(v);
 		CHECK(video_framebuffer[350][800] == untouched);  // nothing loaded
 
 		// KillBuf then use it: accepted, does nothing, draws nothing.
@@ -1632,7 +1650,7 @@ int main()
 		v.write(DATA, 1); v.write(DATA, 1);
 		v.write(DATA, 2); v.write(DATA, 0xBC);	// x 700
 		v.write(DATA, 1); v.write(DATA, 0x2C);
-		v.tick(1);
+		settle(v);
 		CHECK(video_framebuffer[300][700] == before);
 	}
 
@@ -1642,9 +1660,9 @@ int main()
 	{
 		static const uint8_t ESC = 0x1B;
 		v.write(STAT, VID_CTL_RESET);
-		v.tick(1);
+		settle(v);
 		v.write(DATA, 0x0C);
-		v.tick(1);
+		settle(v);
 
 		// A bar to combine against, then note what is under it.
 		v.write(DATA, ESC); v.write(DATA, 0x40);
@@ -1653,7 +1671,7 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x4A);
 		v.write(DATA, 0); v.write(DATA, 200);
 		v.write(DATA, 0); v.write(DATA, 200);
-		v.tick(1);
+		settle(v);
 		const uint8_t under = video_framebuffer[150][150];
 		CHECK(under != 0x00);
 
@@ -1666,7 +1684,7 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x4A);
 		v.write(DATA, 0); v.write(DATA, 180);
 		v.write(DATA, 0); v.write(DATA, 180);
-		v.tick(1);
+		settle(v);
 		const uint8_t xored = video_framebuffer[150][150];
 		CHECK(xored != under);		// something happened
 
@@ -1676,7 +1694,7 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x4A);
 		v.write(DATA, 0); v.write(DATA, 180);
 		v.write(DATA, 0); v.write(DATA, 180);
-		v.tick(1);
+		settle(v);
 		CHECK(video_framebuffer[150][150] == under);   // and undone
 
 		// Back to replace, and a bar really does replace again.
@@ -1688,7 +1706,7 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x4A);
 		v.write(DATA, 0); v.write(DATA, 180);
 		v.write(DATA, 0); v.write(DATA, 180);
-		v.tick(1);
+		settle(v);
 		const uint8_t replaced = video_framebuffer[150][150];
 		CHECK(replaced != under);
 		CHECK(replaced != xored);	// not the XOR result either
@@ -1714,14 +1732,14 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x4A);
 		v.write(DATA, 0); v.write(DATA, 200);
 		v.write(DATA, 0); v.write(DATA, 200);
-		v.tick(1);
+		settle(v);
 		const uint8_t plain = video_framebuffer[176][152];
 
 		v.write(DATA, 0x02);			// cursor to cell 19,11
 		v.write(DATA, (uint8_t)(19 + 0x20));
 		v.write(DATA, (uint8_t)(11 + 0x20));
 		v.write(DATA, 'M');			// a dense glyph
-		v.tick(1);
+		settle(v);
 
 		v.write(DATA, ESC); v.write(DATA, 0x2F); v.write(DATA, 3);
 		for (int pass = 0; pass < 2; pass++) {
@@ -1731,7 +1749,7 @@ int main()
 			v.write(DATA, ESC); v.write(DATA, 0x4A);
 			v.write(DATA, 0); v.write(DATA, 170);
 			v.write(DATA, 0); v.write(DATA, 190);
-			v.tick(1);
+			settle(v);
 		}
 		v.write(DATA, ESC); v.write(DATA, 0x2F); v.write(DATA, 0);
 
@@ -1739,7 +1757,7 @@ int main()
 		v.write(DATA, (uint8_t)(19 + 0x20));
 		v.write(DATA, (uint8_t)(11 + 0x20));
 		v.write(DATA, ' ');
-		v.tick(1);
+		settle(v);
 		for (int gy = 0; gy < CHAR_H; gy++)
 			for (int gx = 0; gx < CHAR_W; gx++)
 				CHECK(video_framebuffer[176 + gy][152 + gx] == plain);
@@ -1754,7 +1772,7 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x4A);
 		v.write(DATA, 0); v.write(DATA, 180);
 		v.write(DATA, 0); v.write(DATA, 180);
-		v.tick(1);
+		settle(v);
 		CHECK(video_framebuffer[150][150] != replaced);  // it drew
 		v.write(DATA, ESC); v.write(DATA, 0x2F); v.write(DATA, 0);
 	}
@@ -1766,9 +1784,9 @@ int main()
 	{
 		static const uint8_t ESC = 0x1B;
 		v.write(STAT, VID_CTL_RESET);
-		v.tick(1);
+		settle(v);
 		v.write(DATA, 0x0C);
-		v.tick(1);
+		settle(v);
 
 		// A hollow box from 100,100 to 300,250, drawn in the
 		// foreground colour.
@@ -1778,7 +1796,7 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x48);	// Box
 		v.write(DATA, 1); v.write(DATA, 0x2C);		// 300,250
 		v.write(DATA, 0); v.write(DATA, 250);
-		v.tick(1);
+		settle(v);
 		const uint8_t wall = video_framebuffer[100][200];
 		CHECK(wall != 0x00);
 		CHECK(video_framebuffer[175][200] == 0x00);	// hollow inside
@@ -1788,7 +1806,7 @@ int main()
 		v.write(DATA, 0); v.write(DATA, 200);
 		v.write(DATA, 0); v.write(DATA, 175);
 		v.write(DATA, ESC); v.write(DATA, 0x4F);	// FFill
-		v.tick(1);
+		settle(v);
 
 		CHECK(video_framebuffer[175][200] != 0x00);	// centre filled
 		CHECK(video_framebuffer[101][101] != 0x00);	// and the corners
@@ -1804,7 +1822,7 @@ int main()
 		// all, rather than seeding itself forever -- every pixel it
 		// examined would match after being written.
 		v.write(DATA, ESC); v.write(DATA, 0x4F);
-		v.tick(1);
+		settle(v);
 		CHECK(video_framebuffer[175][200] != 0x00);	// still here
 
 		// And no seeds were dropped: this shape is nowhere near the
@@ -1822,9 +1840,9 @@ int main()
 	{
 		static const uint8_t ESC = 0x1B;
 		v.write(STAT, VID_CTL_RESET);
-		v.tick(1);
+		settle(v);
 		v.write(DATA, 0x0C);
-		v.tick(1);
+		settle(v);
 
 		// Circle of radius 40 centred at 200,200.
 		v.write(DATA, ESC); v.write(DATA, 0x40);
@@ -1832,7 +1850,7 @@ int main()
 		v.write(DATA, 0); v.write(DATA, 200);
 		v.write(DATA, ESC); v.write(DATA, 0x50);
 		v.write(DATA, 0); v.write(DATA, 40);
-		v.tick(1);
+		settle(v);
 
 		CHECK(video_framebuffer[200][240] != 0x00);  // right extreme
 		CHECK(video_framebuffer[200][160] != 0x00);  // left
@@ -1847,7 +1865,7 @@ int main()
 		v.write(DATA, 0); v.write(DATA, 200);
 		v.write(DATA, ESC); v.write(DATA, 0x53);
 		v.write(DATA, 0); v.write(DATA, 40);
-		v.tick(1);
+		settle(v);
 		CHECK(video_framebuffer[200][300] != 0x00);  // centre IS filled
 		CHECK(video_framebuffer[200][340] != 0x00);  // out to the edge
 		CHECK(video_framebuffer[200][342] == 0x00);  // and no further
@@ -1861,7 +1879,7 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x54);
 		v.write(DATA, 0); v.write(DATA, 60);	// rx 60
 		v.write(DATA, 0); v.write(DATA, 20);	// ry 20
-		v.tick(1);
+		settle(v);
 		CHECK(video_framebuffer[350][455] != 0x00);  // 55 px right: in
 		CHECK(video_framebuffer[350][400] != 0x00);  // centre filled
 		// The vertical extreme is EXACTLY ry away and is part of the
@@ -1882,9 +1900,9 @@ int main()
 	{
 		static const uint8_t ESC = 0x1B;
 		v.write(STAT, VID_CTL_RESET);
-		v.tick(1);
+		settle(v);
 		v.write(DATA, 0x0C);		// claim and clear both layers
-		v.tick(1);
+		settle(v);
 
 		// A bar across the middle of the screen, in the foreground
 		// colour -- whatever the palette makes that.
@@ -1894,7 +1912,7 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x4A);
 		v.write(DATA, 1); v.write(DATA, 0x90);	// Bar to 400,300
 		v.write(DATA, 1); v.write(DATA, 44);
-		v.tick(1);
+		settle(v);
 
 		const uint8_t gfx = video_framebuffer[168][84];
 		CHECK(gfx != 0x00);		// the bar really is there
@@ -1904,7 +1922,7 @@ int main()
 		v.write(DATA, (uint8_t)(10 + 0x20));
 		v.write(DATA, (uint8_t)(10 + 0x20));
 		v.write(DATA, 'A');
-		v.tick(1);
+		settle(v);
 
 		// The glyph is drawn, and the graphics still shows through
 		// the gaps: row 0 of 'A' is blank in this font, so the whole
@@ -1924,7 +1942,7 @@ int main()
 		v.write(DATA, (uint8_t)(10 + 0x20));
 		v.write(DATA, (uint8_t)(10 + 0x20));
 		v.write(DATA, ' ');
-		v.tick(1);
+		settle(v);
 		for (int gy = 0; gy < CHAR_H; gy++)
 			for (int gx = 0; gx < CHAR_W; gx++)
 				CHECK(video_framebuffer[160 + gy][80 + gx] == gfx);
@@ -1936,9 +1954,9 @@ int main()
 	// computed wrongly there would overrun into the rows below.
 	{
 		v.write(STAT, VID_CTL_RESET);
-		v.tick(1);
+		settle(v);
 		v.write(DATA, 0x0C);
-		v.tick(1);
+		settle(v);
 
 		// Root window, so the clip is the whole panel: a bar from 0,0
 		// to the far corner takes the contiguous path.
@@ -2002,25 +2020,25 @@ int main()
 	// a glyph and displace what comes after it.
 	{
 		v.write(DATA, 0x0C);		// clear and home
-		v.tick(1);
+		settle(v);
 
 		v.write(DATA, 0x1B);
 		v.write(DATA, 0x20);		// DWSet
 		for (uint8_t p = 'A'; p <= 'H'; p++)	// 8 params
 			v.write(DATA, p);
 		v.write(DATA, 'Z');
-		v.tick(1);
+		settle(v);
 		CHECK(check_cell(0, 0, 'Z'));	// all eight swallowed
 		CHECK(!check_cell(0, 0, 'H'));	// not one left over
 
 		v.write(DATA, 0x0C);
-		v.tick(1);
+		settle(v);
 
 		v.write(DATA, 0x1B);
 		v.write(DATA, 0x21);		// Select
 		v.write(DATA, 'A');		// 1 param: the window id
 		v.write(DATA, 'Z');
-		v.tick(1);
+		settle(v);
 		CHECK(check_cell(0, 0, 'Z'));	// the id was swallowed
 	}
 
@@ -2032,9 +2050,9 @@ int main()
 	// whole burst lands in a single tick.
 	{
 		v.write(STAT, VID_CTL_RESET);	// drop loopback, flush
-		v.tick(1);
+		settle(v);
 		v.write(DATA, 0x0C);		// clear and home
-		v.tick(1);
+		settle(v);
 
 		// TEXT_COLS is 128, so exactly VID_LINK_DRAIN_MAX characters
 		// fill two rows and the next one starts row 2. That cell is
@@ -2049,6 +2067,80 @@ int main()
 
 		v.tick(1);
 		CHECK(check_cell(0, 2, 'A'));	// and nothing was dropped
+	}
+
+	// The TEXT REFRESH is bounded too: at most VIDTERM_REFRESH_ROWS_MAX text
+	// rows per render pass. A full-screen transparent refresh over drawn
+	// graphics measured 28.7 ms on hardware -- 1.7 frames, and no faster
+	// blitter can bring it under one -- so a full-screen change now finishes
+	// over a few passes instead of one pass arriving late (agreed 2026-09-26).
+	//
+	// Three things must hold, and each is checked with single passes:
+	//   1. one pass draws only part of a full-screen change;
+	//   2. while drawing is owed, NEW BYTES ARE NOT CONSUMED -- otherwise a
+	//      later burst's graphics could land before an earlier burst's text
+	//      was drawn and opaque text would paint over them;
+	//   3. it finishes within the passes the bound implies, and the owed
+	//      byte is then taken.
+	// A scroll from the bottom row dirties all 30 rows in one short burst.
+	{
+		v.write(STAT, VID_CTL_RESET);
+		settle(v);
+		v.write(DATA, 0x0C);			// clear and home
+		settle(v);
+		v.write(DATA, 0x02);			// cursor to col 0, row 29
+		v.write(DATA, 0x20);
+		v.write(DATA, 0x20 + TEXT_ROWS - 1);
+		v.write(DATA, 'X');
+		v.write(DATA, 0x0A);			// LF at the bottom: scroll
+		v.tick(1);
+
+		// After the scroll the X sits on row 28. Its pixels are drawn by
+		// the refresh, which one pass cannot have reached.
+		auto x_drawn = [&]() {
+			int lit = 0;
+			for (int gy = 0; gy < CHAR_H; gy++)
+				for (int gx = 0; gx < CHAR_W; gx++)
+					if (video_framebuffer[(TEXT_ROWS - 2) * CHAR_H
+					    + gy][gx] == 0xFFu)
+						lit++;
+			return lit > 4;
+		};
+		// The TEXT GRID, read directly: check_cell() looks at pixels,
+		// and "not drawn yet" is exactly what this pass is meant to
+		// leave, so it cannot say whether the grid itself moved.
+		auto grid = [&](int col, int row) {
+			uint8_t cell[2];
+			vidterm_read_row(col, row, 1, cell);
+			return cell[0];
+		};
+		CHECK(grid(0, TEXT_ROWS - 2) == 'X');	// the grid scrolled
+		CHECK(!x_drawn());			// 1: its pixels not yet
+		CHECK(!vid_link_idle());		// drawing is owed
+
+		// 2: a byte written now must NOT be consumed until the drawing
+		// is finished. Checked in the grid, where consumption shows at
+		// once, not in pixels, where it would not show anyway. LF keeps
+		// the column, so after 'X' and the scroll the cursor is at col 1.
+		// (A first draft checked col 0 in pixels -- a check that passed
+		// whatever the code did.)
+		v.write(DATA, 'Z');
+		v.tick(1);
+		CHECK(grid(1, TEXT_ROWS - 1) != 'Z');
+
+		// 3: done within the passes the bound implies (30 rows at 5 a
+		// pass is 6, plus the one that takes the 'Z'), and not before
+		// the refresh -- the X is drawn, then the Z is consumed.
+		int passes = 2;
+		while (!vid_link_idle() && passes < 32) {
+			v.tick(1);
+			passes++;
+		}
+		CHECK(x_drawn());
+		CHECK(grid(1, TEXT_ROWS - 1) == 'Z');	// taken once drawing done
+		CHECK(passes <= (TEXT_ROWS + VIDTERM_REFRESH_ROWS_MAX - 1) /
+		    VIDTERM_REFRESH_ROWS_MAX + 2);
+		CHECK(passes > 2);	// it really was spread out
 	}
 
 	// A GRID of stamps, which is what a guest actually does with PutBlk --
@@ -2079,9 +2171,9 @@ int main()
 		static const uint8_t BL = 0xFD, BR = 0xFC, ODD = 0xF0;
 
 		v.write(STAT, VID_CTL_RESET);
-		v.tick(1);
+		settle(v);
 		v.write(DATA, 0x0C);
-		v.tick(1);
+		settle(v);
 
 		uint8_t img[GW * GH];
 		for (int i = 0; i < GW * GH; i++)
@@ -2109,9 +2201,9 @@ int main()
 		for (int i = 0; i < GW * GH; i++) {
 			v.write(DATA, img[i]);
 			if ((i & 127) == 127)
-				v.tick(1);
+				settle(v);
 		}
-		v.tick(1);
+		settle(v);
 
 		// Stamp the grid, rows outermost, exactly as a guest loop would.
 		for (int r = 0; r < ROWS; r++)
@@ -2124,9 +2216,9 @@ int main()
 				v.write(DATA, (uint8_t)(x & 0xFF));
 				v.write(DATA, (uint8_t)(y >> 8));
 				v.write(DATA, (uint8_t)(y & 0xFF));
-				v.tick(1);
+				settle(v);
 			}
-		v.tick(1);
+		settle(v);
 
 		// Now check every single one, and say WHICH failed rather than
 		// just that something did -- "the last eight" versus "all of
@@ -2174,9 +2266,9 @@ int main()
 				v.write(DATA, (uint8_t)(x & 0xFF));
 				v.write(DATA, (uint8_t)(y >> 8));
 				v.write(DATA, (uint8_t)(y & 0xFF));
-				v.tick(1);
+				settle(v);
 			}
-		v.tick(1);
+		settle(v);
 		int bad2 = 0;
 		for (int r = 0; r < ROWS; r++)
 			for (int c = 0; c < COLS; c++) {
@@ -2238,13 +2330,13 @@ int main()
 		v.write(DATA, (uint8_t)(SY >> 8)); v.write(DATA, (uint8_t)SY);
 		v.write(DATA, (uint8_t)(RW >> 8)); v.write(DATA, (uint8_t)RW);
 		v.write(DATA, (uint8_t)(RH >> 8)); v.write(DATA, (uint8_t)RH);
-		v.tick(1);
+		settle(v);
 		// PutBlk it somewhere that does not overlap the source.
 		v.write(DATA, ESC); v.write(DATA, 0x2D);
 		v.write(DATA, 2); v.write(DATA, 2);
 		v.write(DATA, (uint8_t)(DX >> 8)); v.write(DATA, (uint8_t)DX);
 		v.write(DATA, (uint8_t)(DY >> 8)); v.write(DATA, (uint8_t)DY);
-		v.tick(1);
+		settle(v);
 
 		// Pixel for pixel, and report the FIRST disagreement with both
 		// coordinates: a uniform offset and a shear look identical in a
@@ -2288,9 +2380,9 @@ int main()
 		static const uint8_t ESC = 0x1B;
 
 		v.write(STAT, VID_CTL_RESET);
-		v.tick(1);
+		settle(v);
 		v.write(DATA, 0x0C);
-		v.tick(1);
+		settle(v);
 
 		// A 4x4 buffer of a single known value.
 		v.write(DATA, ESC); v.write(DATA, 0x29);
@@ -2303,7 +2395,7 @@ int main()
 		v.write(DATA, 0); v.write(DATA, 16);
 		for (int i = 0; i < 16; i++)
 			v.write(DATA, 0x0F);
-		v.tick(1);
+		settle(v);
 
 		// Lay a known background down with a bar, so the mix has
 		// something real to combine against.
@@ -2314,7 +2406,7 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x4B);
 		v.write(DATA, 0); v.write(DATA, 210);
 		v.write(DATA, 0); v.write(DATA, 210);
-		v.tick(1);
+		settle(v);
 		const uint8_t bg = video_framebuffer[202][202];
 		CHECK(bg != 0x0F);	// or the XOR below proves nothing
 
@@ -2324,7 +2416,7 @@ int main()
 		v.write(DATA, 3); v.write(DATA, 1);
 		v.write(DATA, 0); v.write(DATA, 202);
 		v.write(DATA, 0); v.write(DATA, 202);
-		v.tick(1);
+		settle(v);
 		CHECK(video_framebuffer[202][202] == 0x0F);
 		CHECK(video_framebuffer[205][205] == 0x0F);
 
@@ -2335,13 +2427,13 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x4B);
 		v.write(DATA, 0); v.write(DATA, 210);
 		v.write(DATA, 0); v.write(DATA, 210);
-		v.tick(1);
+		settle(v);
 		v.write(DATA, ESC); v.write(DATA, 0x2F); v.write(DATA, 3);
 		v.write(DATA, ESC); v.write(DATA, 0x2D);
 		v.write(DATA, 3); v.write(DATA, 1);
 		v.write(DATA, 0); v.write(DATA, 202);
 		v.write(DATA, 0); v.write(DATA, 202);
-		v.tick(1);
+		settle(v);
 		// XOR combines against the GRAPHICS PLANE, which is what the
 		// bar wrote, so the result is a value that is neither operand.
 		CHECK(video_framebuffer[202][202] == (uint8_t)(bg ^ 0x0F));
@@ -2354,12 +2446,12 @@ int main()
 		v.write(DATA, 3); v.write(DATA, 1);
 		v.write(DATA, 0); v.write(DATA, 202);
 		v.write(DATA, 0); v.write(DATA, 202);
-		v.tick(1);
+		settle(v);
 		CHECK(video_framebuffer[202][202] == bg);
 		CHECK(video_framebuffer[205][205] == bg);
 
 		v.write(DATA, ESC); v.write(DATA, 0x2F); v.write(DATA, 0);
-		v.tick(1);
+		settle(v);
 	}
 
 	// A PANEL-WIDE FILL MUST STILL BE VISIBLE TO GetBlk. The fill now
@@ -2381,9 +2473,9 @@ int main()
 		static const int RW = 40, RH = 8;
 
 		v.write(STAT, VID_CTL_RESET);
-		v.tick(1);
+		settle(v);
 		v.write(DATA, 0x0C);
-		v.tick(1);
+		settle(v);
 
 		vidterm_set_origin(0, 0);
 		vidterm_set_clip(0, 0, FB_WIDTH, FB_HEIGHT);
@@ -2403,14 +2495,14 @@ int main()
 		v.write(DATA, 0); v.write(DATA, 200);	// y 200
 		v.write(DATA, 0); v.write(DATA, (uint8_t)RW);
 		v.write(DATA, 0); v.write(DATA, (uint8_t)RH);
-		v.tick(1);
+		settle(v);
 		// Put it back somewhere else: what comes out of the buffer is
 		// what the shadow gave it, so the destination reveals it.
 		v.write(DATA, ESC); v.write(DATA, 0x2D);
 		v.write(DATA, 4); v.write(DATA, 1);
 		v.write(DATA, 0); v.write(DATA, 8);	// x 8
 		v.write(DATA, 0); v.write(DATA, 8);	// y 8
-		v.tick(1);
+		settle(v);
 		int wrong = 0;
 		for (int r = 0; r < RH; r++)
 			for (int c = 0; c < RW; c++)
@@ -2436,7 +2528,7 @@ int main()
 		v.write(DATA, 4); v.write(DATA, 1);
 		v.write(DATA, 1); v.write(DATA, 0x90);	// x 400
 		v.write(DATA, 0); v.write(DATA, 8);	// y 8
-		v.tick(1);
+		settle(v);
 		CHECK(video_framebuffer[8][400] == 0x24u);
 	}
 
@@ -2460,7 +2552,7 @@ int main()
 
 		for (int pass = 0; pass < 2; pass++) {
 			v.write(STAT, VID_CTL_RESET);
-			v.tick(1);
+			settle(v);
 			vidterm_set_origin(0, 0);
 			vidterm_set_clip(0, 0, FB_WIDTH, FB_HEIGHT);
 			if (pass == 0) {
@@ -2506,7 +2598,7 @@ int main()
 	// M0 loopback still works after M1 (the vlink test must keep passing).
 	v.write(STAT, VID_CTL_LOOPBACK);
 	v.write(DATA, 0x55);
-	v.tick(1);
+	settle(v);
 	CHECK(v.read(STAT) & VID_STAT_RDRF);
 	CHECK(v.read(DATA) == 0x55);
 
