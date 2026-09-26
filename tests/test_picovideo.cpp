@@ -3154,6 +3154,247 @@ int main()
 			vidterm_buf_kill(9, id);
 	}
 
+	// A PATTERNED SPAN WITH NO MIX MODE -- the patterned Bar, the case wgfx
+	// draws -- is built as one period of the pattern row and then copied
+	// along the row, rather than composed pixel by pixel. So the period, its
+	// phase at the span's start, the colour AND, and the copy's tail all
+	// have to be right at every alignment: pattern widths either side of a
+	// word and of the copy's own 64-byte chunk, ones in the SRAM cache and
+	// in PSRAM, spans shorter than a period, a few periods, and the panel,
+	// starting at each byte of a word. A mix mode with no pattern, which
+	// takes the same writer, is checked over drawn and undrawn rows. Both
+	// planes are compared, the shadow through transparent spaces.
+	{
+		static uint8_t model[FB_HEIGHT][FB_WIDTH];
+		static const uint8_t U = 0x2Du;
+		static uint8_t pbuf[1200];
+		auto compare = [&](const char *what) {
+			for (int pass = 0; pass < 2; pass++) {
+				if (pass == 1) {
+					vidterm_set_pattern(0, 0);
+					(void)vidterm_clear(' ', 0x01u);
+					vidterm_refresh();
+				}
+				int bad = 0, fx = -1, fy = -1;
+				for (int y = 0; y < FB_HEIGHT; y++)
+					for (int x = 0; x < FB_WIDTH; x++)
+						if (video_framebuffer[y][x] !=
+						    model[y][x]) {
+							if (!bad) { fx = x; fy = y; }
+							bad++;
+						}
+				if (bad)
+					fprintf(stderr, "  period oracle, %s%s: %d"
+					    " px differ, first %d,%d (got %02X"
+					    " want %02X)\n", what, pass ?
+					    " (shadow)" : "", bad, fx, fy,
+					    video_framebuffer[fy][fx],
+					    model[fy][fx]);
+				CHECK(bad == 0);
+			}
+		};
+		auto background = [&]() {
+			v.write(STAT, VID_CTL_RESET);
+			settle(v);
+			vidterm_set_pattern(0, 0);
+			vidterm_set_logic(0);
+			vidterm_set_origin(0, 0);
+			vidterm_set_clip(0, 0, FB_WIDTH, FB_HEIGHT);
+			vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, U);
+			for (int y = 0; y < FB_HEIGHT; y++)
+				for (int x = 0; x < FB_WIDTH; x++)
+					model[y][x] = U;
+		};
+		static const struct { int w, h; } SHAPES[] = {
+			{ 1, 1 }, { 3, 2 }, { 4, 1 }, { 5, 3 }, { 7, 2 },
+			{ 16, 16 }, { 20, 4 }, { 64, 2 }, { 65, 1 },
+			{ 100, 3 }, { 300, 1 }, { 1024, 1 },
+		};
+		static const int LENS[] = { 1, 2, 5, 63, 64, 129, 333, 1017 };
+		uint8_t id = 1;
+
+		for (const auto &s : SHAPES) {
+			background();
+			const int pw = s.w, ph = s.h;
+			vidterm_buf_define(10, id, (uint32_t)(pw * ph));
+			vidterm_buf_shape(10, id, (uint16_t)pw, (uint16_t)ph);
+			for (int i = 0; i < pw * ph; i++) {
+				pbuf[i] = (uint8_t)(i * 29 + (i / pw) * 83 + 5);
+				vidterm_buf_poke(10, id, (uint32_t)i, pbuf[i]);
+			}
+			vidterm_set_pattern(10, id);
+			// An origin off the byte grid, so the phase is never
+			// trivially zero.
+			const int ox = 7, oy = 3;
+			vidterm_set_origin(ox, oy);
+
+			int y = 0;
+			for (int start = 0; start < 5; start++)
+				for (int li = 0; li < 8; li++, y += 2) {
+					const int len = LENS[li] - start;
+					const uint8_t col = (li & 1) ? 0xFF : 0xDB;
+
+					if (len <= 0)
+						continue;
+					vidterm_fill_rect(start - ox, y, len, 2, col);
+					for (int yy = oy + y; yy < oy + y + 2; yy++)
+						for (int x = start; x < start + len;
+						    x++) {
+							int tx = (x - ox) % pw, ty =
+							    (yy - oy) % ph;
+							if (tx < 0) tx += pw;
+							model[yy][x] = (uint8_t)(col &
+							    pbuf[ty * pw + tx]);
+						}
+				}
+			// And the whole panel, which is a different route in
+			// fill_rect for a plain colour and must not be one here.
+			vidterm_set_origin(0, 0);
+			vidterm_fill_rect(0, 200, FB_WIDTH, FB_HEIGHT - 200, 0xB6);
+			for (int yy = 200; yy < FB_HEIGHT; yy++)
+				for (int x = 0; x < FB_WIDTH; x++)
+					model[yy][x] = (uint8_t)(0xB6 &
+					    pbuf[(yy % ph) * pw + x % pw]);
+			char what[40];
+			snprintf(what, sizeof(what), "pattern %dx%d", pw, ph);
+			compare(what);
+			vidterm_set_pattern(0, 0);
+			vidterm_buf_kill(10, id);
+			id++;
+		}
+
+		// XOR with no pattern, over rows 40..99 drawn with a gradient
+		// that varies along the row and rows 100..139 left undrawn.
+		background();
+		for (int y = 40; y < 100; y++)
+			for (int x = 0; x < FB_WIDTH; x++) {
+				const uint8_t c = (uint8_t)(x * 13 + y * 7);
+				vidterm_plot(x, y, c);
+				model[y][x] = c;
+			}
+		vidterm_set_logic(3);
+		vidterm_fill_rect(3, 30, 1017, 110, 0x5A);
+		for (int y = 30; y < 140; y++)
+			for (int x = 3; x < 1020; x++)
+				model[y][x] ^= 0x5A;
+		vidterm_set_logic(0);
+		compare("XOR, no pattern");
+	}
+
+	// FLOOD FILL'S REGION SEARCH AGAINST THE ALGORITHM IT REPLACED. The
+	// search compares a word at a time, so its answers -- where a run
+	// starts and ends, where the next target pixel is -- must be exactly
+	// what the byte-at-a-time search gave, at every alignment. The oracle
+	// here IS that byte-wise scanline fill, seed stack and bound included,
+	// run over a model: the same answers mean the same seeds in the same
+	// order, so the two must agree pixel for pixel even where the bounded
+	// stack overflows, and in the overflow count too. The boundary is
+	// thousands of short random walls, so runs begin and end at every byte
+	// of a word, and the clip is off the word grid on both sides.
+	{
+		static uint8_t ref[FB_HEIGHT][FB_WIDTH];
+		static const uint8_t U = 0x31u, W = 0xC4u, C = 0x7Eu;
+		const int cx0 = 13, cy0 = 7, cx1 = 13 + 990, cy1 = 7 + 460;
+
+		v.write(STAT, VID_CTL_RESET);
+		settle(v);
+		vidterm_set_pattern(0, 0);
+		vidterm_set_logic(0);
+		vidterm_set_origin(0, 0);
+		vidterm_set_clip(0, 0, FB_WIDTH, FB_HEIGHT);
+		vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, U);
+		uint32_t seed = 12345u;
+		auto rnd = [&seed](uint32_t n) {
+			seed = seed * 1103515245u + 12345u;
+			return (seed >> 8) % n;
+		};
+		for (int i = 0; i < 9000; i++) {
+			const int x = (int)rnd(FB_WIDTH), y = (int)rnd(FB_HEIGHT);
+			if (i & 1)
+				vidterm_fill_rect(x, y, 1 + (int)rnd(9), 1, W);
+			else
+				vidterm_fill_rect(x, y, 1, 1 + (int)rnd(6), W);
+		}
+		vidterm_fill_rect(500, 240, 1, 1, U);	// the seed is target
+		memcpy(ref, video_framebuffer, sizeof(ref));
+
+		// The byte-wise fill, exactly as it was.
+		unsigned ref_overflows = 0;
+		{
+			struct { int16_t x, y; } st[96];
+			unsigned sp = 0;
+			const uint8_t target = ref[240][500];
+			st[sp].x = 500; st[sp].y = 240; sp++;
+			while (sp > 0u) {
+				sp--;
+				const int py = st[sp].y, px = st[sp].x;
+				if (ref[py][px] != target)
+					continue;
+				int x1 = px, x2 = px;
+				while (x1 > cx0 && ref[py][x1 - 1] == target)
+					x1--;
+				while (x2 < cx1 - 1 && ref[py][x2 + 1] == target)
+					x2++;
+				memset(&ref[py][x1], C, (size_t)(x2 + 1 - x1));
+				for (int ny = py - 1; ny <= py + 1; ny += 2) {
+					if (ny < cy0 || ny >= cy1)
+						continue;
+					int i = x1;
+					while (i <= x2) {
+						if (ref[ny][i] != target) {
+							i++;
+							continue;
+						}
+						if (sp < 96u) {
+							st[sp].x = (int16_t)i;
+							st[sp].y = (int16_t)ny;
+							sp++;
+						} else {
+							ref_overflows++;
+						}
+						while (i <= x2 && ref[ny][i] == target)
+							i++;
+					}
+				}
+			}
+		}
+
+		uint32_t ov0, un0, ov1, un1;
+		vidterm_fill_stats(&ov0, &un0);
+		vidterm_set_clip(cx0, cy0, cx1 - cx0, cy1 - cy0);
+		vidterm_flood_fill(500, 240, C);
+		vidterm_set_clip(0, 0, FB_WIDTH, FB_HEIGHT);
+		vidterm_fill_stats(&ov1, &un1);
+
+		int filled = 0;
+		for (int y = 0; y < FB_HEIGHT; y++)
+			for (int x = 0; x < FB_WIDTH; x++)
+				filled += ref[y][x] == C;
+		CHECK(filled > 20000);		// the region is not trivial
+		CHECK(ov1 - ov0 == ref_overflows);
+		for (int pass = 0; pass < 2; pass++) {
+			if (pass == 1) {
+				(void)vidterm_clear(' ', 0x01u);
+				vidterm_refresh();
+			}
+			int bad = 0, fx = -1, fy = -1;
+			for (int y = 0; y < FB_HEIGHT; y++)
+				for (int x = 0; x < FB_WIDTH; x++)
+					if (video_framebuffer[y][x] != ref[y][x]) {
+						if (!bad) { fx = x; fy = y; }
+						bad++;
+					}
+			if (bad)
+				fprintf(stderr, "  flood oracle%s: %d px differ,"
+				    " first %d,%d (got %02X want %02X)\n",
+				    pass ? " (shadow)" : "", bad, fx, fy,
+				    video_framebuffer[fy][fx], ref[fy][fx]);
+			CHECK(bad == 0);
+		}
+		fprintf(stderr, "  flood oracle: %d px filled, %u seeds"
+		    " dropped\n", filled, ref_overflows);
+	}
+
 	// M0 loopback still works after M1 (the vlink test must keep passing).
 	v.write(STAT, VID_CTL_LOOPBACK);
 	v.write(DATA, 0x55);
