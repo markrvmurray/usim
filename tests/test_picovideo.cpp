@@ -1261,20 +1261,19 @@ int main()
 		CHECK(video_framebuffer[269][179] ==
 		    weave[(269 % 16) * 16 + (179 % 16)]);
 
-		// A pattern applies to FILLS and to nothing else. It was
-		// applied in the one pixel writer every primitive passes
-		// through, so lines and outlines came out woven and PutBlk
-		// stamped the pattern instead of the image it was handed --
-		// which on a screen reads as a patch of pattern unrelated to
-		// anything around it. Meanwhile FFill, which IS a fill, was
-		// the only one that missed out, because it writes spans
-		// directly. Wrong in both directions at once, so both need
-		// asserting.
+		// THE PATTERN RULE IS CoCo3's (GrfDrv, level2/cmds/grfdrv.asm;
+		// VID-033): EVERY pixel-plotting primitive takes the pattern,
+		// PutBlk included, and the pixel written is colour AND pattern.
+		// An earlier version of this test asserted the opposite --
+		// outlines solid, stamps untouched -- because the firmware had
+		// confined the pattern to fills. That hid the real fault, which
+		// was a stamp REPLACED by the pattern rather than ANDed with it.
 		v.write(DATA, ESC); v.write(DATA, 0x2E);
 		v.write(DATA, 3); v.write(DATA, 1);	// pattern on
 
-		// An OUTLINE must be solid foreground, not woven. Box from
-		// 600,300 to 700,360; its top edge is one colour throughout.
+		// An OUTLINE is woven: FColor 7 is white, so its pixels are the
+		// pattern's own, tiled from the window origin (the root, 0,0).
+		// Box from 600,300 to 700,360; check its whole top edge.
 		v.write(DATA, ESC); v.write(DATA, 0x32); v.write(DATA, 7);
 		v.write(DATA, ESC); v.write(DATA, 0x40);
 		v.write(DATA, 2); v.write(DATA, 0x58);	// 600,300
@@ -1283,15 +1282,15 @@ int main()
 		v.write(DATA, 2); v.write(DATA, 0xBC);	// to 700,360
 		v.write(DATA, 1); v.write(DATA, 0x68);
 		settle(v);
-		const uint8_t edge = video_framebuffer[300][600];
-		for (int x = 601; x <= 700; x++)
-			CHECK(video_framebuffer[300][x] == edge);
+		for (int x = 600; x <= 700; x++)
+			CHECK(video_framebuffer[300][x] ==
+			    (uint8_t)(0xFF & weave[(300 % 16) * 16 + (x % 16)]));
 
-		// A STAMPED BLOCK must be the image, not the pattern. g3/b1 is
-		// the weave itself, so stamping it must reproduce the weave
-		// from ITS OWN corner -- which differs from the screen-tiled
-		// pattern unless the two happen to coincide, so place it
-		// somewhere they do not.
+		// A STAMP is the image ANDed with the pattern -- NOT the pattern
+		// in place of the image (the original fault) and NOT the bare
+		// image (the over-correction). g3/b1 is the weave itself,
+		// stamped at 601,451, where its own corner is out of phase with
+		// the screen tiling, so all three readings differ.
 		v.write(DATA, ESC); v.write(DATA, 0x2D);
 		v.write(DATA, 3); v.write(DATA, 1);
 		v.write(DATA, 2); v.write(DATA, 0x59);	// x 601
@@ -1300,7 +1299,9 @@ int main()
 		for (int r = 0; r < 16; r++)
 			for (int c = 0; c < 16; c++)
 				CHECK(video_framebuffer[451 + r][601 + c] ==
-				    weave[r * 16 + c]);
+				    (uint8_t)(weave[r * 16 + c] &
+				    weave[((451 + r) % 16) * 16 +
+				    ((601 + c) % 16)]));
 
 		// And FFill, which IS a fill, must take the pattern. Box an
 		// enclosure in solid, then flood inside it.
@@ -1829,9 +1830,10 @@ int main()
 		// And no seeds were dropped: this shape is nowhere near the
 		// stack bound, so a non-zero count would mean the bound is
 		// wrong rather than the shape is hard.
-		uint32_t over = 1;
-		vidterm_fill_stats(&over);
+		uint32_t over = 1, flat = 1;
+		vidterm_fill_stats(&over, &flat);
 		CHECK(over == 0);
+		CHECK(flat == 0);
 	}
 
 	// Curves. The properties worth asserting are the ones a wrong
@@ -2706,6 +2708,122 @@ int main()
 		CHECK(gb[0] == 'Q');
 		CHECK(gc[0] == S);
 		CHECK(vid_link_trace_read(next, 1, gb, gc) == 0); // not yet
+	}
+
+	// THE PATTERN RULE, driven through the renderer directly so each
+	// property is isolated: the AND with a NON-white colour, the WINDOW
+	// anchor, the wrap left of that anchor, and flood fill's two failure
+	// modes (VID-033, VID-034).
+	{
+		static const uint8_t CHECKER[4] = { 0xFF, 0x00, 0x00, 0xFF };
+		// A 3x2 tile whose every cell differs, so no shift of the
+		// anchor can reproduce it -- the lesson of the diagonal weave.
+		static const uint8_t ODD[6] = { 0xF0, 0x0F, 0xCC, 0x33, 0xAA,
+		    0x55 };
+		uint32_t over, flat;
+
+		v.write(STAT, VID_CTL_RESET);
+		settle(v);
+		vidterm_set_logic(0);
+		vidterm_set_origin(0, 0);
+		vidterm_set_clip(0, 0, FB_WIDTH, FB_HEIGHT);
+		vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, 0x00);
+		vidterm_buf_define(8, 1, 6);
+		vidterm_buf_shape(8, 1, 3, 2);
+		for (int i = 0; i < 6; i++)
+			vidterm_buf_poke(8, 1, (uint32_t)i, ODD[i]);
+		vidterm_set_pattern(8, 1);
+
+		// AND, not replace: red (0xE0) through the tile.
+		for (int x = 10; x < 16; x++)
+			vidterm_plot(x, 10, 0xE0);
+		int bad = 0;
+		for (int x = 10; x < 16; x++)
+			if (video_framebuffer[10][x] !=
+			    (uint8_t)(0xE0 & ODD[(10 % 2) * 3 + (x % 3)]))
+				bad++;
+		CHECK(bad == 0);
+
+		// WINDOW ANCHOR: with the origin at 100,51 the tile starts
+		// there, not at the panel's corner. Both coordinates are
+		// chosen out of phase with the 3x2 tile (100 mod 3 = 1, 51 mod
+		// 2 = 1), so a screen-anchored tile disagrees in x AND y.
+		vidterm_set_origin(100, 51);
+		for (int x = 0; x < 6; x++) {
+			vidterm_plot(x, 0, 0xFF);
+			vidterm_plot(x, 1, 0xFF);
+		}
+		bad = 0;
+		for (int y = 0; y < 2; y++)
+			for (int x = 0; x < 6; x++)
+				if (video_framebuffer[51 + y][100 + x] !=
+				    ODD[y * 3 + (x % 3)])
+					bad++;
+		if (bad)
+			fprintf(stderr, "  pattern anchor: %d pixels tiled from"
+			    " the screen, not the window\n", bad);
+		CHECK(bad == 0);
+
+		// LEFT OF THE ORIGIN, as an unprotected window may draw: -1
+		// must wrap to the tile's last column, not index before it.
+		vidterm_plot(-1, 0, 0xFF);
+		CHECK(video_framebuffer[51][99] == ODD[0 * 3 + 2]);
+
+		// VID-034: FFill with a pattern that CONTAINS the target colour.
+		// Before the two-pass fill this painted a fragment of the region
+		// (6,144 of 491,520 on a full panel) and dropped seeds.
+		vidterm_set_origin(0, 0);
+		vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, 0x00);
+		vidterm_buf_define(8, 2, 4);
+		vidterm_buf_shape(8, 2, 2, 2);
+		for (int i = 0; i < 4; i++)
+			vidterm_buf_poke(8, 2, (uint32_t)i, CHECKER[i]);
+		vidterm_set_pattern(8, 2);
+		uint32_t over0, flat0;
+		vidterm_fill_stats(&over0, &flat0);
+		vidterm_flood_fill(10, 10, 0xFF);
+		bad = 0;
+		for (int y = 0; y < FB_HEIGHT; y++)
+			for (int x = 0; x < FB_WIDTH; x++)
+				if (video_framebuffer[y][x] !=
+				    CHECKER[(y % 2) * 2 + (x % 2)])
+					bad++;
+		if (bad)
+			fprintf(stderr, "  patterned FFill: %d of %d pixels"
+			    " wrong\n", bad, FB_WIDTH * FB_HEIGHT);
+		CHECK(bad == 0);
+		vidterm_fill_stats(&over, &flat);
+		CHECK(over == over0);	// no seeds dropped
+		CHECK(flat == flat0);	// every span patterned
+
+		// VID-034 without a pattern: LSet AND. With colour 0x3F over a
+		// 0x0F region, every filled pixel is 0x3F AND 0x0F = 0x0F -- the
+		// TARGET -- so a one-pass fill re-seeds its own work and drops
+		// seeds. The pixels look unchanged either way (that is what AND
+		// gives), so the discriminating check is that no seed was
+		// dropped; a first draft of this used 0x3C, whose AND differs
+		// from the target, and would have passed on the broken fill.
+		vidterm_set_pattern(0, 0);
+		vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, 0x00);
+		vidterm_fill_rect(0, 0, 64, 64, 0x0F);	// a background to AND
+		vidterm_fill_rect(0, 0, 64, 1, 0x00);	// ... fenced so the
+		vidterm_fill_rect(0, 63, 64, 1, 0x00);	// fill stays in it:
+		vidterm_set_logic(1);				// AND
+		vidterm_fill_stats(&over0, &flat0);
+		vidterm_flood_fill(10, 10, 0x3F);	// target 0x0F
+		vidterm_set_logic(0);
+		bad = 0;
+		for (int y = 1; y < 63; y++)
+			for (int x = 0; x < 64; x++)
+				if (video_framebuffer[y][x] != 0x0Fu)
+					bad++;
+		CHECK(bad == 0);
+		vidterm_fill_stats(&over, &flat);
+		CHECK(over == over0);
+		CHECK(flat == flat0);
+		CHECK(video_framebuffer[10][64] == 0x00);	// did not leak
+		vidterm_buf_kill(8, 1);
+		vidterm_buf_kill(8, 2);
 	}
 
 	// M0 loopback still works after M1 (the vlink test must keep passing).
