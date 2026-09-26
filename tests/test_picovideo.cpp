@@ -2440,6 +2440,69 @@ int main()
 		CHECK(video_framebuffer[8][400] == 0x24u);
 	}
 
+	// TRANSPARENT TEXT OVER A COLOURED BUT UNDRAWN PLANE. A panel-wide fill
+	// now leaves every shadow row implicit, holding its colour as a single
+	// "uniform" value rather than as bytes. A transparent cell over such a
+	// row must show THAT colour behind its glyph -- not the cell's own
+	// background, and not whatever colour the tests happen to clear to.
+	//
+	// Every earlier text test cleared the plane to the same default a
+	// transparent attr resolves to, so the two were indistinguishable: a
+	// blitter using the wrong one passed the whole suite. Found by mutation
+	// when the blitter was rewritten word-wise. So use a colour that is
+	// neither, and check the undrawn (implicit) and drawn (resident) cases
+	// give the SAME answer -- they must, since both mean "the plane is C".
+	{
+		static const uint8_t C = 0x6Du;
+		static const uint8_t WHITE_TRANSP = 0xE1u;	// fg white, bit0 set
+		const int col = 10, row = 5;
+		const int x = col * CHAR_W, y = row * CHAR_H;
+
+		for (int pass = 0; pass < 2; pass++) {
+			v.write(STAT, VID_CTL_RESET);
+			v.tick(1);
+			vidterm_set_origin(0, 0);
+			vidterm_set_clip(0, 0, FB_WIDTH, FB_HEIGHT);
+			if (pass == 0) {
+				// Implicit: one panel-wide fill, no row real.
+				vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, C);
+			} else {
+				// Resident: two part-height bars make every
+				// row real, holding the same colour as bytes.
+				vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT / 2, C);
+				vidterm_fill_rect(0, FB_HEIGHT / 2, FB_WIDTH,
+				    FB_HEIGHT - FB_HEIGHT / 2, C);
+			}
+			vidterm_putch(col, row, 'M', WHITE_TRANSP);
+			vidterm_putch(col + 1, row, ' ', WHITE_TRANSP);
+			vidterm_refresh();
+
+			// This face leaves the rightmost column of every glyph
+			// blank, so it is background in every row of the 'M'.
+			int bad_bg = 0, fg_seen = 0;
+			for (int gy = 0; gy < CHAR_H; gy++) {
+				if (video_framebuffer[y + gy][x + CHAR_W - 1] != C)
+					bad_bg++;
+				for (int gx = 0; gx < CHAR_W; gx++) {
+					if (video_framebuffer[y + gy][x + CHAR_W +
+					    gx] != C)
+						bad_bg++;	// the space
+					if (video_framebuffer[y + gy][x + gx] ==
+					    0xFFu)
+						fg_seen++;
+				}
+			}
+			if (bad_bg != 0)
+				fprintf(stderr, "  transparent over %s plane: %d"
+				    " background pixels not the plane colour"
+				    " (got %02X)\n", pass ? "resident" :
+				    "implicit", bad_bg,
+				    video_framebuffer[y][x + CHAR_W - 1]);
+			CHECK(bad_bg == 0);
+			CHECK(fg_seen > 10);	// the glyph really drew
+		}
+	}
+
 	// M0 loopback still works after M1 (the vlink test must keep passing).
 	v.write(STAT, VID_CTL_LOOPBACK);
 	v.write(DATA, 0x55);
