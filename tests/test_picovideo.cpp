@@ -3441,6 +3441,89 @@ int main()
 		    " dropped\n", filled, ref_overflows);
 	}
 
+	// A FLOOD FILL FROM THE GUEST IS SPREAD OVER RENDER PASSES, AND NOTHING
+	// DRAWS UNDER IT. A full-panel fill costs more than a frame, so the
+	// console starts it and each pass does a slice. The fill finds its way
+	// by the colours on screen, so a command after it in the SAME burst
+	// must not run until it is done: here a full-width Bar across the
+	// panel follows the FFill. Run in order, the fill covers everything and
+	// the Bar lands on top. If the Bar ran mid-fill it would be a wall, and
+	// everything beyond it would be left unfilled -- so the check is simply
+	// that no pixel of the old colour survives, and that it really took
+	// more than one pass, or the hold was never exercised.
+	{
+		static const uint8_t ESC = 0x1B;
+		v.write(STAT, VID_CTL_RESET);
+		settle(v);
+		v.write(DATA, 0x0C);
+		settle(v);
+		const uint8_t before = video_framebuffer[10][10];
+
+		v.write(DATA, ESC); v.write(DATA, 0x40);	// SetDPtr 10,10
+		v.write(DATA, 0); v.write(DATA, 10);
+		v.write(DATA, 0); v.write(DATA, 10);
+		v.write(DATA, ESC); v.write(DATA, 0x4F);	// FFill
+		v.write(DATA, ESC); v.write(DATA, 0x40);	// SetDPtr 0,300
+		v.write(DATA, 0); v.write(DATA, 0);
+		v.write(DATA, 1); v.write(DATA, 0x2C);
+		v.write(DATA, ESC); v.write(DATA, 0x4A);	// Bar to 1023,301
+		v.write(DATA, 3); v.write(DATA, 0xFF);
+		v.write(DATA, 1); v.write(DATA, 0x2D);
+
+		int passes = 0;
+		bool held = false;
+		while (!vid_link_idle() && passes < 256) {
+			v.tick(1);
+			passes++;
+			// Mid-fill, the Bar's bytes must still be queued.
+			if (vidterm_fill_pending())
+				held = held || !vid_link_idle();
+		}
+		// The cursor and pointer are drawn INTO the framebuffer, and
+		// both can show the old colour (an inverted white cell is
+		// black; so is the pointer's outline), so they come off first.
+		vidterm_cursor_hide();
+		int left = 0;
+		for (int y = 0; y < FB_HEIGHT; y++)
+			for (int x = 0; x < FB_WIDTH; x++)
+				left += video_framebuffer[y][x] == before;
+		if (left != 0 || passes < 3) {
+			int bx0 = 9999, by0 = 9999, bx1 = -1, by1 = -1;
+			for (int y = 0; y < FB_HEIGHT; y++)
+				for (int x = 0; x < FB_WIDTH; x++)
+					if (video_framebuffer[y][x] == before) {
+						if (x < bx0) bx0 = x;
+						if (y < by0) by0 = y;
+						if (x > bx1) bx1 = x;
+						if (y > by1) by1 = y;
+					}
+			fprintf(stderr, "  sliced FFill: %d px of the old colour"
+			    " left (%d,%d)-(%d,%d), %d passes\n", left, bx0,
+			    by0, bx1, by1, passes);
+		}
+		CHECK(passes >= 3);		// it really was sliced
+		CHECK(held);
+		CHECK(left == 0);		// the Bar did not wall it off
+		CHECK(!vidterm_fill_pending());
+
+		// A link reset mid-fill drops the fill: the guest asked for a
+		// clean slate, and a fill still running afterwards would draw
+		// over whatever it does next.
+		v.write(DATA, 0x0C);
+		settle(v);
+		v.write(DATA, ESC); v.write(DATA, 0x40);
+		v.write(DATA, 0); v.write(DATA, 10);
+		v.write(DATA, 0); v.write(DATA, 10);
+		v.write(DATA, ESC); v.write(DATA, 0x4F);
+		v.tick(1);
+		CHECK(vidterm_fill_pending());	// started, not finished
+		v.write(STAT, VID_CTL_RESET);
+		v.tick(1);
+		CHECK(!vidterm_fill_pending());
+		settle(v);
+		CHECK(vid_link_idle());
+	}
+
 	// M0 loopback still works after M1 (the vlink test must keep passing).
 	v.write(STAT, VID_CTL_LOOPBACK);
 	v.write(DATA, 0x55);
