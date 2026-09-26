@@ -2598,6 +2598,119 @@ int main()
 		}
 	}
 
+	// THE TEXT BLITTER AGAINST AN ORACLE, over a plane that varies in BOTH
+	// directions. The refresh reads the shadow a pixel row at a time
+	// across a run of cells (so its PSRAM reads are consecutive), which
+	// means a cell's background now comes out of a buffer shared with its
+	// neighbours -- an off-by-one-cell there, or a pixel row taken from
+	// the wrong text row, would restore graphics that is merely nearby.
+	// Every earlier transparent-text test used a plane uniform along each
+	// row, where a sideways slip is invisible. The plane here is chosen
+	// AGAINST the blitter's symmetries: it changes under a shift of one
+	// cell (8), one word (4) and one text row (16).
+	//
+	// The cells mix everything a run can hold: transparent and opaque,
+	// solid, blank and ordinary glyphs, dense runs and isolated cells
+	// (including either side of a 64-pixel boundary and the last column),
+	// over text rows wholly drawn, wholly undrawn, and split between the
+	// two. Every pixel of the panel is checked, so a write to a cell that
+	// was not dirty is caught too. Then again through the bounded refresh.
+	{
+		static uint8_t model[FB_HEIGHT][FB_WIDTH];
+		static const uint8_t U = 0x92u;		// undrawn rows' colour
+		auto plane = [](int x, int y) {
+			return (uint8_t)(x * 37 + y * 101 + (x >> 3) * 11);
+		};
+		auto fg_of = [](uint8_t a) {
+			return (uint8_t)(((a & 0x80) ? 0xE0 : 0) |
+			    ((a & 0x40) ? 0x1C : 0) | ((a & 0x20) ? 0x03 : 0));
+		};
+		auto bg_of = [](uint8_t a) {
+			return (uint8_t)(((a & 0x08) ? 0x40 : 0) |
+			    ((a & 0x04) ? 0x08 : 0) | ((a & 0x02) ? 0x01 : 0));
+		};
+		static const uint8_t CHARS[] = { 'A', 'M', ' ', 0xDB, 'g', '#',
+		    '@', '.', 'W', 0xB1 };
+		static const uint8_t ATTRS[] = { 0xE1, 0x21, 0xE0, 0x4A, 0xC1,
+		    0x9C, 0x61 };
+		static const int SPARSE[] = { 50, 57, 63, 64, 71, 100, 127 };
+
+		for (int bounded = 0; bounded < 2; bounded++) {
+			v.write(STAT, VID_CTL_RESET);
+			settle(v);
+			vidterm_set_pattern(0, 0);
+			vidterm_set_logic(0);
+			vidterm_set_origin(0, 0);
+			vidterm_set_clip(0, 0, FB_WIDTH, FB_HEIGHT);
+			vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, U);
+			for (int y = 0; y < FB_HEIGHT; y++)
+				for (int x = 0; x < FB_WIDTH; x++)
+					model[y][x] = U;
+			// Pixel rows 40..119: text row 2 is half drawn, 3..6
+			// wholly, 7 half, 8 not at all.
+			for (int y = 40; y < 120; y++)
+				for (int x = 0; x < FB_WIDTH; x++) {
+					vidterm_plot(x, y, plane(x, y));
+					model[y][x] = plane(x, y);
+				}
+			// Show the plane itself everywhere first, so any cell
+			// the refresh should not touch has a known value.
+			(void)vidterm_clear(' ', 0x01u);
+			vidterm_refresh();
+
+			auto place = [&](int col, int row, int k) {
+				const uint8_t ch = CHARS[k % sizeof(CHARS)];
+				const uint8_t at = ATTRS[k % sizeof(ATTRS)];
+
+				vidterm_putch(col, row, ch, at);
+				for (int gy = 0; gy < CHAR_H; gy++) {
+					const uint8_t m = font_spleen_8x16[ch][gy];
+					const int py = row * CHAR_H + gy;
+
+					for (int gx = 0; gx < CHAR_W; gx++) {
+						const int px = col * CHAR_W + gx;
+						const uint8_t b = (at & 1) ?
+						    (py >= 40 && py < 120 ?
+						    plane(px, py) : U) : bg_of(at);
+
+						model[py][px] = (m & (0x80 >> gx)) ?
+						    fg_of(at) : b;
+					}
+				}
+			};
+			int k = 0;
+			for (int row = 2; row <= 8; row++) {
+				for (int col = 0; col <= 40; col++)
+					place(col, row, k++);
+				for (int col : SPARSE)
+					place(col, row, k++ + row);
+			}
+
+			if (bounded) {
+				int passes = 0;
+				while (vidterm_refresh_bounded())
+					passes++;
+				CHECK(passes > 0);	// it really was split
+			} else {
+				vidterm_refresh();
+			}
+
+			int bad = 0, fx = -1, fy = -1;
+			for (int y = 0; y < FB_HEIGHT; y++)
+				for (int x = 0; x < FB_WIDTH; x++)
+					if (video_framebuffer[y][x] != model[y][x]) {
+						if (!bad) { fx = x; fy = y; }
+						bad++;
+					}
+			if (bad)
+				fprintf(stderr, "  text oracle%s: %d px differ,"
+				    " first %d,%d (got %02X want %02X)\n",
+				    bounded ? " (bounded)" : "", bad, fx, fy,
+				    video_framebuffer[fy][fx], model[fy][fx]);
+			CHECK(bad == 0);
+		}
+	}
+
 	// THE COMMAND TRACE: what the renderer was told, byte by byte, with
 	// the role each byte played. Its whole purpose is to settle "did we
 	// draw it wrong, or were we told to draw it there?" -- a question that
