@@ -24,6 +24,9 @@
 #include "gfx_shadow.h"
 #include "cmd_trace.h"
 #include "fill_log.h"
+#include "gfx_bufs.h"
+#include "win_store.h"
+#include "pv_psram.h"
 #include "font_spleen_8x16.h"
 
 static int failures = 0;
@@ -3522,6 +3525,239 @@ int main()
 		CHECK(!vidterm_fill_pending());
 		settle(v);
 		CHECK(vid_link_idle());
+	}
+
+	// WITH NO PSRAM. Every PSRAM-backed store returns NULL when the probe
+	// finds no part, and every caller has a fallback -- all of it shipped in
+	// every image, none of it ever run until this: the shims always handed
+	// out arrays and the board always has its part. The probe has already
+	// been wrong on this board once (it reported 8 MB with chip select never
+	// assigned), so a probe that one day correctly says "none" must land on
+	// paths that have been exercised. Each check states the degradation the
+	// design promises, and the switch is put back before anything else runs.
+	{
+		static const uint8_t ESC = 0x1B;
+		pv_psram_set_absent(true);
+		v.write(STAT, VID_CTL_RESET);
+		settle(v);
+		v.write(DATA, 0x0C);
+		settle(v);
+		vidterm_set_origin(0, 0);
+		vidterm_set_clip(0, 0, FB_WIDTH, FB_HEIGHT);
+
+		// The switch is the firmware's one verdict, seen everywhere.
+		CHECK(win_store_slots() == 0u);
+		CHECK(gfx_shadow_base() == nullptr);
+		CHECK(gfx_bufpool_base() == nullptr);
+		CHECK(cmd_trace_base() == nullptr);
+		CHECK(fill_log_base() == nullptr);
+		CHECK(fill_seeds_base() == nullptr);
+
+		// Transparent text has nothing to restore, so it paints its
+		// background -- text hides graphics, as it did before the
+		// shadow existed -- and erasing a glyph leaves no strokes
+		// behind. Ghosting would be the failure: a transparent cell
+		// that neither restores nor paints.
+		{
+			const int col = 20, row = 6;
+			const int x = col * CHAR_W, y = row * CHAR_H;
+			// A panel-wide fill first, so the plane's uniform
+			// colour is 0x49 -- neither the transparent background
+			// (0x00) nor the bar. Cleared to 0x00, a blit that fell
+			// back to the uniform colour would be indistinguishable
+			// from one that painted the background, and did pass.
+			vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, 0x49);
+			vidterm_fill_rect(x - 8, y - 8, 40, 40, 0x6D);
+			vidterm_putch(col, row, 'M', 0xE1);	// white, transparent
+			vidterm_refresh();
+			int fg = 0, bg = 0, other = 0;
+			for (int gy = 0; gy < CHAR_H; gy++)
+				for (int gx = 0; gx < CHAR_W; gx++) {
+					const uint8_t p = video_framebuffer[y + gy][x + gx];
+					fg += p == 0xFF;
+					bg += p == 0x00;
+					other += p != 0xFF && p != 0x00;
+				}
+			CHECK(fg > 10 && bg > 10 && other == 0);
+			vidterm_putch(col, row, ' ', 0xE1);
+			vidterm_refresh();
+			int left = 0;
+			for (int gy = 0; gy < CHAR_H; gy++)
+				for (int gx = 0; gx < CHAR_W; gx++)
+					left += video_framebuffer[y + gy][x + gx] != 0x00;
+			CHECK(left == 0);
+		}
+
+		// A MIX MODE combines with what is on screen. With no graphics
+		// plane to consult, the framebuffer is the best account of the
+		// picture there is; combining with a flat colour instead would
+		// replace a drawn picture with a flat one. Both the span path
+		// (a fill) and the single-pixel path (a plot).
+		{
+			auto pic = [](int x, int y) {
+				return (uint8_t)(x * 7 + y * 13 + 1);
+			};
+			for (int y = 300; y < 320; y++)
+				for (int x = 100; x < 230; x++)
+					vidterm_plot(x, y, pic(x, y));
+			vidterm_set_logic(3);
+			vidterm_fill_rect(100, 300, 130, 10, 0x5A);	// span
+			for (int x = 100; x < 230; x++)
+				vidterm_plot(x, 315, 0xA5);		// pixel
+			vidterm_set_logic(0);
+			int bad = 0;
+			for (int y = 300; y < 320; y++)
+				for (int x = 100; x < 230; x++) {
+					uint8_t want = pic(x, y);
+					if (y < 310) want ^= 0x5A;
+					if (y == 315) want ^= 0xA5;
+					bad += video_framebuffer[y][x] != want;
+				}
+			if (bad)
+				fprintf(stderr, "  no PSRAM: %d mixed px wrong\n", bad);
+			CHECK(bad == 0);
+		}
+
+		// A FLOOD FILL has a 64-entry stack on its own frame, cannot be
+		// suspended, and so finishes inside the command: no hold, no
+		// job left pending. On a busy picture that small stack binds,
+		// and the dropped work is COUNTED; whatever is filled must lie
+		// inside the true region, never outside it.
+		{
+			static uint8_t pic0[FB_HEIGHT][FB_WIDTH];
+			vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, 0x31);
+			uint32_t seed = 777u;
+			auto rnd = [&seed](uint32_t n) {
+				seed = seed * 1103515245u + 12345u;
+				return (seed >> 8) % n;
+			};
+			for (int i = 0; i < 6000; i++)
+				vidterm_fill_rect((int)rnd(FB_WIDTH),
+				    (int)rnd(FB_HEIGHT), 1 + (int)rnd(9), 1, 0xC4);
+			vidterm_fill_rect(500, 240, 1, 1, 0x31);
+			memcpy(pic0, video_framebuffer, sizeof(pic0));
+			uint32_t ov0, un0, ov1, un1;
+			vidterm_fill_stats(&ov0, &un0);
+			CHECK(!vidterm_flood_fill_start(500, 240, 0x7E));
+			CHECK(!vidterm_fill_pending());
+			vidterm_fill_stats(&ov1, &un1);
+			CHECK(ov1 > ov0);		// the small stack bound, and said so
+			int outside = 0, filled = 0;
+			for (int y = 0; y < FB_HEIGHT; y++)
+				for (int x = 0; x < FB_WIDTH; x++)
+					if (video_framebuffer[y][x] == 0x7E) {
+						filled++;
+						outside += pic0[y][x] != 0x31;
+					}
+			CHECK(filled > 1000 && outside == 0);
+
+			// A two-pass fill (a mix mode) has no span log, so its
+			// spans stay SOLID -- visibly unpatterned, consistent,
+			// and counted -- rather than being lost.
+			vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, 0x31);
+			vidterm_fill_rect(300, 200, 50, 1, 0xC4);
+			vidterm_fill_rect(300, 240, 50, 1, 0xC4);
+			vidterm_fill_rect(300, 200, 1, 41, 0xC4);
+			vidterm_fill_rect(349, 200, 1, 41, 0xC4);
+			vidterm_set_logic(3);
+			vidterm_fill_stats(&ov0, &un0);
+			vidterm_flood_fill(320, 220, 0x7E);
+			vidterm_fill_stats(&ov1, &un1);
+			vidterm_set_logic(0);
+			CHECK(un1 - un0 == 39u);	// one per row of the box
+			int solid = 0;
+			for (int y = 201; y < 240; y++)
+				for (int x = 301; x < 349; x++)
+					solid += video_framebuffer[y][x] == 0x7E;
+			CHECK(solid == 39 * 48);
+			CHECK(video_framebuffer[199][320] == 0x31);	// contained
+		}
+
+		// A guest FFill through the link, on that same picture: it
+		// completes in the pass that consumed it, so there is nothing
+		// to hold and the link is idle straight after.
+		{
+			vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, 0x31);
+			v.write(DATA, ESC); v.write(DATA, 0x40);
+			v.write(DATA, 0); v.write(DATA, 10);
+			v.write(DATA, 0); v.write(DATA, 10);
+			v.write(DATA, ESC); v.write(DATA, 0x4F);
+			v.tick(1);
+			CHECK(!vidterm_fill_pending());
+			CHECK(video_framebuffer[FB_HEIGHT - 1][FB_WIDTH - 1] != 0x31);
+		}
+
+		// GET/PUT BUFFERS have no pool. A guest may still define one --
+		// the descriptor is SRAM -- but nothing can be stored in it, so
+		// a GetBlk captures nothing and a PutBlk draws nothing, rather
+		// than stamping whatever a null pointer happens to reach.
+		{
+			vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, 0x00);
+			vidterm_fill_rect(10, 10, 16, 16, 0x6D);
+			vidterm_buf_define(11, 1, 16u * 16u);
+			CHECK(!vidterm_buf_poke(11, 1, 0, 0xFF));
+			vidterm_buf_get(11, 1, 10, 10, 16, 16);
+			vidterm_buf_put(11, 1, 200, 200);
+			int drawn = 0;
+			for (int y = 200; y < 216; y++)
+				for (int x = 200; x < 216; x++)
+					drawn += video_framebuffer[y][x] != 0x00;
+			CHECK(drawn == 0);
+			// And a pattern or a font taken from such a buffer is
+			// refused: the plain colour and the built-in face stay.
+			vidterm_set_pattern(11, 1);
+			vidterm_fill_rect(300, 300, 8, 8, 0x5A);
+			CHECK(video_framebuffer[300][300] == 0x5A);
+			CHECK(video_framebuffer[307][307] == 0x5A);
+			vidterm_buf_kill(11, 1);
+		}
+
+		// PARKED WINDOWS have no store. A window not on display has
+		// nowhere to keep its text, so output to it is dropped -- NOT
+		// written onto the window that is showing -- and showing it
+		// later shows it empty, not whatever the previous window left
+		// in that rectangle.
+		{
+			v.write(STAT, VID_CTL_RESET);
+			settle(v);
+			v.write(DATA, 0x0C);
+			settle(v);
+			v.write(DATA, 0x02); v.write(DATA, 4 + 0x20);
+			v.write(DATA, 2 + 0x20); v.write(DATA, 'Z');	// root text
+			v.write(DATA, ESC); v.write(DATA, 0x20);
+			const uint8_t g[8] = { 1, 0, 4, 2, 10, 3, 0, 0 };
+			for (uint8_t i = 0; i < 8; i++) v.write(DATA, g[i]);
+			v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 0);
+			v.write(DATA, ESC); v.write(DATA, 0x21); v.write(DATA, 1);
+			v.write(DATA, 'Q');
+			settle(v);
+			CHECK(check_cell(4, 2, 'Z'));	// the root is untouched
+			CHECK(!check_cell(4, 2, 'Q'));
+			v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 1);
+			settle(v);
+			CHECK(!check_cell(4, 2, 'Q'));	// dropped, as documented
+			CHECK(check_cell(4, 2, ' '));	// shown EMPTY, not stale
+			v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 0);
+			v.write(DATA, ESC); v.write(DATA, 0x21); v.write(DATA, 0);
+			settle(v);
+		}
+
+		// THE TRACE has nowhere to live, and says so rather than
+		// reporting an empty history as if nothing had been sent.
+		{
+			uint32_t oldest, next;
+			vid_link_trace_span(&oldest, &next);
+			CHECK(oldest == next);
+			uint8_t b[4], c[4];
+			CHECK(vid_link_trace_read(0, 4, b, c) == 0u);
+		}
+
+		pv_psram_set_absent(false);
+		v.write(STAT, VID_CTL_RESET);
+		settle(v);
+		v.write(DATA, 0x0C);
+		settle(v);
+		CHECK(gfx_shadow_base() != nullptr);
 	}
 
 	// M0 loopback still works after M1 (the vlink test must keep passing).

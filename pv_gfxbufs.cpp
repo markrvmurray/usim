@@ -9,11 +9,13 @@
  */
 
 #include "gfx_bufs.h"
+#include "win_store.h"
 
 static uint8_t pool[GFX_BUFPOOL_BYTES];
 
 uint8_t *
 gfx_bufpool_base(void)
 {
-	return pool;
+	/* The probe's verdict, shared as the firmware shares it. */
+	return win_store_slots() == 0u ? NULL : pool;
 }

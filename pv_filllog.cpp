@@ -6,6 +6,7 @@
  */
 
 #include "fill_log.h"
+#include "win_store.h"
 
 static uint32_t spans[FILL_LOG_SPANS];
 static uint32_t seeds[FILL_SEEDS];
@@ -13,11 +14,11 @@ static uint32_t seeds[FILL_SEEDS];
 uint32_t *
 fill_log_base(void)
 {
-	return spans;
+	return win_store_slots() == 0u ? NULL : spans;
 }
 
 uint32_t *
 fill_seeds_base(void)
 {
-	return seeds;
+	return win_store_slots() == 0u ? NULL : seeds;
 }

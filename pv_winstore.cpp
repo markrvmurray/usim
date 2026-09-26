@@ -16,10 +16,18 @@
 #include <stdio.h>
 
 #include "win_store.h"
+#include "pv_psram.h"
 
 #define WIN_STORE_SIM_SLOTS  16u
 
 static uint8_t slots[WIN_STORE_SIM_SLOTS][WIN_STORE_SLOT_BYTES];
+static bool    absent;		/* the probe's verdict, as a test sets it */
+
+void
+pv_psram_set_absent(bool a)
+{
+	absent = a;
+}
 
 bool
 win_store_init(void)
@@ -30,18 +38,19 @@ win_store_init(void)
 unsigned
 win_store_slots(void)
 {
-	return WIN_STORE_SIM_SLOTS;
+	return absent ? 0u : WIN_STORE_SIM_SLOTS;
 }
 
 uint8_t *
 win_store_slot(unsigned i)
 {
-	return i < WIN_STORE_SIM_SLOTS ? slots[i] : NULL;
+	return i < win_store_slots() ? slots[i] : NULL;
 }
 
 void
 win_store_print_status(void)
 {
-	printf("Windows:     %u parked screens of %u B (simulated)\n",
-	       WIN_STORE_SIM_SLOTS, WIN_STORE_SLOT_BYTES);
+	printf("Windows:     %u parked screens of %u B (simulated%s)\n",
+	       win_store_slots(), WIN_STORE_SLOT_BYTES,
+	       absent ? ", PSRAM absent" : "");
 }

@@ -7,11 +7,13 @@
  */
 
 #include "cmd_trace.h"
+#include "win_store.h"
 
 alignas(4) static uint8_t ring[CMD_TRACE_BYTES];
 
 uint8_t *
 cmd_trace_base(void)
 {
-	return ring;
+	/* The probe's verdict, shared as the firmware shares it. */
+	return win_store_slots() == 0u ? NULL : ring;
 }
