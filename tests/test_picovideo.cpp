@@ -3006,6 +3006,17 @@ int main()
 				model_px(x, y, 0xFF);
 		compare_both("F partial span at x=0, undrawn rows");
 
+		// G: the same partial span at x = 0, PLAIN (no pattern, no mix),
+		// which goes through the ordinary fill path rather than the span
+		// writer. It gained the same full-row shortcut, so it needs the
+		// same proof that the shortcut does not fire on a partial row.
+		background();
+		vidterm_fill_rect(0, 20, 40, 3, 0x6B);
+		for (int y = 20; y < 23; y++)
+			for (int x = 0; x < 40; x++)
+				model_px(x, y, 0x6B);
+		compare_both("G plain partial span at x=0, undrawn rows");
+
 		// E: a patterned flood fill with OR, in a fenced rectangle of
 		// the implicit colour, so the region is known exactly.
 		background();
