@@ -2275,6 +2275,93 @@ int main()
 		CHECK(moved == 0);
 	}
 
+	// PutBlk UNDER A MIX MODE. This exists because the ordinary stamp is
+	// now a bulk row copy -- one memcpy in from the buffer, one out to the
+	// shadow -- while a mix mode makes every pixel depend on what is
+	// already there, so it must still take the per-pixel path. That split
+	// means there are two routes through PutBlk where there was one, and
+	// the bulk one cannot honour XOR by construction the way the old
+	// per-pixel loop did. Nothing here previously combined LSet with
+	// PutBlk, so the slower route was reachable and untested: precisely
+	// the shape of gap that lets an optimisation quietly change meaning.
+	{
+		static const uint8_t ESC = 0x1B;
+
+		v.write(STAT, VID_CTL_RESET);
+		v.tick(1);
+		v.write(DATA, 0x0C);
+		v.tick(1);
+
+		// A 4x4 buffer of a single known value.
+		v.write(DATA, ESC); v.write(DATA, 0x29);
+		v.write(DATA, 3); v.write(DATA, 1);
+		v.write(DATA, 0); v.write(DATA, 16);
+		v.write(DATA, ESC); v.write(DATA, 0x2B);
+		v.write(DATA, 3); v.write(DATA, 1); v.write(DATA, 1);
+		v.write(DATA, 0); v.write(DATA, 4);
+		v.write(DATA, 0); v.write(DATA, 4);
+		v.write(DATA, 0); v.write(DATA, 16);
+		for (int i = 0; i < 16; i++)
+			v.write(DATA, 0x0F);
+		v.tick(1);
+
+		// Lay a known background down with a bar, so the mix has
+		// something real to combine against.
+		v.write(DATA, ESC); v.write(DATA, 0x32); v.write(DATA, 0x33);
+		v.write(DATA, ESC); v.write(DATA, 0x40);
+		v.write(DATA, 0); v.write(DATA, 200);
+		v.write(DATA, 0); v.write(DATA, 200);
+		v.write(DATA, ESC); v.write(DATA, 0x4B);
+		v.write(DATA, 0); v.write(DATA, 210);
+		v.write(DATA, 0); v.write(DATA, 210);
+		v.tick(1);
+		const uint8_t bg = video_framebuffer[202][202];
+		CHECK(bg != 0x0F);	// or the XOR below proves nothing
+
+		// Replace mode first: the stamp lands verbatim.
+		v.write(DATA, ESC); v.write(DATA, 0x2F); v.write(DATA, 0);
+		v.write(DATA, ESC); v.write(DATA, 0x2D);
+		v.write(DATA, 3); v.write(DATA, 1);
+		v.write(DATA, 0); v.write(DATA, 202);
+		v.write(DATA, 0); v.write(DATA, 202);
+		v.tick(1);
+		CHECK(video_framebuffer[202][202] == 0x0F);
+		CHECK(video_framebuffer[205][205] == 0x0F);
+
+		// Put the background back, then XOR the same stamp over it.
+		v.write(DATA, ESC); v.write(DATA, 0x40);
+		v.write(DATA, 0); v.write(DATA, 200);
+		v.write(DATA, 0); v.write(DATA, 200);
+		v.write(DATA, ESC); v.write(DATA, 0x4B);
+		v.write(DATA, 0); v.write(DATA, 210);
+		v.write(DATA, 0); v.write(DATA, 210);
+		v.tick(1);
+		v.write(DATA, ESC); v.write(DATA, 0x2F); v.write(DATA, 3);
+		v.write(DATA, ESC); v.write(DATA, 0x2D);
+		v.write(DATA, 3); v.write(DATA, 1);
+		v.write(DATA, 0); v.write(DATA, 202);
+		v.write(DATA, 0); v.write(DATA, 202);
+		v.tick(1);
+		// XOR combines against the GRAPHICS PLANE, which is what the
+		// bar wrote, so the result is a value that is neither operand.
+		CHECK(video_framebuffer[202][202] == (uint8_t)(bg ^ 0x0F));
+		CHECK(video_framebuffer[205][205] == (uint8_t)(bg ^ 0x0F));
+
+		// And XOR twice is identity -- the property that says the mix
+		// really read what was there rather than just writing
+		// something different.
+		v.write(DATA, ESC); v.write(DATA, 0x2D);
+		v.write(DATA, 3); v.write(DATA, 1);
+		v.write(DATA, 0); v.write(DATA, 202);
+		v.write(DATA, 0); v.write(DATA, 202);
+		v.tick(1);
+		CHECK(video_framebuffer[202][202] == bg);
+		CHECK(video_framebuffer[205][205] == bg);
+
+		v.write(DATA, ESC); v.write(DATA, 0x2F); v.write(DATA, 0);
+		v.tick(1);
+	}
+
 	// M0 loopback still works after M1 (the vlink test must keep passing).
 	v.write(STAT, VID_CTL_LOOPBACK);
 	v.write(DATA, 0x55);
