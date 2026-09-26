@@ -22,6 +22,7 @@
 #include "video.h"
 #include "video_render.h"
 #include "gfx_shadow.h"
+#include "cmd_trace.h"
 #include "font_spleen_8x16.h"
 
 static int failures = 0;
@@ -2593,6 +2594,118 @@ int main()
 			CHECK(bad_bg == 0);
 			CHECK(fg_seen > 10);	// the glyph really drew
 		}
+	}
+
+	// THE COMMAND TRACE: what the renderer was told, byte by byte, with
+	// the role each byte played. Its whole purpose is to settle "did we
+	// draw it wrong, or were we told to draw it there?" -- a question that
+	// cost three rounds and two wrong diagnoses on one wgfx page. So the
+	// test is not only that bytes are recorded, but that a LOST byte is
+	// visible in the record.
+	{
+		static const uint8_t ESC = 0x1B;
+		const uint8_t S = VID_BYTE_START, O = VID_BYTE_SUBCODE,
+		    P = VID_BYTE_PARAM, Y = VID_BYTE_PAYLOAD;
+		uint32_t oldest, next;
+
+		v.write(STAT, VID_CTL_RESET);
+		settle(v);
+		vid_link_trace_span(&oldest, &next);
+		const uint32_t base = next;
+
+		// Text, a cursor move, a well-formed PutBlk, text.
+		const uint8_t seq[] = { 'A', 0x02, 0x25, 0x2A,
+		    ESC, 0x2D, 0x01, 0x01, 0x00, 0x28, 0x00, 0x3C, 'B' };
+		const uint8_t cls[] = { S, S, P, P,
+		    S, O, P, P, P, P, P, P, S };
+		for (uint8_t b : seq)
+			v.write(DATA, b);
+		settle(v);
+
+		vid_link_trace_span(&oldest, &next);
+		CHECK(next == base + sizeof(seq));	// offsets are "cons"
+		uint8_t gb[64] = { 0 }, gc[64] = { 0 };	// zeroed: a short read fails the checks below rather than reading garbage
+		uint32_t got = vid_link_trace_read(base, sizeof(seq), gb, gc);
+		CHECK(got == sizeof(seq));
+		int wrong = 0;
+		for (unsigned i = 0; i < sizeof(seq); i++)
+			if (gb[i] != seq[i] || gc[i] != cls[i]) {
+				fprintf(stderr, "  trace[%u]: got %02X/%u want"
+				    " %02X/%u\n", i, gb[i], gc[i], seq[i],
+				    cls[i]);
+				wrong++;
+			}
+		CHECK(wrong == 0);
+
+		// GPLoad's streamed data is PAYLOAD, and the stream is back in
+		// step afterwards: the byte after the payload starts afresh.
+		const uint8_t load[] = { ESC, 0x29, 5, 1, 0, 4,		// DefGPB
+		    ESC, 0x2B, 5, 1, 1, 0, 2, 0, 2, 0, 4,		// GPLoad
+		    0x11, 0x22, 0x33, 0x44, 'C' };
+		const uint8_t lcls[] = { S, O, P, P, P, P,
+		    S, O, P, P, P, P, P, P, P, P, P,
+		    Y, Y, Y, Y, S };
+		const uint32_t lbase = next;
+		for (uint8_t b : load)
+			v.write(DATA, b);
+		settle(v);
+		got = vid_link_trace_read(lbase, sizeof(load), gb, gc);
+		CHECK(got == sizeof(load));
+		wrong = 0;
+		for (unsigned i = 0; i < sizeof(load); i++)
+			if (gb[i] != load[i] || gc[i] != lcls[i])
+				wrong++;
+		CHECK(wrong == 0);
+
+		// A LOST BYTE. A PutBlk missing one coordinate byte, then text:
+		// the 'D' is consumed as the missing sixth parameter. The trace
+		// must show exactly that -- a printable character marked as a
+		// PARAMETER -- because that mark is how a dropped byte is found.
+		vid_link_trace_span(&oldest, &next);
+		const uint32_t dbase = next;
+		const uint8_t lost[] = { ESC, 0x2D, 0x05, 0x01, 0x00, 0x28,
+		    0x00, 'D', 'E' };
+		for (uint8_t b : lost)
+			v.write(DATA, b);
+		settle(v);
+		got = vid_link_trace_read(dbase, sizeof(lost), gb, gc);
+		CHECK(got == sizeof(lost));
+		CHECK(gb[7] == 'D');
+		CHECK(gc[7] == P);	// swallowed as a coordinate: the tell
+		CHECK(gc[8] == S);	// and the stream resumes after it
+
+		// Loopback bytes are never interpreted, and are marked so.
+		v.write(STAT, VID_CTL_LOOPBACK);
+		settle(v);
+		vid_link_trace_span(&oldest, &next);
+		v.write(DATA, 0x5A);
+		v.tick(1);
+		got = vid_link_trace_read(next, 1, gb, gc);
+		CHECK(got == 1);
+		CHECK(gb[0] == 0x5A);
+		CHECK(gc[0] == VID_BYTE_LOOPBACK);
+		(void)v.read(DATA);		// drain the echo
+		v.write(STAT, VID_CTL_RESET);
+		settle(v);
+
+		// WRAP. After more than a ring's worth, the oldest offset still
+		// held is exactly one ring behind, anything older is refused
+		// rather than returned as stale data, and the newest is right.
+		// $0E is an ignored control: cheap to send, still recorded.
+		for (uint32_t i = 0; i < CMD_TRACE_ENTRIES + 100u; i++) {
+			v.write(DATA, 0x0E);
+			if ((i & 511u) == 511u)
+				settle(v);
+		}
+		v.write(DATA, 'Q');
+		settle(v);
+		vid_link_trace_span(&oldest, &next);
+		CHECK(next - oldest == CMD_TRACE_ENTRIES);
+		CHECK(vid_link_trace_read(oldest - 1u, 1, gb, gc) == 0);
+		CHECK(vid_link_trace_read(next - 1u, 1, gb, gc) == 1);
+		CHECK(gb[0] == 'Q');
+		CHECK(gc[0] == S);
+		CHECK(vid_link_trace_read(next, 1, gb, gc) == 0); // not yet
 	}
 
 	// M0 loopback still works after M1 (the vlink test must keep passing).

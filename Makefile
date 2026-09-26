@@ -37,7 +37,7 @@ LIB		= libusim.a
 PICOVIDEO	?= $(HOME)/Documents/PICO/pico-thing-video
 SDL_CFLAGS	:= $(shell pkg-config --cflags sdl2 | sed 's/-I/-isystem /g')
 SDL_LIBS	:= $(shell pkg-config --libs sdl2) -lz
-PV_OBJS		= picovideo.o picovideo_display.o pv_render.o pv_link.o pv_registers.o pv_console.o pv_winstore.o pv_gfxshadow.o pv_gfxbufs.o
+PV_OBJS		= picovideo.o picovideo_display.o pv_render.o pv_link.o pv_registers.o pv_console.o pv_winstore.o pv_gfxshadow.o pv_gfxbufs.o pv_cmdtrace.o
 
 all: $(BIN)
 
@@ -108,6 +108,9 @@ pv_gfxbufs.o: pv_gfxbufs.cpp
 pv_gfxshadow.o: pv_gfxshadow.cpp
 	$(CXX) -I$(PICOVIDEO)/include -Ipico_shim $(CPPFLAGS) $(CCFLAGS) -c -o $(@) $<
 
+pv_cmdtrace.o: pv_cmdtrace.cpp
+	$(CXX) -I$(PICOVIDEO)/include -Ipico_shim $(CPPFLAGS) $(CCFLAGS) -c -o $(@) $<
+
 pv_winstore.o: pv_winstore.cpp
 	$(CXX) -I$(PICOVIDEO)/include -Ipico_shim $(CPPFLAGS) $(CCFLAGS) -c -o $(@) $<
 
@@ -162,8 +165,8 @@ tests/test_picoide: tests/test_picoide.cpp $(LIB)
 
 # Links the real firmware link/renderer objects; the SDL display TU is
 # replaced by stubs inside the test, so no SDL dependency here.
-tests/test_picovideo: tests/test_picovideo.cpp picovideo.o pv_link.o pv_registers.o pv_render.o pv_console.o pv_hidcook.o pv_winstore.o pv_gfxshadow.o pv_gfxbufs.o $(LIB)
-	$(CXX) -I$(PICOVIDEO)/include -Ipico_shim $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_picovideo.cpp picovideo.o pv_link.o pv_registers.o pv_render.o pv_console.o pv_hidcook.o pv_winstore.o pv_gfxshadow.o pv_gfxbufs.o -L. -lusim -o $(@)
+tests/test_picovideo: tests/test_picovideo.cpp picovideo.o pv_link.o pv_registers.o pv_render.o pv_console.o pv_hidcook.o pv_winstore.o pv_gfxshadow.o pv_gfxbufs.o pv_cmdtrace.o $(LIB)
+	$(CXX) -I$(PICOVIDEO)/include -Ipico_shim $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_picovideo.cpp picovideo.o pv_link.o pv_registers.o pv_render.o pv_console.o pv_hidcook.o pv_winstore.o pv_gfxshadow.o pv_gfxbufs.o pv_cmdtrace.o -L. -lusim -o $(@)
 
 # Per-instruction timing, both MD modes. Unlike the two aggregate gates
 # below, this one names the instruction that moved, and it is the only
