@@ -2826,6 +2826,210 @@ int main()
 		vidterm_buf_kill(8, 2);
 	}
 
+	// THE SPAN WRITER AGAINST AN ORACLE (VID-035). Patterned and mixed
+	// fills, hlines, flood fills and PutBlks now compose a span at a time
+	// instead of a pixel at a time. The rule must not move by a single
+	// pixel, so a MODEL plane applies it by its written definition --
+	// colour AND pattern (window-anchored, per pixel), then the mix mode
+	// against the graphics plane -- and the renderer must agree with it on
+	// BOTH planes: the framebuffer directly, then the shadow, by refreshing
+	// transparent spaces over everything so the screen shows the shadow.
+	//
+	// The cases are the ones the span code has to get right that the old
+	// per-pixel code got right for free: every mix mode; spans crossing the
+	// 64-byte chunk boundary at an odd start; a window origin with drawing
+	// left of it; drawn (resident) and undrawn (implicit, non-zero uniform)
+	// background rows in the same span of rows; a pattern in the SRAM cache,
+	// one in PSRAM narrower than a chunk, and one wider; a clipped PutBlk
+	// with a varying source; and a flood fill.
+	{
+		static uint8_t model[FB_HEIGHT][FB_WIDTH];
+		static const uint8_t U = 0x49;		// implicit rows' colour
+		static const uint8_t ODD[6] = { 0xF0, 0x0F, 0xCC, 0x33, 0xAA,
+		    0x55 };
+		int ox = 0, oy = 0, pw = 0, ph = 0, logic = 0;
+		const uint8_t *pat = nullptr;
+		static uint8_t pbuf[400];
+
+		auto mix = [&](uint8_t b, uint8_t c) -> uint8_t {
+			return logic == 1 ? (uint8_t)(b & c) :
+			    logic == 2 ? (uint8_t)(b | c) :
+			    logic == 3 ? (uint8_t)(b ^ c) : c;
+		};
+		auto wrap = [](int v, int m) { v %= m; return v < 0 ? v + m : v; };
+		auto model_px = [&](int px, int py, uint8_t c) {
+			if (pat != nullptr)
+				c &= pat[wrap(py - oy, ph) * pw + wrap(px - ox, pw)];
+			model[py][px] = mix(model[py][px], c);
+		};
+		auto set_pat = [&](uint8_t id, int w, int h,
+		    uint8_t (*f)(int, int)) {
+			vidterm_buf_define(9, id, (uint32_t)(w * h));
+			vidterm_buf_shape(9, id, (uint16_t)w, (uint16_t)h);
+			for (int i = 0; i < w * h; i++) {
+				pbuf[i] = f(i % w, i / w);
+				vidterm_buf_poke(9, id, (uint32_t)i, pbuf[i]);
+			}
+			vidterm_set_pattern(9, id);
+			pat = pbuf; pw = w; ph = h;
+		};
+		auto background = [&]() {
+			vidterm_set_pattern(0, 0);
+			pat = nullptr;
+			vidterm_set_logic(0); logic = 0;
+			vidterm_set_origin(0, 0); ox = oy = 0;
+			vidterm_set_clip(0, 0, FB_WIDTH, FB_HEIGHT);
+			vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, U);
+			for (int y = 0; y < FB_HEIGHT; y++)
+				for (int x = 0; x < FB_WIDTH; x++)
+					model[y][x] = U;
+			// Rows 100..199 drawn (resident) with a gradient, so
+			// a span of rows 90..210 crosses both kinds.
+			for (int y = 100; y < 200; y++) {
+				const uint8_t c = (uint8_t)(y * 7 + 3);
+				vidterm_fill_rect(0, y, FB_WIDTH, 1, c);
+				for (int x = 0; x < FB_WIDTH; x++)
+					model[y][x] = c;
+			}
+		};
+		auto compare = [&](const char *what) {
+			int bad = 0, fx = -1, fy = -1;
+			for (int y = 0; y < FB_HEIGHT; y++)
+				for (int x = 0; x < FB_WIDTH; x++)
+					if (video_framebuffer[y][x] != model[y][x]) {
+						if (!bad) { fx = x; fy = y; }
+						bad++;
+					}
+			if (bad)
+				fprintf(stderr, "  span oracle, %s: %d px differ,"
+				    " first %d,%d (got %02X want %02X)\n", what,
+				    bad, fx, fy, video_framebuffer[fy][fx],
+				    model[fy][fx]);
+			CHECK(bad == 0);
+		};
+		auto compare_both = [&](const char *what) {
+			compare(what);
+			// Transparent spaces everywhere: every cell restores
+			// the graphics plane, so the screen IS the shadow.
+			vidterm_set_pattern(0, 0);
+			(void)vidterm_clear(' ', 0x01u);
+			vidterm_refresh();
+			char w2[80];
+			snprintf(w2, sizeof(w2), "%s (shadow)", what);
+			compare(w2);
+		};
+
+		v.write(STAT, VID_CTL_RESET);
+		settle(v);
+
+		// A: small cached pattern, XOR, window at 100,51, a rectangle
+		// starting LEFT of the origin and 150 wide (crosses two chunk
+		// boundaries), over implicit and resident rows.
+		background();
+		set_pat(1, 3, 2, [](int x, int y) { return ODD[y * 3 + x]; });
+		vidterm_set_origin(100, 51); ox = 100; oy = 51;
+		// An OPAQUE glyph inside the target area first, so the
+		// framebuffer there differs from the graphics plane: a mix that
+		// read the framebuffer instead of the plane would combine with
+		// the glyph and disagree with the model. Without this the two
+		// are identical and that mistake is invisible.
+		vidterm_putch(10, 6, 'M', 0xE0u);
+		vidterm_refresh();
+		vidterm_set_logic(3); logic = 3;
+		// Starts 62 LEFT and 10 ABOVE the origin. Both offsets are
+		// chosen so the wrap is really exercised: a first version began
+		// 63 to the left, a multiple of the tile's width of 3, so the
+		// negative remainder never occurred and a missing wrap passed.
+		vidterm_fill_rect(-62, -10, 150, 171, 0xE7);
+		for (int y = 51 - 10; y < 51 - 10 + 171; y++)
+			for (int x = 100 - 62; x < 100 - 62 + 150; x++)
+				model_px(x, y, 0xE7);
+		compare_both("A cached pattern, XOR");
+
+		// B: a pattern too big for the SRAM cache but narrower than a
+		// chunk (20x16 = 320 B, read a row at a time), AND.
+		background();
+		set_pat(2, 20, 16, [](int x, int y) {
+			return (uint8_t)(x * 13 + y * 29 + 7); });
+		vidterm_set_logic(1); logic = 1;
+		vidterm_fill_rect(5, 95, 301, 20, 0xDB);
+		for (int y = 95; y < 115; y++)
+			for (int x = 5; x < 306; x++)
+				model_px(x, y, 0xDB);
+		compare_both("B PSRAM pattern < chunk, AND");
+
+		// C: a pattern wider than a chunk (100x3 = 300 B), OR.
+		background();
+		set_pat(3, 100, 3, [](int x, int y) {
+			return (uint8_t)(x * 5 + y * 71 + 1); });
+		vidterm_set_logic(2); logic = 2;
+		vidterm_fill_rect(1, 150, 257, 60, 0x1C);
+		for (int y = 150; y < 210; y++)
+			for (int x = 1; x < 258; x++)
+				model_px(x, y, 0x1C);
+		compare_both("C PSRAM pattern > chunk, OR");
+
+		// D: a PutBlk with a varying source, patterned and XORed,
+		// through a window, CLIPPED on the right.
+		background();
+		set_pat(4, 3, 2, [](int x, int y) { return ODD[y * 3 + x]; });
+		vidterm_set_origin(100, 51); ox = 100; oy = 51;
+		vidterm_set_clip(0, 0, 170, FB_HEIGHT);
+		vidterm_set_logic(3); logic = 3;
+		vidterm_buf_define(9, 7, 90 * 5);
+		vidterm_buf_shape(9, 7, 90, 5);
+		uint8_t srcb[90 * 5];
+		for (int i = 0; i < 90 * 5; i++) {
+			srcb[i] = (uint8_t)(i * 3 + (i / 90) * 17);
+			vidterm_buf_poke(9, 7, (uint32_t)i, srcb[i]);
+		}
+		vidterm_buf_put(9, 7, 5, 44);	// abs 105,95; clipped at 170
+		for (int r = 0; r < 5; r++)
+			for (int c = 0; c < 90; c++) {
+				const int x = 105 + c, y = 95 + r;
+				if (x < 170)
+					model_px(x, y, srcb[r * 90 + c]);
+			}
+		vidterm_set_clip(0, 0, FB_WIDTH, FB_HEIGHT);
+		compare_both("D clipped PutBlk, pattern, XOR");
+
+		// F: a PARTIAL span starting at x = 0 over UNDRAWN rows. The
+		// full-row shortcut (mark the shadow row real without filling
+		// it, since the span overwrites it all) must not fire here: the
+		// rest of each row has to become the uniform colour, and if it
+		// did fire, whatever the shadow array last held would show.
+		background();
+		set_pat(6, 3, 2, [](int x, int y) { return ODD[y * 3 + x]; });
+		vidterm_fill_rect(0, 20, 40, 3, 0xFF);
+		for (int y = 20; y < 23; y++)
+			for (int x = 0; x < 40; x++)
+				model_px(x, y, 0xFF);
+		compare_both("F partial span at x=0, undrawn rows");
+
+		// E: a patterned flood fill with OR, in a fenced rectangle of
+		// the implicit colour, so the region is known exactly.
+		background();
+		vidterm_fill_rect(300, 250, 200, 1, 0x00);
+		vidterm_fill_rect(300, 330, 200, 1, 0x00);
+		vidterm_fill_rect(300, 250, 1, 81, 0x00);
+		vidterm_fill_rect(499, 250, 1, 81, 0x00);
+		for (int x = 300; x < 500; x++) model[250][x] = model[330][x] = 0;
+		for (int y = 250; y < 331; y++) model[y][300] = model[y][499] = 0;
+		set_pat(5, 3, 2, [](int x, int y) { return ODD[y * 3 + x]; });
+		vidterm_set_logic(2); logic = 2;
+		vidterm_flood_fill(400, 290, 0x92);
+		for (int y = 251; y < 330; y++)
+			for (int x = 301; x < 499; x++)
+				model_px(x, y, 0x92);
+		compare_both("E patterned OR flood fill");
+
+		vidterm_set_logic(0);
+		vidterm_set_pattern(0, 0);
+		vidterm_set_origin(0, 0);
+		for (uint8_t id = 1; id <= 7; id++)
+			vidterm_buf_kill(9, id);
+	}
+
 	// M0 loopback still works after M1 (the vlink test must keep passing).
 	v.write(STAT, VID_CTL_LOOPBACK);
 	v.write(DATA, 0x55);
