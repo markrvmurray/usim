@@ -2362,6 +2362,84 @@ int main()
 		v.tick(1);
 	}
 
+	// A PANEL-WIDE FILL MUST STILL BE VISIBLE TO GetBlk. The fill now
+	// short-circuits: covering the whole panel makes the graphics shadow
+	// uniform by definition, so it sets one colour and marks every row
+	// implicit instead of writing ~960 KB across the QMI (measured at
+	// 24 ms on hardware, one and a half frames). That is only valid if
+	// "uniform" and "filled" are indistinguishable to every reader of the
+	// shadow -- and GetBlk is the reader that would notice, because it is
+	// the one that copies the plane out rather than merely compositing
+	// against it.
+	//
+	// So: fill the panel, capture a block from the middle of it, and every
+	// byte must be the fill colour. If the short-circuit ever diverges
+	// from the fill it replaced, this is where it shows.
+	{
+		static const uint8_t ESC = 0x1B;
+		static const uint8_t C = 0x6Du;	// not 0 and not the default
+		static const int RW = 40, RH = 8;
+
+		v.write(STAT, VID_CTL_RESET);
+		v.tick(1);
+		v.write(DATA, 0x0C);
+		v.tick(1);
+
+		vidterm_set_origin(0, 0);
+		vidterm_set_clip(0, 0, FB_WIDTH, FB_HEIGHT);
+		vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, C);
+
+		// The framebuffer obviously holds it; the shadow is the question.
+		CHECK(video_framebuffer[0][0] == C);
+		CHECK(video_framebuffer[FB_HEIGHT - 1][FB_WIDTH - 1] == C);
+
+		v.write(DATA, ESC); v.write(DATA, 0x29);
+		v.write(DATA, 4); v.write(DATA, 1);
+		v.write(DATA, (uint8_t)((RW * RH) >> 8));
+		v.write(DATA, (uint8_t)((RW * RH) & 0xFF));
+		v.write(DATA, ESC); v.write(DATA, 0x2C);
+		v.write(DATA, 4); v.write(DATA, 1);
+		v.write(DATA, 1); v.write(DATA, 0x00);	// x 256
+		v.write(DATA, 0); v.write(DATA, 200);	// y 200
+		v.write(DATA, 0); v.write(DATA, (uint8_t)RW);
+		v.write(DATA, 0); v.write(DATA, (uint8_t)RH);
+		v.tick(1);
+		// Put it back somewhere else: what comes out of the buffer is
+		// what the shadow gave it, so the destination reveals it.
+		v.write(DATA, ESC); v.write(DATA, 0x2D);
+		v.write(DATA, 4); v.write(DATA, 1);
+		v.write(DATA, 0); v.write(DATA, 8);	// x 8
+		v.write(DATA, 0); v.write(DATA, 8);	// y 8
+		v.tick(1);
+		int wrong = 0;
+		for (int r = 0; r < RH; r++)
+			for (int c = 0; c < RW; c++)
+				if (video_framebuffer[8 + r][8 + c] != C)
+					wrong++;
+		if (wrong != 0)
+			fprintf(stderr, "  panel fill: %d of %d captured bytes"
+				" were not the fill colour (got %02X)\n", wrong,
+				RW * RH, video_framebuffer[8][8]);
+		CHECK(wrong == 0);
+
+		// And a PART-panel fill afterwards must not be swallowed by the
+		// same shortcut: it has to reach the shadow for real, or the
+		// panel-wide case would have broken every smaller fill.
+		vidterm_fill_rect(100, 100, 64, 16, 0x24u);
+		v.write(DATA, ESC); v.write(DATA, 0x2C);
+		v.write(DATA, 4); v.write(DATA, 1);
+		v.write(DATA, 0); v.write(DATA, 100);	// x 100
+		v.write(DATA, 0); v.write(DATA, 100);	// y 100
+		v.write(DATA, 0); v.write(DATA, (uint8_t)RW);
+		v.write(DATA, 0); v.write(DATA, (uint8_t)RH);
+		v.write(DATA, ESC); v.write(DATA, 0x2D);
+		v.write(DATA, 4); v.write(DATA, 1);
+		v.write(DATA, 1); v.write(DATA, 0x90);	// x 400
+		v.write(DATA, 0); v.write(DATA, 8);	// y 8
+		v.tick(1);
+		CHECK(video_framebuffer[8][400] == 0x24u);
+	}
+
 	// M0 loopback still works after M1 (the vlink test must keep passing).
 	v.write(STAT, VID_CTL_LOOPBACK);
 	v.write(DATA, 0x55);
