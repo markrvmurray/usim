@@ -3282,16 +3282,17 @@ int main()
 		compare("XOR, no pattern");
 	}
 
-	// FLOOD FILL'S REGION SEARCH AGAINST THE ALGORITHM IT REPLACED. The
-	// search compares a word at a time, so its answers -- where a run
-	// starts and ends, where the next target pixel is -- must be exactly
-	// what the byte-at-a-time search gave, at every alignment. The oracle
-	// here IS that byte-wise scanline fill, seed stack and bound included,
-	// run over a model: the same answers mean the same seeds in the same
-	// order, so the two must agree pixel for pixel even where the bounded
-	// stack overflows, and in the overflow count too. The boundary is
-	// thousands of short random walls, so runs begin and end at every byte
-	// of a word, and the clip is off the word grid on both sides.
+	// FLOOD FILL AGAINST TWO ORACLES, over a busy picture. The fill searches
+	// a word at a time and stacks parent segments, scanning back towards
+	// the row it came from only where a run leaks past the parent -- so
+	// its seeds and their order are its own. What must not change is the
+	// RESULT. The first oracle is the plain byte-wise seed-point scanline
+	// fill, run over a copy of the screen; the second is an independent
+	// 4-connected flood. Both planes must match the first, the second must
+	// agree the region is complete, and nothing may be dropped. The
+	// boundary is thousands of short random walls, so runs begin and end
+	// at every byte of a word and leak past their parents constantly, and
+	// the clip is off the word grid on both sides.
 	{
 		static uint8_t ref[FB_HEIGHT][FB_WIDTH];
 		static const uint8_t U = 0x31u, W = 0xC4u, C = 0x7Eu;
