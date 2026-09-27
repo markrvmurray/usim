@@ -734,14 +734,40 @@ int main()
 		kbd(0x00, 0x3B); released(); CHECK(typed() == 0x81);   // F2
 		kbd(0x00, 0x45); released(); CHECK(typed() == 0x8B);   // F12
 
-		// The arrows send the OS-9 cursor bytes -- what ded and the
-		// Wildbits PS/2 driver read -- whatever the modifiers.
-		kbd(0x00, 0x52); released(); CHECK(typed() == 0x0C);   // up
-		kbd(0x00, 0x51); released(); CHECK(typed() == 0x0A);   // down
-		kbd(0x00, 0x50); released(); CHECK(typed() == 0x08);   // left
-		kbd(0x00, 0x4F); released(); CHECK(typed() == 0x09);   // right
-		kbd(0x02, 0x52); released(); CHECK(typed() == 0x0C);   // Shift
-		kbd(0x01, 0x50); released(); CHECK(typed() == 0x08);   // Ctrl
+		// The arrows send the CoCo keyboard's bytes, from vtio's KeyTbl:
+		// plain, Shift and Ctrl each have their own column, and minted
+		// pages, deletes and jumps to line ends with the modified ones.
+		// Every arrow in every column, with left and right Shift and
+		// Ctrl both, and Shift winning over Ctrl as it does in vtio. A
+		// first version ignored modifiers (following the Wildbits
+		// driver) and this test asserted that; it was wrong.
+		{
+			static const struct { uint8_t usage; uint8_t col[3]; } AR[] = {
+				{ 0x52, { 0x0C, 0x1C, 0x13 } },	// up
+				{ 0x51, { 0x0A, 0x1A, 0x12 } },	// down
+				{ 0x50, { 0x08, 0x18, 0x10 } },	// left
+				{ 0x4F, { 0x09, 0x19, 0x11 } },	// right
+			};
+			static const struct { uint8_t mod; int col; } MODS[] = {
+				{ 0x00, 0 },
+				{ 0x02, 1 }, { 0x20, 1 },	// left, right Shift
+				{ 0x01, 2 }, { 0x10, 2 },	// left, right Ctrl
+				{ 0x03, 1 },			// both: Shift wins
+			};
+			int bad = 0;
+			for (const auto &a : AR)
+				for (const auto &m : MODS) {
+					kbd(m.mod, a.usage); released();
+					const int got = typed();
+					if (got != a.col[m.col]) {
+						fprintf(stderr, "  arrow 0x%02X mod 0x%02X"
+						    " sent %d, not %d\n", a.usage,
+						    m.mod, got, a.col[m.col]);
+						bad++;
+					}
+				}
+			CHECK(bad == 0);
+		}
 
 		// The keypad, Num Lock on (the power-on state): the same bytes
 		// as the main keys. Every key, so a slip in the table's order
@@ -779,6 +805,8 @@ int main()
 		kbd(0x00, 0x5A); released(); CHECK(typed() == 0x0A);   // KP2 down
 		kbd(0x00, 0x5C); released(); CHECK(typed() == 0x08);   // KP4 left
 		kbd(0x00, 0x5E); released(); CHECK(typed() == 0x09);   // KP6 right
+		kbd(0x02, 0x60); released(); CHECK(typed() == 0x1C);   // Shift KP8
+		kbd(0x01, 0x5C); released(); CHECK(typed() == 0x10);   // Ctrl KP4
 		kbd(0x00, 0x5F); released(); CHECK(typed() == -1);     // KP7 Home
 		kbd(0x00, 0x5D); released(); CHECK(typed() == -1);     // KP5
 		kbd(0x00, 0x63); released(); CHECK(typed() == -1);     // KP. Del
