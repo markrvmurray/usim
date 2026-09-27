@@ -79,6 +79,22 @@ static void settle(PicoVideo &v)
 	failures++;
 }
 
+// The same, for a cell in INVERSE video: the glyph's mask is flipped, so the
+// cell is white and the glyph shows the (black) background through it.
+static bool check_cell_inverse(int col, int row, uint8_t ch)
+{
+	vidterm_cursor_hide();
+	for (int gy = 0; gy < CHAR_H; gy++) {
+		uint8_t mask = font_spleen_8x16[ch][gy];
+		for (int gx = 0; gx < CHAR_W; gx++) {
+			uint8_t want = (mask & (0x80 >> gx)) ? 0x00 : 0xFF;
+			if (video_framebuffer[row * CHAR_H + gy][col * CHAR_W + gx] != want)
+				return false;
+		}
+	}
+	return true;
+}
+
 static bool check_cell(int col, int row, uint8_t ch)
 {
 	// The cursor lives in the framebuffer and inverts the cell it sits on,
@@ -1224,6 +1240,166 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 0);
 		v.write(DATA, ESC); v.write(DATA, 0x21); v.write(DATA, 0);
 		v.write(DATA, 0x0C);
+		settle(v);
+	}
+
+	// THE CoCo3 $1F TEXT FAMILY (GrfDrv L1483): exactly two bytes, $1F then
+	// a sub-code. ded highlights its cursor with inverse ($20/$21); minted
+	// uses insert and delete line ($30/$31) on a CoCo3 window. Unknown
+	// sub-codes -- and underline/blink, which this device accepts and
+	// ignores -- must be consumed whole, never rendered as a stray glyph
+	// with the second byte printed after it (what happened before).
+	{
+		static const uint8_t ESC = 0x1B;
+		auto at = [&](int col, int row) {	// $02 cursor to col,row
+			v.write(DATA, 0x02);
+			v.write(DATA, (uint8_t)(col + 0x20));
+			v.write(DATA, (uint8_t)(row + 0x20));
+		};
+		auto s1f = [&](uint8_t sub) {
+			v.write(DATA, 0x1F);
+			v.write(DATA, sub);
+		};
+		v.write(STAT, VID_CTL_RESET);
+		settle(v);
+		v.write(DATA, 0x0C);
+		settle(v);
+
+		// Inverse on for 'B' only; A and C plain.
+		at(10, 3);
+		v.write(DATA, 'A'); s1f(0x20); v.write(DATA, 'B'); s1f(0x21);
+		v.write(DATA, 'C');
+		settle(v);
+		CHECK(check_cell(10, 3, 'A'));
+		CHECK(check_cell_inverse(11, 3, 'B'));
+		CHECK(check_cell(12, 3, 'C'));
+
+		// Inverse applies to erases too -- GrfDrv rewrites the window's
+		// default attribute -- so an erase-to-end-of-line in inverse
+		// leaves solid white cells.
+		at(20, 5);
+		s1f(0x20); v.write(DATA, 0x04); s1f(0x21);
+		settle(v);
+		CHECK(check_cell_inverse(25, 5, ' '));
+		CHECK(check_cell_inverse(TEXT_COLS - 1, 5, ' '));
+
+		// Underline, blink and an unknown sub-code: both bytes consumed,
+		// nothing drawn, and the next character lands where it should.
+		at(0, 7);
+		s1f(0x22); s1f(0x23); s1f(0x24); s1f(0x25); s1f(0x7F);
+		v.write(DATA, 'Q');
+		settle(v);
+		CHECK(check_cell(0, 7, 'Q'));
+		CHECK(check_cell(1, 7, ' '));
+
+		// Inverse is PER WINDOW: set in window 1, it does not follow
+		// the output back to the root.
+		v.write(DATA, ESC); v.write(DATA, 0x20);
+		const uint8_t g[8] = { 1, 0, 40, 10, 20, 6, 0, 0 };
+		for (uint8_t i = 0; i < 8; i++) v.write(DATA, g[i]);
+		s1f(0x20);				// window 1 inverse on
+		v.write(DATA, ESC); v.write(DATA, 0x21); v.write(DATA, 0);
+		at(0, 9);
+		v.write(DATA, 'D');
+		settle(v);
+		CHECK(check_cell(0, 9, 'D'));		// the root is plain
+		// ...and window 1 still has it: shown and selected again, its
+		// text is inverse. (Checking only the root passed a version
+		// that kept one inverse flag for everybody.)
+		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 1);
+		v.write(DATA, ESC); v.write(DATA, 0x21); v.write(DATA, 1);
+		at(0, 0);
+		v.write(DATA, 'E');
+		settle(v);
+		CHECK(check_cell_inverse(40, 10, 'E'));
+		s1f(0x21);
+		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 0);
+		v.write(DATA, ESC); v.write(DATA, 0x21); v.write(DATA, 0);
+		settle(v);
+
+		// A CLEAR in inverse with OPAQUE text (TCharSw off) blanks the
+		// panel WHITE. Opaque blank clears take a shortcut that paints
+		// the background directly, and it must know about inverse; the
+		// console's default is transparent, which never takes it.
+		v.write(DATA, ESC); v.write(DATA, 0x3C); v.write(DATA, 0);
+		s1f(0x20);
+		v.write(DATA, 0x0C);
+		settle(v);
+		CHECK(check_cell_inverse(60, 20, ' '));
+		s1f(0x21);
+		v.write(DATA, ESC); v.write(DATA, 0x3C); v.write(DATA, 1);
+		v.write(DATA, 0x0C);
+		settle(v);
+
+		// INSERT and DELETE LINE, in a window: only its rows move, the
+		// cursor stays put. Window 2 at col 4 row 12, 10x5, shown and
+		// selected, lines L0..L4 on its rows 0..4; root text beside it
+		// must not move.
+		v.write(DATA, 0x0C);
+		at(0, 13);
+		v.write(DATA, 'R');			// root, left of the window
+		v.write(DATA, ESC); v.write(DATA, 0x20);
+		const uint8_t g2[8] = { 2, 0, 4, 12, 10, 5, 0, 0 };
+		for (uint8_t i = 0; i < 8; i++) v.write(DATA, g2[i]);
+		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 2);
+		v.write(DATA, 0x0C);
+		for (int r = 0; r < 5; r++) {
+			at(0, r);
+			v.write(DATA, 'L');
+			v.write(DATA, (uint8_t)('0' + r));
+		}
+		at(3, 1);
+		s1f(0x30);				// insert at row 1
+		v.write(DATA, 'X');			// cursor did not move
+		settle(v);
+		auto line = [&](int r, char c) {	// window row r reads Lc
+			return check_cell(4, 12 + r, 'L') &&
+			    check_cell(5, 12 + r, (uint8_t)c);
+		};
+		CHECK(line(0, '0'));
+		CHECK(check_cell(4, 13, ' '));		// the inserted blank row
+		CHECK(check_cell(7, 13, 'X'));		// cursor stayed at 3,1
+		CHECK(line(2, '1'));
+		CHECK(line(3, '2'));
+		CHECK(line(4, '3'));			// L4 fell off the bottom
+		CHECK(check_cell(0, 13, 'R'));		// the root did not move
+
+		at(3, 2);
+		s1f(0x31);				// delete row 2 (L1)
+		settle(v);
+		CHECK(line(0, '0'));
+		CHECK(check_cell(7, 13, 'X'));
+		CHECK(line(2, '2'));
+		CHECK(line(3, '3'));
+		CHECK(check_cell(4, 16, ' '));		// bottom row cleared
+
+		at(0, 4);				// on the bottom row,
+		v.write(DATA, 'Z');
+		at(0, 4);
+		s1f(0x30);				// insert just clears it
+		settle(v);
+		CHECK(check_cell(4, 16, ' '));
+		CHECK(line(3, '3'));
+
+		// Off screen, into a PARKED window: the same operations on its
+		// backing store, visible when it is shown.
+		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 0);
+		for (int r = 0; r < 5; r++) {		// window 2 still selected
+			at(0, r);
+			v.write(DATA, 'P');
+			v.write(DATA, (uint8_t)('0' + r));
+		}
+		at(0, 0);
+		s1f(0x31);				// delete row 0 (P0)
+		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 2);
+		settle(v);
+		CHECK(check_cell(4, 12, 'P') && check_cell(5, 12, '1'));
+		CHECK(check_cell(5, 15, '4'));
+		CHECK(check_cell(4, 16, ' '));
+
+		v.write(DATA, ESC); v.write(DATA, 0x26); v.write(DATA, 0);
+		v.write(DATA, ESC); v.write(DATA, 0x21); v.write(DATA, 0);
+		v.write(STAT, VID_CTL_RESET);
 		settle(v);
 	}
 
@@ -2924,7 +3100,11 @@ int main()
 
 				vidterm_putch(col, row, ch, at);
 				for (int gy = 0; gy < CHAR_H; gy++) {
-					const uint8_t m = font_spleen_8x16[ch][gy];
+					// Bit 4 is INVERSE: the mask flips, so the
+					// cell is foreground and the glyph shows the
+					// background. 0x9C in ATTRS carries it.
+					const uint8_t m = (uint8_t)(font_spleen_8x16[ch][gy] ^
+					    ((at & 0x10) ? 0xFF : 0x00));
 					const int py = row * CHAR_H + gy;
 
 					for (int gx = 0; gx < CHAR_W; gx++) {
