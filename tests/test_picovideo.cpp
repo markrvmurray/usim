@@ -1271,6 +1271,34 @@ int main()
 		settle(v);
 	}
 
+	// THE BELL ($07) rings the platform's bell -- a PWM tone on the board --
+	// exactly once, draws nothing and leaves the cursor where it was. A
+	// $07 that is a PARAMETER (a coordinate, a colour) is not a bell: the
+	// framing consumes it first. It used to be a silent no-op.
+	{
+		static const uint8_t ESC = 0x1B;
+		v.write(STAT, VID_CTL_RESET);
+		settle(v);
+		v.write(DATA, 0x0C);
+		settle(v);
+		const unsigned b0 = picovideo_bells();
+		v.write(DATA, 'A'); v.write(DATA, 0x07); v.write(DATA, 'B');
+		settle(v);
+		CHECK(picovideo_bells() == b0 + 1u);
+		CHECK(check_cell(0, 0, 'A'));
+		CHECK(check_cell(1, 0, 'B'));		// no glyph, no advance
+		// $07 as parameters: a cursor position, and a draw pointer.
+		v.write(DATA, 0x02); v.write(DATA, 0x07); v.write(DATA, 0x07);
+		v.write(DATA, ESC); v.write(DATA, 0x40);
+		v.write(DATA, 0x07); v.write(DATA, 0x07);
+		v.write(DATA, 0x07); v.write(DATA, 0x07);
+		settle(v);
+		CHECK(picovideo_bells() == b0 + 1u);	// none of those rang
+		v.write(DATA, 0x07); v.write(DATA, 0x07);
+		settle(v);
+		CHECK(picovideo_bells() == b0 + 3u);	// two more did
+	}
+
 	// THE CoCo3 $1F TEXT FAMILY (GrfDrv L1483): exactly two bytes, $1F then
 	// a sub-code. ded highlights its cursor with inverse ($20/$21); minted
 	// uses insert and delete line ($30/$31) on a CoCo3 window. Unknown

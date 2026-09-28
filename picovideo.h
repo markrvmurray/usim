@@ -32,6 +32,8 @@
  * released, false while it is asserting, matching the other devices' pins so
  * it can be AND-ed with them. */
 bool picovideo_irq_released(void);
+/* How many times the guest's console bell ($07) has rung. */
+unsigned picovideo_bells(void);
 
 class PicoVideo : public ActiveMappedDevice {
 

@@ -138,6 +138,24 @@ picovideo_irq_released(void)
 	return pv_irq_released;
 }
 
+/* The console bell ($07), platform-provided for the same reason. The board
+ * plays a PWM tone; the simulator counts, so a test can prove the bell rang
+ * -- and rang once, not zero times or twice. An SDL front end could beep
+ * here instead. */
+static unsigned pv_bells;
+
+extern "C" void
+vid_link_bell(void)
+{
+	pv_bells++;
+}
+
+unsigned
+picovideo_bells(void)
+{
+	return pv_bells;
+}
+
 void PicoVideo::write(Word offset, Byte val)
 {
 	// Replicate the write ISR: store to the write side, mirror the
