@@ -34,6 +34,9 @@
 bool picovideo_irq_released(void);
 /* How many times the guest's console bell ($07) has rung. */
 unsigned picovideo_bells(void);
+/* How many Tone commands ($1B $27) have arrived, and the last one's values. */
+struct picovideo_tone { uint16_t pitch; uint8_t ticks, volume; };
+unsigned picovideo_tones(picovideo_tone *last);
 
 class PicoVideo : public ActiveMappedDevice {
 

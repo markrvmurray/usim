@@ -156,6 +156,28 @@ picovideo_bells(void)
 	return pv_bells;
 }
 
+/* The guest's Tone ($1B $27): counted, and its values kept, so a test can
+ * check they arrived exactly as sent. */
+static unsigned        pv_tones;
+static picovideo_tone  pv_last_tone;
+
+extern "C" void
+vid_link_tone(uint16_t pitch, uint8_t ticks, uint8_t volume)
+{
+	pv_tones++;
+	pv_last_tone.pitch = pitch;
+	pv_last_tone.ticks = ticks;
+	pv_last_tone.volume = volume;
+}
+
+unsigned
+picovideo_tones(picovideo_tone *last)
+{
+	if (last != nullptr)
+		*last = pv_last_tone;
+	return pv_tones;
+}
+
 void PicoVideo::write(Word offset, Byte val)
 {
 	// Replicate the write ISR: store to the write side, mirror the

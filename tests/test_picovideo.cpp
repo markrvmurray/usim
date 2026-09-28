@@ -399,11 +399,15 @@ int main()
 	CHECK(check_cell(1, 0, 'B'));
 	CHECK(check_cell(2, 0, ' '));
 
-	// Framing: a reserved sub-code is dropped without params. $27, not
-	// $26 -- $26 became DWShow and now takes one, which is precisely why
-	// a parameter count is not a free thing to change: this check used to
-	// pass with $26 and started swallowing the byte after it.
-	esc({0x27});
+	// Framing: a reserved sub-code is dropped without params. $55 -- the
+	// LAST slot, and the one least likely to be allocated next. This check
+	// has used $26 (until it became DWShow, one parameter) and then $27
+	// (until it became Tone, four), and each time it began swallowing the
+	// bytes after it and failed a screen of unrelated checks. That is
+	// precisely why a parameter count is not a free thing to change: a
+	// guest that ever sent a reserved code would have been broken the
+	// same way. Allocate slots from the low end; this one from the high.
+	esc({0x55});
 	v.write(DATA, 'C');
 	settle(v);
 	CHECK(check_cell(2, 0, 'C'));
@@ -1297,6 +1301,51 @@ int main()
 		v.write(DATA, 0x07); v.write(DATA, 0x07);
 		settle(v);
 		CHECK(picovideo_bells() == b0 + 3u);	// two more did
+	}
+
+	// TONE ($1B $27): four parameters, CoCo 3 SS.Tone values unchanged --
+	// pitch big-endian, ticks, volume -- delivered exactly as sent. It does
+	// not hold the stream up: text after it in the same burst draws. A $07
+	// among its parameters is a parameter, not a bell, and a Tone with a
+	// zero duration still arrives (it is the "stop now").
+	{
+		static const uint8_t ESC = 0x1B;
+		v.write(STAT, VID_CTL_RESET);
+		settle(v);
+		v.write(DATA, 0x0C);
+		settle(v);
+		picovideo_tone t;
+		const unsigned n0 = picovideo_tones(nullptr);
+		const unsigned b0 = picovideo_bells();
+
+		v.write(DATA, ESC); v.write(DATA, 0x27);
+		v.write(DATA, 0x0F); v.write(DATA, 0xA0);	// pitch 4000
+		v.write(DATA, 30);				// half a second
+		v.write(DATA, 63);				// loudest
+		v.write(DATA, 'T');				// straight after
+		settle(v);
+		CHECK(picovideo_tones(&t) == n0 + 1u);
+		CHECK(t.pitch == 4000u);
+		CHECK(t.ticks == 30u);
+		CHECK(t.volume == 63u);
+		CHECK(check_cell(0, 0, 'T'));		// the stream went on
+
+		v.write(DATA, ESC); v.write(DATA, 0x27);
+		v.write(DATA, 0x07); v.write(DATA, 0x07);	// pitch $0707
+		v.write(DATA, 0x07); v.write(DATA, 0x07);
+		settle(v);
+		CHECK(picovideo_tones(&t) == n0 + 2u);
+		CHECK(t.pitch == 0x0707u);
+		CHECK(t.ticks == 7u && t.volume == 7u);
+		CHECK(picovideo_bells() == b0);		// no $07 rang
+
+		v.write(DATA, ESC); v.write(DATA, 0x27);
+		v.write(DATA, 0x00); v.write(DATA, 0x01);
+		v.write(DATA, 0);				// stop now
+		v.write(DATA, 40);
+		settle(v);
+		CHECK(picovideo_tones(&t) == n0 + 3u);
+		CHECK(t.pitch == 1u && t.ticks == 0u && t.volume == 40u);
 	}
 
 	// THE CoCo3 $1F TEXT FAMILY (GrfDrv L1483): exactly two bytes, $1F then
