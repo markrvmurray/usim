@@ -1431,6 +1431,151 @@ int main()
 		settle(v);
 	}
 
+	// ARC ($1B $52), AGAINST GRFDRV'S RULE. The outline is the ellipse's own
+	// (drawn plain, recorded), and the arc must be EXACTLY the outline pixels
+	// the clip line keeps. The rule is coded here from GrfDrv
+	// (level2/cmds/grfdrv.asm, L1860 and L1A9D-L1AF9), independently of the
+	// firmware: clip ends are OFFSETS from the centre; vertical keeps dx >=
+	// x1 when y1 < y2, else dx <= x1; horizontal keeps dy <= y1 when x1 <
+	// x2, else dy >= y1; diagonal keeps (dx-x2)(y1-y2) <= (dy-y2)(x1-x2).
+	{
+		static const uint8_t ESC = 0x1B;
+		v.write(STAT, VID_CTL_RESET);
+		settle(v);
+		v.write(DATA, 0x0C);
+		settle(v);
+		vidterm_set_origin(0, 0);
+		vidterm_set_clip(0, 0, FB_WIDTH, FB_HEIGHT);
+		vidterm_set_logic(0);
+		vidterm_set_pattern(0, 0);
+
+		auto keeps = [](int x1, int y1, int x2, int y2, int dx, int dy) {
+			if (x1 == x2)
+				return y1 < y2 ? dx >= x1 : dx <= x1;
+			if (y1 == y2)
+				return x1 < x2 ? dy <= y1 : dy >= y1;
+			return (long)(dx - x2) * (y1 - y2) <=
+			    (long)(dy - y2) * (x1 - x2);
+		};
+		static uint8_t outline[FB_HEIGHT][FB_WIDTH];
+		const int cx = 500, cy = 240, rx = 150, ry = 90;
+		vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, 0x00);
+		vidterm_ellipse(cx, cy, rx, ry, 0xFF);
+		int total = 0;
+		for (int y = 0; y < FB_HEIGHT; y++)
+			for (int x = 0; x < FB_WIDTH; x++) {
+				outline[y][x] = video_framebuffer[y][x];
+				total += outline[y][x] == 0xFF;
+			}
+		CHECK(total > 400);
+
+		// Compare an arc just drawn with the rule; `lo`..`hi` bound
+		// how many pixels it should keep, so a case that accidentally
+		// keeps all or nothing cannot pass as a test of the cut.
+		auto check = [&](const char *what, int x1, int y1, int x2, int y2,
+		    int lo, int hi) {
+			int bad = 0, kept = 0;
+			for (int y = 0; y < FB_HEIGHT; y++)
+				for (int x = 0; x < FB_WIDTH; x++) {
+					const bool want = outline[y][x] == 0xFF &&
+					    keeps(x1, y1, x2, y2, x - cx, y - cy);
+					kept += want;
+					bad += (video_framebuffer[y][x] == 0xFF) != want;
+				}
+			if (bad || kept < lo || kept > hi)
+				fprintf(stderr, "  arc %s: %d px wrong, %d kept"
+				    " (want %d..%d)\n", what, bad, kept, lo, hi);
+			CHECK(bad == 0);
+			CHECK(kept >= lo && kept <= hi);
+		};
+		static const struct {
+			const char *what; int x1, y1, x2, y2, lo, hi;
+		} CASES[] = {
+			{ "vertical, down, through centre", 0, -50, 0, 50, 200, 800 },
+			{ "vertical, up, through centre",   0, 50, 0, -50, 200, 800 },
+			{ "vertical, down, offset right",   80, -9, 80, 9, 20, 300 },
+			{ "horizontal, right, above",       -9, -40, 9, -40, 50, 400 },
+			{ "horizontal, left, below",        9, 60, -9, 60, 20, 300 },
+			{ "diagonal, one way",              -100, -100, 100, 100, 200, 800 },
+			{ "diagonal, the other",            100, 100, -100, -100, 200, 800 },
+			{ "diagonal, offset, shallow",      -300, 20, 300, -40, 100, 900 },
+			{ "a single point",                 30, 30, 30, 30, 50, 800 },
+		};
+		for (const auto &c : CASES) {
+			vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, 0x00);
+			vidterm_arc(cx, cy, rx, ry, c.x1, c.y1, c.x2, c.y2, 0xFF);
+			check(c.what, c.x1, c.y1, c.x2, c.y2, c.lo, c.hi);
+		}
+		// A clip line that misses the ellipse keeps all of it or none
+		// of it, depending on which side the outline lies.
+		vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, 0x00);
+		vidterm_arc(cx, cy, rx, ry, -400, -9, -400, 9, 0xFF);	// all
+		check("far left line: all", -400, -9, -400, 9, total, total);
+		vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, 0x00);
+		vidterm_arc(cx, cy, rx, ry, 400, -9, 400, 9, 0xFF);	// none
+		check("far right line: none", 400, -9, 400, 9, 0, 0);
+
+		// THROUGH THE LINK, as a guest sends it: the draw pointer is
+		// the centre, then twelve bytes -- radii, then the clip line's
+		// ends, SIGNED. Parameter order and signedness are the console's
+		// part, and a negative offset is the case that would show a
+		// sign lost.
+		auto w16 = [&](int n) {
+			v.write(DATA, (uint8_t)((unsigned)n >> 8));
+			v.write(DATA, (uint8_t)n);
+		};
+		auto link_arc = [&](int x1, int y1, int x2, int y2) {
+			vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, 0x00);
+			v.write(DATA, ESC); v.write(DATA, 0x40);	// SetDPtr
+			w16(cx); w16(cy);
+			v.write(DATA, ESC); v.write(DATA, 0x52);	// Arc
+			w16(rx); w16(ry); w16(x1); w16(y1); w16(x2); w16(y2);
+			settle(v);
+			vidterm_cursor_hide();
+		};
+		// The console draws in the foreground colour; find it from
+		// the result rather than assume the palette.
+		link_arc(0, -50, 0, 50);
+		uint8_t fg = 0;
+		for (int x = cx; x < FB_WIDTH && fg == 0; x++)
+			fg = video_framebuffer[cy][x];
+		CHECK(fg != 0);
+		for (int y = 0; y < FB_HEIGHT; y++)
+			for (int x = 0; x < FB_WIDTH; x++)
+				if (video_framebuffer[y][x] == fg)
+					video_framebuffer[y][x] = 0xFF;
+		check("link, vertical", 0, -50, 0, 50, 200, 800);
+		link_arc(-120, 70, 90, -30);			// negative offsets
+		for (int y = 0; y < FB_HEIGHT; y++)
+			for (int x = 0; x < FB_WIDTH; x++)
+				if (video_framebuffer[y][x] == fg)
+					video_framebuffer[y][x] = 0xFF;
+		check("link, diagonal, negative", -120, 70, 90, -30, 100, 900);
+
+		// XOR KEEPS EVERY OUTLINE PIXEL. The outline plotted its four
+		// extremes twice (x or y zero), and in XOR the second plot undid
+		// the first: gaps at the top, bottom, left and right of every
+		// circle and ellipse. Drawn in XOR over black, the result must be
+		// exactly the plain outline.
+		vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, 0x00);
+		vidterm_set_logic(3);
+		vidterm_ellipse(cx, cy, rx, ry, 0xFF);
+		vidterm_set_logic(0);
+		int xor_bad = 0;
+		for (int y = 0; y < FB_HEIGHT; y++)
+			for (int x = 0; x < FB_WIDTH; x++)
+				xor_bad += video_framebuffer[y][x] != outline[y][x];
+		if (xor_bad)
+			fprintf(stderr, "  XOR ellipse: %d px differ from the plain"
+			    " outline\n", xor_bad);
+		CHECK(xor_bad == 0);
+		CHECK(video_framebuffer[cy - ry][cx] == 0xFF);	// top extreme
+		CHECK(video_framebuffer[cy][cx + rx] == 0xFF);	// right extreme
+
+		v.write(STAT, VID_CTL_RESET);
+		settle(v);
+	}
+
 	// M5.2: graphics primitives are window-RELATIVE and window-BOUNDED.
 	// There is still only one graphics plane -- clipping says where a
 	// primitive lands, not which surface it lands on -- so both halves
