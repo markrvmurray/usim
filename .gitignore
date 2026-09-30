@@ -11,6 +11,7 @@ usim09pt
 tests/test_mmu_tick
 tests/test_system_watchpoint
 tests/test_picoide
+tests/test_picortc
 tests/test_cycles6309
 tests/test_picovideo
 tests/test6309
@@ -19,3 +20,4 @@ tests/test6809
 tests/test6809.bin
 **/*.dSYM
 picothing.fram
+picothing.rtc

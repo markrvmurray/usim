@@ -16,8 +16,9 @@
 //	                is never-remapped; identity init leaves $FF in
 //	                slot $FF (= $FEFF) but the board's fixed mapping
 //	                already covers what that slot would have meant.
-//	  $FF00-$FFBF   I/O space (currently only IDE at $FF00-$FF09;
-//	                $FF0A-$FFBF unmapped, reads return $FF).
+//	  $FF00-$FFBF   I/O space: IDE at $FF00-$FF09, the video Pico at
+//	                $FF10-$FF17 and the DS12885 RTC at $FF32-$FF33;
+//	                the rest is unmapped and reads return $FF.
 //	  $FFC0-$FFFF   Pi Pico supervisory region — everything from the
 //	                DAT task register through ACIAs, tick timer,
 //	                SystemWatchpoint, TraceCtl, FRAM (SHARED) and the
@@ -53,6 +54,13 @@
 //	                     byte image). If omitted, the slave slot reads
 //	                     status $00 ("no device") as on a one-drive bus.
 //	  -f <fram.dat>      FRAM persistence file (default: picothing.fram)
+//	  -r <rtc.dat>       RTC persistence file (default: picothing.rtc).
+//	                     The clock follows the host's local time; the
+//	                     file holds its NVRAM and any time the guest set.
+//	  --rtc-time=YYYY-MM-DDTHH:MM:SS
+//	                     start the RTC at this time and count guest
+//	                     cycles instead of host time, with no file, so
+//	                     a run that reads the clock stays reproducible
 //	  --aux-pty          back the auxiliary ACIA ($FFC6-7) with a host
 //	                     pseudo-terminal instead of the null device; the
 //	                     slave /dev/ttysNNN path is printed at startup so
@@ -86,6 +94,7 @@
 #include "picoide.h"
 #include "picovideo.h"
 #include "picofram.h"
+#include "picortc.h"
 #include "tracectl.h"
 #include "system_watchpoint.h"
 
@@ -261,6 +270,12 @@ static void usage(const char* prog)
 		"  -D <disk.img>       slave  disk image for IDE (must exist;\n"
 		"                      not auto-created. Omit for a one-drive bus.)\n"
 		"  -f <fram.dat>       FRAM persistence file (default: picothing.fram)\n"
+		"  -r <rtc.dat>        RTC persistence file (default: picothing.rtc);\n"
+		"                      the clock follows the host's local time\n"
+		"  --rtc-time=YYYY-MM-DDTHH:MM:SS\n"
+		"                      start the RTC at this time and advance it\n"
+		"                      with guest cycles (1MHz), not the host, and\n"
+		"                      with no file: reproducible with --input\n"
 		"  --aux-pty           back the aux ACIA ($FFC6-7) with a host PTY\n"
 		"                      (prints the /dev/ttysNNN slave path at startup)\n"
 		"  --input=STR         deterministic scripted console input; bytes\n"
@@ -279,6 +294,9 @@ int main(int argc, char* argv[])
 	const char*		disk_path = nullptr;
 	const char*		slave_path = nullptr;
 	const char*		fram_path = "picothing.fram";
+	const char*		rtc_path = "picothing.rtc";
+	bool			rtc_fixed = false;	// --rtc-time: count guest cycles from rtc_start
+	int64_t			rtc_start = 0;
 
 	unsigned long		timeout = 0;
 	bool			video_window = false;
@@ -449,6 +467,22 @@ int main(int argc, char* argv[])
 			input_step = strtoull(argv[i] + 13, nullptr, 0);
 		} else if (strcmp(argv[i], "-f") == 0 && i + 1 < argc) {
 			fram_path = argv[++i];
+		} else if (strcmp(argv[i], "-r") == 0 && i + 1 < argc) {
+			rtc_path = argv[++i];
+		} else if (strncmp(argv[i], "--rtc-time=", 11) == 0) {
+			int y, mo, d, h, mi, sec;
+			char sep;
+			if (sscanf(argv[i] + 11, "%d-%d-%d%c%d:%d:%d",
+				   &y, &mo, &d, &sep, &h, &mi, &sec) != 7 ||
+			    (sep != 'T' && sep != ' ') ||
+			    mo < 1 || mo > 12 || d < 1 || d > 31 ||
+			    h < 0 || h > 23 || mi < 0 || mi > 59 ||
+			    sec < 0 || sec > 59) {
+				fprintf(stderr, "%s: --rtc-time wants YYYY-MM-DDTHH:MM:SS\n", argv[0]);
+				return EXIT_FAILURE;
+			}
+			rtc_fixed = true;
+			rtc_start = PicoRTC::civil_us(y, mo, d, h, mi, sec);
 		} else if (argv[i][0] == '-') {
 			usage(argv[0]);
 			return EXIT_FAILURE;
@@ -534,6 +568,15 @@ int main(int argc, char* argv[])
 	auto tick       = std::make_shared<PicoTick>((uint32_t)tick_cycles);	// default 50Hz at ~1MHz; --tick to amplify IRQ-race pressure
 	auto ide        = std::make_shared<PicoIDE>(disk_path, slave_path);
 	auto fram       = std::make_shared<PicoFRAM>(fram_path);
+	// The RTC follows the host's clock, persisting like the battery-
+	// backed chip. --rtc-time instead counts guest cycles at 1MHz (the
+	// rate the default tick assumes), so a run is reproducible, and
+	// keeps no file, so one run cannot leak into the next.
+	auto rtc        = rtc_fixed
+		? std::make_shared<PicoRTC>([&cpu, rtc_start] {
+			  return rtc_start + (int64_t)cpu.get_total_cycles();
+		  }, nullptr)
+		: std::make_shared<PicoRTC>(PicoRTC::host_local_us, rtc_path);
 	auto video      = std::make_shared<PicoVideo>(cpu, video_window, video_scale, video_shot);
 	if (video_input != nullptr)
 		video->set_input(video_input, video_input_first, video_input_step);
@@ -561,6 +604,7 @@ int main(int argc, char* argv[])
 	cpu.attach(datram_tk);				// ActiveDevice: advances DATRAM NMI pulse
 	cpu.attach_range(ide,        0xFF00, 0x000A);	// $FF00-$FF09
 	cpu.attach_range(video,      0xFF10, 0x0008);	// $FF10-$FF17 (video Pico)
+	cpu.attach_range(rtc,        0xFF32, 0x0002);	// $FF32-$FF33 (DS12885)
 	cpu.attach_range(taskreg,    0xFFC0, 0x0001);	// $FFC0
 	cpu.attach_range(console,    0xFFC4, 0x0002);	// $FFC4-$FFC5
 	cpu.attach_range(aux_acia,   0xFFC6, 0x0002);	// $FFC6-$FFC7

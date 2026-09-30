@@ -20,7 +20,7 @@ LIB_SRCS	= usim.cpp memory.cpp \
 		  mc6809.cpp mc6809in.cpp \
 		  hd6309.cpp hd6309in.cpp \
 		  mc6850.cpp \
-		  picotick.cpp picoide.cpp picofram.cpp \
+		  picotick.cpp picoide.cpp picofram.cpp picortc.cpp \
 		  system_watchpoint.cpp
 
 OBJS		= $(LIB_SRCS:.cpp=.o)
@@ -146,12 +146,13 @@ picovideo_display.o: picovideo_display.cpp
 .PHONY: test
 test: tests/test6809 tests/test6809.bin tests/test6309 tests/test6309.bin \
       tests/test_mmu_tick tests/test_system_watchpoint tests/test_picoide \
-      tests/test_cycles6309 tests/test_picovideo
+      tests/test_picortc tests/test_cycles6309 tests/test_picovideo
 	./tests/test6809
 	./tests/test6309
 	./tests/test_mmu_tick
 	./tests/test_system_watchpoint
 	./tests/test_picoide
+	./tests/test_picortc
 	./tests/test_picovideo
 	./tests/test_cycles6309
 	@$(MAKE) --no-print-directory cycles
@@ -165,6 +166,9 @@ tests/test_system_watchpoint: tests/test_system_watchpoint.cpp $(LIB)
 
 tests/test_picoide: tests/test_picoide.cpp $(LIB)
 	$(CXX) $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_picoide.cpp -L. -lusim -o $(@)
+
+tests/test_picortc: tests/test_picortc.cpp $(LIB)
+	$(CXX) $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_picortc.cpp -L. -lusim -o $(@)
 
 # Links the real firmware link/renderer objects; the SDL display TU is
 # replaced by stubs inside the test, so no SDL dependency here.
@@ -268,7 +272,7 @@ cycles6309: tests/test6309 tests/test6309.bin
 
 .PHONY: clean
 clean:
-	$(RM) $(BIN) $(LIB) *.o *.d tests/test_mmu_tick tests/*.o tests/*.d tests/test6809.bin tests/test_system_watchpoint tests/test_picoide tests/test_cycles6309 tests/test_picovideo
+	$(RM) $(BIN) $(LIB) *.o *.d tests/test_mmu_tick tests/*.o tests/*.d tests/test6809.bin tests/test_system_watchpoint tests/test_picoide tests/test_picortc tests/test_cycles6309 tests/test_picovideo
 
 # Compiler-generated header dependencies (see CPPFLAGS -MMD -MP). Pulling
 # these in means editing any header recompiles exactly the objects that
