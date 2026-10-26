@@ -495,11 +495,14 @@ void mc6809::post_exec()
 	fprintf(stderr, "/ %04X: [%2d] %-8s%s\r\n", insn_pc, cycles, insn, disasm_operand().c_str());
 }
 
-// used for EXG and TFR instructions
-Word& mc6809::wordrefreg(int r)
+// EXG and TFR register access, as MAME's m6809 core has it. An
+// undefined selector (6, 7, 12-15) reads $FFFF and ignores writes,
+// which is what lets software tell a 6809 from a 6309 by trying W.
+// A and B read as $FF in the high byte. CC and DP are duplicated into
+// both halves, except in an EXG whose first register is 16-bit, where
+// they too read $FF high. An 8-bit destination takes the low byte.
+Word mc6809::read_exgtfr(int r, bool cc_dp_dup) const
 {
-	static Word no_return = 0;
-
 	switch (r) {
 		case  0: return d;
 		case  1: return x;
@@ -507,25 +510,28 @@ Word& mc6809::wordrefreg(int r)
 		case  3: return u;
 		case  4: return s;
 		case  5: return pc;
+		case  8: return 0xff00 | a;
+		case  9: return 0xff00 | b;
+		case 10: return (cc_dp_dup ? (Word)cc.value << 8 : 0xff00) | cc.value;
+		case 11: return (cc_dp_dup ? (Word)dp << 8 : 0xff00) | dp;
 	}
-
-	invalid("invalid word register selector");
-	return no_return;
+	return 0xffff;
 }
 
-Byte& mc6809::byterefreg(int r)
+void mc6809::write_exgtfr(int r, Word val)
 {
-	static Byte no_return = 0;
-
 	switch (r) {
-		case  8: return a;
-		case  9: return b;
-		case 10: return cc.value;
-		case 11: return dp;
+		case  0: d = val;			break;
+		case  1: x = val;			break;
+		case  2: y = val;			break;
+		case  3: u = val;			break;
+		case  4: s = val;			break;
+		case  5: pc = val;			break;
+		case  8: a = (Byte)val;			break;
+		case  9: b = (Byte)val;			break;
+		case 10: cc.value = (Byte)val;		break;
+		case 11: dp = (Byte)val;		break;
 	}
-
-	invalid("invalid byte register selector");
-	return no_return;
 }
 
 // decodes the postbyte for most indexed modes

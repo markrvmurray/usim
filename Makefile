@@ -156,9 +156,10 @@ picovideo_display.o: picovideo_display.cpp
 test: tests/test6809 tests/test6809.bin tests/test6309 tests/test6309.bin \
       tests/test_mmu_tick tests/test_system_watchpoint tests/test_picoide \
       tests/test_picortc tests/test_cycles6309 tests/test_picovideo \
-      tests/cycletest09 tests/cycletest09.bin
+      tests/cycletest09 tests/cycletest09.bin tests/test_exgtfr
 	./tests/test6809
 	./tests/cycletest09
+	./tests/test_exgtfr
 	./tests/test6309
 	./tests/test_mmu_tick
 	./tests/test_system_watchpoint
@@ -180,6 +181,9 @@ tests/test_picoide: tests/test_picoide.cpp $(LIB)
 
 tests/test_picortc: tests/test_picortc.cpp $(LIB)
 	$(CXX) $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_picortc.cpp -L. -lusim -o $(@)
+
+tests/test_exgtfr: tests/test_exgtfr.cpp $(LIB)
+	$(CXX) $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_exgtfr.cpp -L. -lusim -o $(@)
 
 # Links the real firmware link/renderer objects; the SDL display TU is
 # replaced by stubs inside the test, so no SDL dependency here.
@@ -283,7 +287,7 @@ cycles6309: tests/test6309 tests/test6309.bin
 
 .PHONY: clean
 clean:
-	$(RM) $(BIN) $(LIB) *.o *.d tests/test_mmu_tick tests/*.o tests/*.d tests/test6809.bin tests/test_system_watchpoint tests/test_picoide tests/test_picortc tests/test_cycles6309 tests/test_picovideo tests/cycletest09.bin
+	$(RM) $(BIN) $(LIB) *.o *.d tests/test_mmu_tick tests/*.o tests/*.d tests/test6809.bin tests/test_system_watchpoint tests/test_picoide tests/test_picortc tests/test_exgtfr tests/test_cycles6309 tests/test_picovideo tests/cycletest09.bin
 
 # Compiler-generated header dependencies (see CPPFLAGS -MMD -MP). Pulling
 # these in means editing any header recompiles exactly the objects that

@@ -240,8 +240,8 @@ public:
 	Byte			get_cc() const { return (Byte)cc.value; }
 	Byte			get_dp() const { return dp; }
 
-	virtual Byte&		byterefreg(int);
-	virtual Word&		wordrefreg(int);
+	Word			read_exgtfr(int, bool cc_dp_dup) const;
+	void			write_exgtfr(int, Word);
 
 };
 

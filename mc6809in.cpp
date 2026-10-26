@@ -795,13 +795,13 @@ void mc6809::exg()
 	int r1 = (w & 0xf0) >> 4;
 	int r2 = (w & 0x0f) >> 0;
 
-	if (r1 <= 5 && r2 <= 5) {
-		std::swap(wordrefreg(r2), wordrefreg(r1));
-	} else if (r1 >= 8 && r1 <= 11 && r2 >= 8 && r2 <= 11) {
-		std::swap(byterefreg(r2), byterefreg(r1));
-	} else {
-		invalid("invalid EXG operand");
-	}
+	// both are read before either is written, and the second register
+	// is written first, which decides a mixed-size exchange like EXG A,D
+	bool cc_dp_dup = r1 >= 8;
+	Word t1 = read_exgtfr(r1, cc_dp_dup);
+	Word t2 = read_exgtfr(r2, cc_dp_dup);
+	write_exgtfr(r2, t1);
+	write_exgtfr(r1, t2);
 
 	cycles += 6;
 }
@@ -1235,13 +1235,7 @@ void mc6809::tfr()
 	int r1 = (w & 0xf0) >> 4;
 	int r2 = (w & 0x0f) >> 0;
 
-	if (r1 <= 5 && r2 <= 5) {
-		wordrefreg(r2) = wordrefreg(r1);
-	} else if (r1 >= 8 && r1 <= 11 && r2 >= 8 && r2 <= 11) {
-		byterefreg(r2) = byterefreg(r1);
-	} else {
-		invalid("invalid TFR operand");
-	}
+	write_exgtfr(r2, read_exgtfr(r1, true));
 
 	cycles += 4;
 }
