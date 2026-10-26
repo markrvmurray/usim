@@ -25,7 +25,7 @@ LIB_SRCS	= usim.cpp memory.cpp \
 
 OBJS		= $(LIB_SRCS:.cpp=.o)
 BIN		= usim09 usim09batch usim09pt tests/test6809 tests/test6309 \
-		  tests/test_cycles6309 tests/test_picovideo
+		  tests/test_cycles6309 tests/test_picovideo tests/cycletest09
 
 LIB		= libusim.a
 
@@ -78,6 +78,15 @@ tests/test6309.bin: tests/test6309.asm
 .PHONY: test6309
 test6309: tests/test6309 tests/test6309.bin
 	./tests/test6309
+
+tests/cycletest09: $(LIB) tests/cycletest09.o
+	$(CXX) $(CCFLAGS) $(LDFLAGS) tests/cycletest09.o -L. -lusim -o $(@)
+
+tests/cycletest09.o: tests/cycletest09.cpp
+	$(CXX) $(CPPFLAGS) $(CCFLAGS) -c tests/cycletest09.cpp -o $(@)
+
+tests/cycletest09.bin: tests/cycletest09.asm
+	lwasm --6809 --raw -o $(@) $(<)
 
 usim09batch: $(LIB) main09batch.o batchterm.o
 	$(CXX) $(CCFLAGS) $(LDFLAGS) main09batch.o batchterm.o -L. -lusim -o $(@)
@@ -146,8 +155,10 @@ picovideo_display.o: picovideo_display.cpp
 .PHONY: test
 test: tests/test6809 tests/test6809.bin tests/test6309 tests/test6309.bin \
       tests/test_mmu_tick tests/test_system_watchpoint tests/test_picoide \
-      tests/test_picortc tests/test_cycles6309 tests/test_picovideo
+      tests/test_picortc tests/test_cycles6309 tests/test_picovideo \
+      tests/cycletest09 tests/cycletest09.bin
 	./tests/test6809
+	./tests/cycletest09
 	./tests/test6309
 	./tests/test_mmu_tick
 	./tests/test_system_watchpoint
@@ -272,7 +283,7 @@ cycles6309: tests/test6309 tests/test6309.bin
 
 .PHONY: clean
 clean:
-	$(RM) $(BIN) $(LIB) *.o *.d tests/test_mmu_tick tests/*.o tests/*.d tests/test6809.bin tests/test_system_watchpoint tests/test_picoide tests/test_picortc tests/test_cycles6309 tests/test_picovideo
+	$(RM) $(BIN) $(LIB) *.o *.d tests/test_mmu_tick tests/*.o tests/*.d tests/test6809.bin tests/test_system_watchpoint tests/test_picoide tests/test_picortc tests/test_cycles6309 tests/test_picovideo tests/cycletest09.bin
 
 # Compiler-generated header dependencies (see CPPFLAGS -MMD -MP). Pulling
 # these in means editing any header recompiles exactly the objects that
