@@ -15,6 +15,7 @@ tests/test_picortc
 tests/test_exgtfr
 tests/test_cycles6309
 tests/test_picovideo
+tests/cycletest09
 tests/test6309
 tests/test6309.bin
 tests/test6809
