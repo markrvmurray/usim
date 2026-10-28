@@ -38,7 +38,7 @@ LIB		= libusim.a
 PICOVIDEO	?= $(HOME)/Documents/PICO/pico-thing-video
 SDL_CFLAGS	:= $(shell pkg-config --cflags sdl2 | sed 's/-I/-isystem /g')
 SDL_LIBS	:= $(shell pkg-config --libs sdl2) -lz
-PV_OBJS		= sdlhost.o picovideo.o picovideo_display.o pv_render.o pv_link.o pv_registers.o pv_console.o pv_winstore.o pv_gfxshadow.o pv_gfxbufs.o pv_cmdtrace.o pv_filllog.o
+PV_OBJS		= sdlhost.o viapanel.o picovideo.o picovideo_display.o pv_render.o pv_link.o pv_registers.o pv_console.o pv_winstore.o pv_gfxshadow.o pv_gfxbufs.o pv_cmdtrace.o pv_filllog.o
 
 all: $(BIN)
 
@@ -144,6 +144,9 @@ pv_hidcook.o: $(PICOVIDEO)/src/hid_cook.cpp
 	$(CXX) -I$(PICOVIDEO)/include -Ipico_shim $(CPPFLAGS) $(CCFLAGS) -c -o $(@) $<
 
 sdlhost.o: sdlhost.cpp
+	$(CXX) $(CPPFLAGS) $(CCFLAGS) $(SDL_CFLAGS) -c -o $(@) $<
+
+viapanel.o: viapanel.cpp
 	$(CXX) $(CPPFLAGS) $(CCFLAGS) $(SDL_CFLAGS) -c -o $(@) $<
 
 picovideo_display.o: picovideo_display.cpp

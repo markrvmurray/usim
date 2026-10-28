@@ -62,6 +62,9 @@
 //	                     start the RTC at this time and count guest
 //	                     cycles instead of host time, with no file, so
 //	                     a run that reads the clock stays reproducible
+//	  --via-panel[=SCALE]
+//	                     open a window of LEDs and switches on the VIA's
+//	                     port pins and control lines (see viapanel.h)
 //	  --aux-pty          back the auxiliary ACIA ($FFC6-7) with a host
 //	                     pseudo-terminal instead of the null device; the
 //	                     slave /dev/ttysNNN path is printed at startup so
@@ -97,6 +100,7 @@
 #include "picofram.h"
 #include "picortc.h"
 #include "mos6522.h"
+#include "viapanel.h"
 #include "tracectl.h"
 #include "system_watchpoint.h"
 
@@ -220,6 +224,9 @@ static void usage(const char* prog)
 		"  --screenshot=FILE   write the video framebuffer as a PNG on clean\n"
 		"                      exit (halt or --timeout); works headless, no\n"
 		"                      --video needed\n"
+		"  --via-panel[=SCALE] open a window of LEDs and switches on the\n"
+		"                      VIA's ($FF20) port pins and control lines\n"
+		"                      (SDL; SCALE is an integer zoom, default 2)\n"
 		"  --video-input=STR   inject STR as guest-console keystrokes (the\n"
 		"                      video Pico's input FIFO, as if typed on the\n"
 		"                      USB keyboard); cycle-scheduled like --input\n"
@@ -303,6 +310,8 @@ int main(int argc, char* argv[])
 	unsigned long		timeout = 0;
 	bool			video_window = false;
 	int			video_scale = 1;
+	bool			via_window = false;	// --via-panel
+	int			via_scale = 2;
 	const char*		video_shot = nullptr;
 	const char*		video_input = nullptr;
 	uint64_t		video_input_first = 30000000;
@@ -348,6 +357,12 @@ int main(int argc, char* argv[])
 			video_window = true;
 			video_scale = (int)strtoul(argv[i] + 8, nullptr, 10);
 			if (video_scale < 1) video_scale = 1;
+		} else if (strcmp(argv[i], "--via-panel") == 0) {
+			via_window = true;
+		} else if (strncmp(argv[i], "--via-panel=", 12) == 0) {
+			via_window = true;
+			via_scale = (int)strtoul(argv[i] + 12, nullptr, 10);
+			if (via_scale < 1) via_scale = 1;
 		} else if (strncmp(argv[i], "--screenshot=", 13) == 0) {
 			video_shot = argv[i] + 13;
 		} else if (strncmp(argv[i], "--video-input=", 14) == 0) {
@@ -618,6 +633,8 @@ int main(int argc, char* argv[])
 	cpu.attach_range(fram,       0xFFD0, 0x0010);	// $FFD0-$FFDF (SHARED area)
 	cpu.attach_range(watch_vec,  0xFFE0, 0x0020);	// $FFE0-$FFFF (vectors + snippet)
 	cpu.attach_range(datram,     0x0000, 0xFF00);	// $0000-$FEFF
+	if (via_window)
+		cpu.attach(std::make_shared<ViaPanel>(cpu, via, via_scale));
 
 	// Console ACIA + aux ACIA + tick timer + VIA all share the IRQ line
 	// (matches real pico-thing hardware routing); SystemWatchpoint
