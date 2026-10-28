@@ -17,8 +17,9 @@
 //	                slot $FF (= $FEFF) but the board's fixed mapping
 //	                already covers what that slot would have meant.
 //	  $FF00-$FFBF   I/O space: IDE at $FF00-$FF09, the video Pico at
-//	                $FF10-$FF17 and the DS12885 RTC at $FF32-$FF33;
-//	                the rest is unmapped and reads return $FF.
+//	                $FF10-$FF17, the 6522 VIA at $FF20-$FF2F and the
+//	                DS12885 RTC at $FF32-$FF33; the rest is unmapped
+//	                and reads return $FF.
 //	  $FFC0-$FFFF   Pi Pico supervisory region — everything from the
 //	                DAT task register through ACIAs, tick timer,
 //	                SystemWatchpoint, TraceCtl, FRAM (SHARED) and the
@@ -95,6 +96,7 @@
 #include "picovideo.h"
 #include "picofram.h"
 #include "picortc.h"
+#include "mos6522.h"
 #include "tracectl.h"
 #include "system_watchpoint.h"
 
@@ -580,6 +582,7 @@ int main(int argc, char* argv[])
 	auto video      = std::make_shared<PicoVideo>(cpu, video_window, video_scale, video_shot);
 	if (video_input != nullptr)
 		video->set_input(video_input, video_input_first, video_input_step);
+	auto via        = std::make_shared<mos6522>();
 	auto tracectl   = std::make_shared<TraceCtl>(cpu, &brk_enabled);
 	auto watch      = std::make_shared<SystemWatchpoint>(cpu);
 	auto watch_ctrl = std::make_shared<SystemWatchpointCtrl>(*watch);
@@ -604,6 +607,7 @@ int main(int argc, char* argv[])
 	cpu.attach(datram_tk);				// ActiveDevice: advances DATRAM NMI pulse
 	cpu.attach_range(ide,        0xFF00, 0x000A);	// $FF00-$FF09
 	cpu.attach_range(video,      0xFF10, 0x0008);	// $FF10-$FF17 (video Pico)
+	cpu.attach_range(via,        0xFF20, 0x0010);	// $FF20-$FF2F (6522 VIA)
 	cpu.attach_range(rtc,        0xFF32, 0x0002);	// $FF32-$FF33 (DS12885)
 	cpu.attach_range(taskreg,    0xFFC0, 0x0001);	// $FFC0
 	cpu.attach_range(console,    0xFFC4, 0x0002);	// $FFC4-$FFC5
@@ -615,7 +619,7 @@ int main(int argc, char* argv[])
 	cpu.attach_range(watch_vec,  0xFFE0, 0x0020);	// $FFE0-$FFFF (vectors + snippet)
 	cpu.attach_range(datram,     0x0000, 0xFF00);	// $0000-$FEFF
 
-	// Console ACIA + aux ACIA + tick timer all share the IRQ line
+	// Console ACIA + aux ACIA + tick timer + VIA all share the IRQ line
 	// (matches real pico-thing hardware routing); SystemWatchpoint
 	// drives NMI. FIRQ is unused.
 	//
@@ -626,7 +630,8 @@ int main(int argc, char* argv[])
 	// the CPU's c_irq is false, and !c_irq triggers do_irq.
 	cpu.IRQ.bind([&]() {
 		return (bool)console->IRQ && (bool)aux_acia->IRQ &&
-		    (bool)tick->IRQ && picovideo_irq_released();
+		    (bool)tick->IRQ && (bool)via->IRQ &&
+		    picovideo_irq_released();
 	});
 	// NMI is wired-OR (active-low) between the SystemWatchpoint and
 	// DATRAM's "page-unavailable" trap. Each OutputPin reads false
