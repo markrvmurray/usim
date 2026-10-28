@@ -38,7 +38,7 @@ LIB		= libusim.a
 PICOVIDEO	?= $(HOME)/Documents/PICO/pico-thing-video
 SDL_CFLAGS	:= $(shell pkg-config --cflags sdl2 | sed 's/-I/-isystem /g')
 SDL_LIBS	:= $(shell pkg-config --libs sdl2) -lz
-PV_OBJS		= picovideo.o picovideo_display.o pv_render.o pv_link.o pv_registers.o pv_console.o pv_winstore.o pv_gfxshadow.o pv_gfxbufs.o pv_cmdtrace.o pv_filllog.o
+PV_OBJS		= sdlhost.o picovideo.o picovideo_display.o pv_render.o pv_link.o pv_registers.o pv_console.o pv_winstore.o pv_gfxshadow.o pv_gfxbufs.o pv_cmdtrace.o pv_filllog.o
 
 all: $(BIN)
 
@@ -142,6 +142,9 @@ pv_console.o: $(PICOVIDEO)/src/vid_console.cpp
 # and that switch is itself worth testing: it spent months wired to nothing.
 pv_hidcook.o: $(PICOVIDEO)/src/hid_cook.cpp
 	$(CXX) -I$(PICOVIDEO)/include -Ipico_shim $(CPPFLAGS) $(CCFLAGS) -c -o $(@) $<
+
+sdlhost.o: sdlhost.cpp
+	$(CXX) $(CPPFLAGS) $(CCFLAGS) $(SDL_CFLAGS) -c -o $(@) $<
 
 picovideo_display.o: picovideo_display.cpp
 	$(CXX) -I$(PICOVIDEO)/include -Ipico_shim $(CPPFLAGS) $(CCFLAGS) $(SDL_CFLAGS) -c -o $(@) $<

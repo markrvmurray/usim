@@ -13,6 +13,7 @@
 #include <cstring>
 
 #include "picovideo_display.h"
+#include "sdlhost.h"
 
 // From the pico-thing-video firmware tree (portable renderer half + the
 // guest-link input entry, so window keystrokes reach the guest console).
@@ -24,7 +25,7 @@ static SDL_Window*	win;
 static SDL_Renderer*	ren;
 static SDL_Texture*	tex;
 static bool		sdl_up;		// display_init attempted
-static bool		inited;		// SDL_Init succeeded
+static bool		inited;		// sdlhost acquired
 static bool		closed;
 static uint32_t		last_present_ms;
 static uint32_t		rgb332_lut[256];
@@ -47,16 +48,50 @@ static void build_lut()
 	}
 }
 
+// The window's own events: closing it, or quitting, ends the run; typing
+// goes to the guest console.
+static void handle_event(const SDL_Event& ev)
+{
+	switch (ev.type) {
+	case SDL_QUIT:
+		closed = true;
+		break;
+	case SDL_WINDOWEVENT:
+		if (ev.window.event == SDL_WINDOWEVENT_CLOSE)
+			closed = true;
+		break;
+	case SDL_TEXTINPUT:
+		// Printable typing goes to the guest console as the
+		// plain bytes the USB keyboard cooker would produce.
+		for (const char* c = ev.text.text; *c != '\0'; c++)
+			vid_link_input((uint8_t)*c);
+		break;
+	case SDL_KEYDOWN: {
+		// Non-text keys and Ctrl chords (SDL_TEXTINPUT covers
+		// the printables).
+		SDL_Keycode k = ev.key.keysym.sym;
+		if (k == SDLK_RETURN || k == SDLK_KP_ENTER)
+			vid_link_input(0x0D);
+		else if (k == SDLK_BACKSPACE)
+			vid_link_input(0x08);
+		else if (k == SDLK_TAB)
+			vid_link_input(0x09);
+		else if (k == SDLK_ESCAPE)
+			vid_link_input(0x1B);
+		else if ((ev.key.keysym.mod & KMOD_CTRL) != 0 &&
+		    k >= SDLK_a && k <= SDLK_z)
+			vid_link_input((uint8_t)(k - SDLK_a + 1));
+		break;
+	}
+	default:
+		break;
+	}
+}
+
 static bool display_init(int scale)
 {
-	// Never fight the emulator's signal conventions: SIGINT stays
-	// ignored, and `killall usim09pt` must keep working.
-	SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
-
-	if (SDL_Init(SDL_INIT_VIDEO) != 0) {
-		fprintf(stderr, "picovideo: SDL_Init failed: %s\n", SDL_GetError());
+	if (!sdlhost_acquire())
 		return false;
-	}
 	inited = true;
 	if (scale < 1) scale = 1;
 	win = SDL_CreateWindow("pico-thing-video",
@@ -80,6 +115,7 @@ static bool display_init(int scale)
 	}
 	build_lut();
 	SDL_StartTextInput();
+	sdlhost_listen(SDL_GetWindowID(win), handle_event);
 	return true;
 }
 
@@ -95,39 +131,9 @@ bool picovideo_display_service(int scale)
 		}
 	}
 
-	SDL_Event ev;
-	while (SDL_PollEvent(&ev)) {
-		switch (ev.type) {
-		case SDL_QUIT:
-			closed = true;
-			return false;
-		case SDL_TEXTINPUT:
-			// Printable typing goes to the guest console as the
-			// plain bytes the USB keyboard cooker would produce.
-			for (const char* c = ev.text.text; *c != '\0'; c++)
-				vid_link_input((uint8_t)*c);
-			break;
-		case SDL_KEYDOWN: {
-			// Non-text keys and Ctrl chords (SDL_TEXTINPUT covers
-			// the printables).
-			SDL_Keycode k = ev.key.keysym.sym;
-			if (k == SDLK_RETURN || k == SDLK_KP_ENTER)
-				vid_link_input(0x0D);
-			else if (k == SDLK_BACKSPACE)
-				vid_link_input(0x08);
-			else if (k == SDLK_TAB)
-				vid_link_input(0x09);
-			else if (k == SDLK_ESCAPE)
-				vid_link_input(0x1B);
-			else if ((ev.key.keysym.mod & KMOD_CTRL) != 0 &&
-			    k >= SDLK_a && k <= SDLK_z)
-				vid_link_input((uint8_t)(k - SDLK_a + 1));
-			break;
-		}
-		default:
-			break;
-		}
-	}
+	sdlhost_pump();
+	if (closed)
+		return false;
 
 	// Wall-clock floor: the guest-cycle interval fires far faster than
 	// 33 fps when the emulator free-runs.
@@ -160,8 +166,12 @@ void picovideo_display_shutdown()
 {
 	if (tex != nullptr) { SDL_DestroyTexture(tex); tex = nullptr; }
 	if (ren != nullptr) { SDL_DestroyRenderer(ren); ren = nullptr; }
-	if (win != nullptr) { SDL_DestroyWindow(win); win = nullptr; }
-	if (inited) { SDL_Quit(); inited = false; }
+	if (win != nullptr) {
+		sdlhost_ignore(SDL_GetWindowID(win));
+		SDL_DestroyWindow(win);
+		win = nullptr;
+	}
+	if (inited) { sdlhost_release(); inited = false; }
 	sdl_up = false;
 }
 
