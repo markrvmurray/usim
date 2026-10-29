@@ -34,7 +34,7 @@ LIB		= libusim.a
 # renderer, compiled unchanged from that tree. SDL2 comes via pkg-config;
 # -isystem keeps its headers outside -Werror's blast radius. None of this
 # touches libusim or the other binaries.
-PICOVIDEO	?= $(HOME)/Documents/PICO/pico-thing-video
+PICOVIDEO	?= $(HOME)/GitHub/PICO/pico-thing-video
 SDL_CFLAGS	:= $(shell pkg-config --cflags sdl2 | sed 's/-I/-isystem /g')
 SDL_LIBS	:= $(shell pkg-config --libs sdl2) -lz
 PV_OBJS		= picovideo.o picovideo_display.o pv_render.o pv_link.o pv_registers.o pv_console.o pv_winstore.o pv_gfxshadow.o pv_gfxbufs.o pv_cmdtrace.o pv_filllog.o
