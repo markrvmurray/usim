@@ -434,6 +434,8 @@ void hd6309::execute_instruction()
 	switch (ir) {
 		case 0x14:				// SEXW
 			sexw(); break;
+		case 0x1020:				// LBRA on a 6809 only
+			illegal_opcode(); break;
 		case 0x1086: case 0x1096: case 0x10a6: case 0x10b6:
 			ldw(); break;		// LDW imm/dir/idx/ext
 		case 0x1097: case 0x10a7: case 0x10b7:

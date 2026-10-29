@@ -81,8 +81,11 @@ void mc6809::tick()
 	// fetch the next instruction
 	fetch_instruction();
 
-	// and process it
-	execute_instruction();
+	// and process it, again if an ignored prefix left its byte to run
+	do {
+		refetched = false;
+		execute_instruction();
+	} while (refetched);
 
 	// hook
 	post_exec();
@@ -131,7 +134,11 @@ void mc6809::fetch_instruction()
 		ir |= fetch();
 	}
 
-	// Decode addressing mode
+	decode_mode();
+}
+
+void mc6809::decode_mode()
+{
 	switch (ir & 0xf0) {
 		case 0x00: case 0x90: case 0xd0:
 			mode = direct; break;
@@ -227,7 +234,8 @@ void mc6809::execute_instruction()
 			bpl(); break;
 		case 0x20:
 			bra(); break;
-		case 0x16:
+		case 0x16: case 0x1020:
+			// 0x1020 undocumented
 			lbra(); break;
 		case 0x21:
 			brn(); break;
@@ -261,8 +269,8 @@ void mc6809::execute_instruction()
 			cmpu(); break;
 		case 0x108c: case 0x109c: case 0x10ac: case 0x10bc:
 			cmpy(); break;
-		case 0x42: case 0x43: case 0x1042:
-			// 0x42 / 0x1042 undocumented
+		case 0x42: case 0x43:
+			// 0x42 undocumented
 			coma(); break;
 		case 0x52: case 0x53:
 			// 0x52 undocumented
@@ -462,11 +470,30 @@ void mc6809::execute_instruction()
 	}
 }
 
-// Called for an unrecognised opcode. The base aborts via invalid(); the
-// HD6309 overrides this to take the illegal-instruction trap instead.
+// Called for an unrecognised opcode. The HD6309 overrides this to take
+// the illegal-instruction trap instead.
+//
+// A 6809 has no trap. A $10 or $11 prefix ahead of a byte the page does
+// not define is ignored, costing only its own fetch, and the byte runs
+// as a page-1 opcode, which tick() then executes; a byte that is itself
+// $10 or $11 starts a new prefix. This follows Atkinson's measurements
+// on real silicon. MAME's m6809 core instead drops the byte and runs the
+// one after it, which no MC6809 has yet been run to rule out. A page-1
+// opcode with no behaviour modelled aborts via invalid().
 void mc6809::illegal_opcode()
 {
-	invalid("invalid instruction");
+	if (ir <= 0xff) {
+		invalid("invalid instruction");
+		return;
+	}
+
+	const Byte op = ir & 0xff;
+	if (op == 0x10 || op == 0x11)
+		ir = (op << 8) | fetch();
+	else
+		ir = op;
+	decode_mode();
+	refetched = true;
 }
 
 void mc6809::print_regs()
