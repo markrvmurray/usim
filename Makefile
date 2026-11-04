@@ -25,7 +25,7 @@ LIB_SRCS	= usim.cpp memory.cpp \
 
 OBJS		= $(LIB_SRCS:.cpp=.o)
 BIN		= usim09 usim09batch usim09pt tests/test6809 tests/test6309 \
-		  tests/test_cycles6309 tests/test_picovideo tests/cycletest09
+		  tests/test_cycles6309 tests/test_picovideo tests/test_picovideo_keys tests/cycletest09
 
 LIB		= libusim.a
 
@@ -156,7 +156,7 @@ picovideo_display.o: picovideo_display.cpp
 test: tests/test6809 tests/test6809.bin tests/test6309 tests/test6309.bin \
       tests/test_mmu_tick tests/test_system_watchpoint tests/test_picoide \
       tests/test_picortc tests/test_cycles6309 tests/test_picovideo \
-      tests/cycletest09 tests/cycletest09.bin tests/test_exgtfr \
+      tests/test_picovideo_keys tests/cycletest09 tests/cycletest09.bin tests/test_exgtfr \
       tests/test_prefix
 	./tests/test6809
 	./tests/cycletest09
@@ -168,6 +168,7 @@ test: tests/test6809 tests/test6809.bin tests/test6309 tests/test6309.bin \
 	./tests/test_picoide
 	./tests/test_picortc
 	./tests/test_picovideo
+	./tests/test_picovideo_keys
 	./tests/test_cycles6309
 	@$(MAKE) --no-print-directory cycles
 	@$(MAKE) --no-print-directory cycles6309
@@ -194,6 +195,12 @@ tests/test_prefix: tests/test_prefix.cpp $(LIB)
 # replaced by stubs inside the test, so no SDL dependency here.
 tests/test_picovideo: tests/test_picovideo.cpp picovideo.o pv_link.o pv_registers.o pv_render.o pv_console.o pv_hidcook.o pv_winstore.o pv_gfxshadow.o pv_gfxbufs.o pv_cmdtrace.o pv_filllog.o $(LIB)
 	$(CXX) -I$(PICOVIDEO)/include -Ipico_shim $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_picovideo.cpp picovideo.o pv_link.o pv_registers.o pv_render.o pv_console.o pv_hidcook.o pv_winstore.o pv_gfxshadow.o pv_gfxbufs.o pv_cmdtrace.o pv_filllog.o -L. -lusim -o $(@)
+
+# The real SDL display TU on SDL's dummy driver, with the guest link stubbed
+# inside the test so the keystrokes it sends can be read back.
+PV_KEY_OBJS = $(filter-out picovideo.o pv_link.o,$(PV_OBJS))
+tests/test_picovideo_keys: tests/test_picovideo_keys.cpp $(PV_KEY_OBJS)
+	$(CXX) -I$(PICOVIDEO)/include -Ipico_shim $(SDL_CFLAGS) $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_picovideo_keys.cpp $(PV_KEY_OBJS) $(SDL_LIBS) -o $(@)
 
 # Per-instruction timing, both MD modes. Unlike the two aggregate gates
 # below, this one names the instruction that moved, and it is the only
@@ -292,7 +299,7 @@ cycles6309: tests/test6309 tests/test6309.bin
 
 .PHONY: clean
 clean:
-	$(RM) $(BIN) $(LIB) *.o *.d tests/test_mmu_tick tests/*.o tests/*.d tests/test6809.bin tests/test_system_watchpoint tests/test_picoide tests/test_picortc tests/test_exgtfr tests/test_prefix tests/test_cycles6309 tests/test_picovideo tests/cycletest09.bin
+	$(RM) $(BIN) $(LIB) *.o *.d tests/test_mmu_tick tests/*.o tests/*.d tests/test6809.bin tests/test_system_watchpoint tests/test_picoide tests/test_picortc tests/test_exgtfr tests/test_prefix tests/test_cycles6309 tests/test_picovideo tests/test_picovideo_keys tests/cycletest09.bin
 
 # Compiler-generated header dependencies (see CPPFLAGS -MMD -MP). Pulling
 # these in means editing any header recompiles exactly the objects that
