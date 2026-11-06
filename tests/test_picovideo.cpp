@@ -4494,12 +4494,15 @@ int main()
 		settle(v);
 		CHECK(check_cell(16, 4, 'Q'));
 
-		// The portable query, exactly as a resize utility sends it.
-		// ESC 7 and ESC 8 are reserved zero-parameter sub-codes here,
-		// so they must be harmless; the clamp is what finds the corner.
+		// The portable query, exactly as a resize utility sends it:
+		// the clamp finds the corner, and ESC 7 / ESC 8 must leave the
+		// cursor where it was -- just after the 'Q', at 5;18.
 		send(v, "\x1b" "7" "\x1b[999;999H" "\x1b[6n" "\x1b" "8");
 		settle(v);
 		CHECK(take_input(v) == E + "[30;128R");
+		send(v, "\x1b[6n");
+		settle(v);
+		CHECK(take_input(v) == E + "[5;18R");
 
 		// Nothing in any of that was printed: the sequences were
 		// consumed whole. Row 0 is where a stray "999;999H" would land.
@@ -4591,6 +4594,41 @@ int main()
 		send(v, "\x1b[18t");
 		settle(v);
 		CHECK(take_input(v) == E + "[8;3;10t");
+
+		// SAVE AND RESTORE ARE PER WINDOW. Window 1 saves 2;3, the root
+		// saves 4;9, and each restores its own: one slot shared by the
+		// console would give window 1 the root's position.
+		send(v, "\x1b[2;3H" "\x1b" "7");
+		v.write(DATA, 0x1B); v.write(DATA, 0x21); v.write(DATA, 0);
+		send(v, "\x1b[4;9H" "\x1b" "7" "\x1b[1;1H");
+		v.write(DATA, 0x1B); v.write(DATA, 0x21); v.write(DATA, 1);
+		send(v, "\x1b[1;1H" "\x1b" "8" "\x1b[6n");
+		settle(v);
+		CHECK(take_input(v) == E + "[2;3R");
+		v.write(DATA, 0x1B); v.write(DATA, 0x21); v.write(DATA, 0);
+		send(v, "\x1b" "8" "\x1b[6n");
+		settle(v);
+		CHECK(take_input(v) == E + "[4;9R");
+
+		// A restore is CLAMPED when CWArea has narrowed the working area
+		// since the save: saved at 3;10, area now 2 x 2.
+		v.write(DATA, 0x1B); v.write(DATA, 0x21); v.write(DATA, 1);
+		send(v, "\x1b[3;10H" "\x1b" "7");
+		v.write(DATA, 0x1B); v.write(DATA, 0x25);
+		v.write(DATA, 0); v.write(DATA, 0);
+		v.write(DATA, 2); v.write(DATA, 2);
+		send(v, "\x1b" "8" "\x1b[6n");
+		settle(v);
+		CHECK(take_input(v) == E + "[2;2R");
+
+		// Redefining the window forgets its saved position: a restore
+		// then homes, as one before any save does.
+		v.write(DATA, 0x1B); v.write(DATA, 0x20);
+		for (uint8_t i = 0; i < 8; i++) v.write(DATA, dw[i]);
+		v.write(DATA, 0x1B); v.write(DATA, 0x21); v.write(DATA, 1);
+		send(v, "\x1b[2;2H" "\x1b" "8" "\x1b[6n");
+		settle(v);
+		CHECK(take_input(v) == E + "[1;1R");
 
 		v.write(STAT, VID_CTL_RESET);
 		settle(v);
