@@ -79,6 +79,23 @@ static void settle(PicoVideo &v)
 	failures++;
 }
 
+// Everything the guest could read back right now, as a string -- the input
+// FIFO drained the way the guest drains it, one RDRF-confirmed read a byte.
+static std::string take_input(PicoVideo &v)
+{
+	std::string got;
+
+	for (int i = 0; i < 1024 && (v.read(STAT) & VID_STAT_RDRF); i++)
+		got += (char)v.read(DATA);
+	return got;
+}
+
+static void send(PicoVideo &v, const char *bytes)
+{
+	for (const char *p = bytes; *p != '\0'; p++)
+		v.write(DATA, (Byte)*p);
+}
+
 // The same, for a cell in INVERSE video: the glyph's mask is flipped, so the
 // cell is white and the glyph shows the (black) background through it.
 static bool check_cell_inverse(int col, int row, uint8_t ch)
@@ -4444,6 +4461,139 @@ int main()
 		v.write(DATA, 0x0C);
 		settle(v);
 		CHECK(gfx_shadow_base() != nullptr);
+	}
+
+	// ANSI/VT100 TERMINAL QUERIES ("ESC [", $1B $5B). These exist for a guest
+	// on a serial console, which has no register window and so no VID.Info:
+	// it learns the screen's size as xterm's resize does, by asking. The
+	// replies come back as INPUT, read like keystrokes.
+	//
+	// Positions are chosen with row != column throughout, so a reply with
+	// its numbers swapped cannot pass, and the window is neither square nor
+	// at the origin, so a reply in panel terms instead of window terms
+	// cannot pass either.
+	{
+		static const std::string E = "\x1b";
+
+		v.write(STAT, VID_CTL_RESET);
+		settle(v);
+		v.write(DATA, 0x0C);
+		settle(v);
+		CHECK(take_input(v).empty());
+
+		// The direct size query: the working area, as VID.Info has it.
+		send(v, "\x1b[18t");
+		settle(v);
+		CHECK(take_input(v) == E + "[8;30;128t");
+
+		// Cursor position and the report, 1-based.
+		send(v, "\x1b[5;17H\x1b[6n");
+		settle(v);
+		CHECK(take_input(v) == E + "[5;17R");
+		v.write(DATA, 'Q');		// and the cursor really is there
+		settle(v);
+		CHECK(check_cell(16, 4, 'Q'));
+
+		// The portable query, exactly as a resize utility sends it.
+		// ESC 7 and ESC 8 are reserved zero-parameter sub-codes here,
+		// so they must be harmless; the clamp is what finds the corner.
+		send(v, "\x1b" "7" "\x1b[999;999H" "\x1b[6n" "\x1b" "8");
+		settle(v);
+		CHECK(take_input(v) == E + "[30;128R");
+
+		// Nothing in any of that was printed: the sequences were
+		// consumed whole. Row 0 is where a stray "999;999H" would land.
+		for (int c = 0; c < 12; c++)
+			CHECK(check_cell(c, 0, ' '));
+
+		// Defaults: omitted and zero both mean 1, per parameter.
+		send(v, "\x1b[H\x1b[6n");
+		settle(v);
+		CHECK(take_input(v) == E + "[1;1R");
+		send(v, "\x1b[;7H\x1b[6n");
+		settle(v);
+		CHECK(take_input(v) == E + "[1;7R");
+		send(v, "\x1b[0;0f\x1b[6n");	// HVP, the same function
+		settle(v);
+		CHECK(take_input(v) == E + "[1;1R");
+
+		// A value too large saturates rather than wrapping. 65539 is
+		// chosen because it wraps SMALL in 16 bits (to 3), so a
+		// wrapping accumulator would put the cursor on row 3 instead
+		// of clamping it to the bottom.
+		send(v, "\x1b[65539;4H\x1b[6n");
+		settle(v);
+		CHECK(take_input(v) == E + "[30;4R");
+
+		// Consumed and NOT answered: a private sequence, DEC's extended
+		// report, a different DSR, a two-parameter 6n, and -- the one
+		// that matters -- the window RESIZE request, which shares 't'
+		// with the size query and must never be mistaken for it.
+		send(v, "\x1b[3;9H");
+		send(v, "\x1b[?25l" "\x1b[?6n" "\x1b[5n" "\x1b[6;1n"
+		    "\x1b[8;24;80t" "\x1b[2J" "\x1b[1 q");
+		v.write(DATA, 'Z');		// the stream is still in step
+		settle(v);
+		CHECK(take_input(v).empty());
+		CHECK(check_cell(8, 2, 'Z'));
+
+		// A byte that is not part of any sequence ends it early and is
+		// then acted on: CR here, so 'K' lands at column 0 and the '3'
+		// before it is not printed.
+		send(v, "\x1b[3;9H" "\x1b[4" "\r" "K");
+		settle(v);
+		CHECK(check_cell(0, 2, 'K'));
+		CHECK(!check_cell(1, 2, '4'));
+		// ... and an ESC inside one starts a fresh escape.
+		send(v, "\x1b[12\x1b[6n");
+		settle(v);
+		CHECK(take_input(v) == E + "[3;2R");
+
+		// A $1B that is a PARAMETER is not an escape at all: $02 takes
+		// two position bytes whatever they are, so '[' here is the row
+		// (clamped to the bottom) and 'W' prints there.
+		v.write(DATA, 0x02); v.write(DATA, 0x1B); v.write(DATA, 0x5B);
+		v.write(DATA, 'W');
+		settle(v);
+		CHECK(check_cell(0, 29, 'W'));
+		CHECK(take_input(v).empty());
+
+		// In a WINDOW: 10 x 3 at column 4, row 2, selected. Every answer
+		// is in that window's terms.
+		v.write(DATA, 0x1B); v.write(DATA, 0x20);
+		const uint8_t dw[8] = { 1, 0, 4, 2, 10, 3, 0, 0 };
+		for (uint8_t i = 0; i < 8; i++) v.write(DATA, dw[i]);
+		v.write(DATA, 0x1B); v.write(DATA, 0x26); v.write(DATA, 1);
+		v.write(DATA, 0x1B); v.write(DATA, 0x21); v.write(DATA, 1);
+		settle(v);
+		send(v, "\x1b[18t");
+		settle(v);
+		CHECK(take_input(v) == E + "[8;3;10t");
+		send(v, "\x1b[999;999H\x1b[6n");
+		settle(v);
+		CHECK(take_input(v) == E + "[3;10R");
+		send(v, "\x1b[2;3H" "V");
+		settle(v);
+		CHECK(check_cell(4 + 2, 2 + 1, 'V'));
+
+		// WHOLE OR NOT AT ALL. With 250 of 256 input bytes already
+		// waiting there is room for 6, and the size reply is 9
+		// (ESC [ 8 ; 3 ; 1 0 t). None of it may go: a guest reading the
+		// first six would wait for the rest and take the user's next
+		// keystrokes as the digits.
+		for (int i = 0; i < 250; i++)
+			vid_link_input('a');
+		send(v, "\x1b[18t");
+		settle(v);
+		const std::string full = take_input(v);
+		CHECK(full == std::string(250, 'a'));
+		// With room, the same query is answered in full.
+		send(v, "\x1b[18t");
+		settle(v);
+		CHECK(take_input(v) == E + "[8;3;10t");
+
+		v.write(STAT, VID_CTL_RESET);
+		settle(v);
 	}
 
 	// M0 loopback still works after M1 (the vlink test must keep passing).
