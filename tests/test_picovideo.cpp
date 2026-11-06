@@ -27,7 +27,7 @@
 #include "gfx_bufs.h"
 #include "win_store.h"
 #include "pv_psram.h"
-#include "font_spleen_8x16.h"
+#include "font_8x16.h"
 
 static int failures = 0;
 
@@ -85,7 +85,7 @@ static bool check_cell_inverse(int col, int row, uint8_t ch)
 {
 	vidterm_cursor_hide();
 	for (int gy = 0; gy < CHAR_H; gy++) {
-		uint8_t mask = font_spleen_8x16[ch][gy];
+		uint8_t mask = font_8x16[ch][gy];
 		for (int gx = 0; gx < CHAR_W; gx++) {
 			uint8_t want = (mask & (0x80 >> gx)) ? 0x00 : 0xFF;
 			if (video_framebuffer[row * CHAR_H + gy][col * CHAR_W + gx] != want)
@@ -104,7 +104,7 @@ static bool check_cell(int col, int row, uint8_t ch)
 	vidterm_cursor_hide();
 
 	for (int gy = 0; gy < CHAR_H; gy++) {
-		uint8_t mask = font_spleen_8x16[ch][gy];
+		uint8_t mask = font_8x16[ch][gy];
 		for (int gx = 0; gx < CHAR_W; gx++) {
 			uint8_t want = (mask & (0x80 >> gx)) ? 0xFF : 0x00;
 			if (video_framebuffer[row * CHAR_H + gy][col * CHAR_W + gx] != want)
@@ -3353,7 +3353,7 @@ int main()
 					// Bit 4 is INVERSE: the mask flips, so the
 					// cell is foreground and the glyph shows the
 					// background. 0x9C in ATTRS carries it.
-					const uint8_t m = (uint8_t)(font_spleen_8x16[ch][gy] ^
+					const uint8_t m = (uint8_t)(font_8x16[ch][gy] ^
 					    ((at & 0x10) ? 0xFF : 0x00));
 					const int py = row * CHAR_H + gy;
 
