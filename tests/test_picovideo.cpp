@@ -755,25 +755,26 @@ int main()
 		kbd(0x00, 0x3B); released(); CHECK(typed() == 0x81);   // F2
 		kbd(0x00, 0x45); released(); CHECK(typed() == 0x8B);   // F12
 
-		// The arrows send the CoCo keyboard's bytes, from vtio's KeyTbl:
-		// plain, Shift and Ctrl each have their own column, and minted
-		// pages, deletes and jumps to line ends with the modified ones.
-		// Every arrow in every column, with left and right Shift and
-		// Ctrl both, and Shift winning over Ctrl as it does in vtio. A
-		// first version ignored modifiers (following the Wildbits
-		// driver) and this test asserted that; it was wrong.
+		// EVERY KEY IS ONE BYTE, and the arrows and editing keys have
+		// bit-7 codes of their own: arrows (up, down, left, right) plain
+		// $8C-$8F, Shift $90-$93, Ctrl $94-$97. They used to send vtio's
+		// KeyTbl bytes, which are control codes (left was Backspace's $08,
+		// right Tab's $09, up FF, down LF), so no program could tell them
+		// apart. Every arrow in every column, with left and right Shift
+		// and Ctrl both, and Shift winning over Ctrl as it does in vtio.
 		{
 			static const struct { uint8_t usage; uint8_t col[3]; } AR[] = {
-				{ 0x52, { 0x0C, 0x1C, 0x13 } },	// up
-				{ 0x51, { 0x0A, 0x1A, 0x12 } },	// down
-				{ 0x50, { 0x08, 0x18, 0x10 } },	// left
-				{ 0x4F, { 0x09, 0x19, 0x11 } },	// right
+				{ 0x52, { 0x8C, 0x90, 0x94 } },	// up
+				{ 0x51, { 0x8D, 0x91, 0x95 } },	// down
+				{ 0x50, { 0x8E, 0x92, 0x96 } },	// left
+				{ 0x4F, { 0x8F, 0x93, 0x97 } },	// right
 			};
 			static const struct { uint8_t mod; int col; } MODS[] = {
 				{ 0x00, 0 },
 				{ 0x02, 1 }, { 0x20, 1 },	// left, right Shift
 				{ 0x01, 2 }, { 0x10, 2 },	// left, right Ctrl
 				{ 0x03, 1 },			// both: Shift wins
+				{ 0x04, 0 }, { 0x46, 1 },	// Alt changes nothing
 			};
 			int bad = 0;
 			for (const auto &a : AR)
@@ -788,6 +789,107 @@ int main()
 					}
 				}
 			CHECK(bad == 0);
+		}
+
+		// The editing keys: Home $98, End $99, PgUp $9A, PgDn $9B, Ins
+		// $9D, Del $9E (the forward delete) -- $9C is the pound sign.
+		// Shift, Ctrl and Alt change none of them.
+		{
+			static const struct { uint8_t usage; int want; } ED[] = {
+				{ 0x4A, 0x98 }, { 0x4D, 0x99 }, { 0x4B, 0x9A },
+				{ 0x4E, 0x9B }, { 0x49, 0x9D }, { 0x4C, 0x9E },
+			};
+			int bad = 0;
+			for (const auto &k : ED)
+				for (uint8_t mod : { 0x00, 0x02, 0x01, 0x04, 0x40, 0x77 }) {
+					kbd(mod, k.usage); released();
+					const int got = typed();
+					if (got != k.want) {
+						fprintf(stderr, "  edit key 0x%02X mod"
+						    " 0x%02X sent %d, not %d\n",
+						    k.usage, mod, got, k.want);
+						bad++;
+					}
+				}
+			CHECK(bad == 0);
+		}
+
+		// Backspace and Tab are unchanged, and now unambiguous.
+		kbd(0x00, 0x2A); released(); CHECK(typed() == 0x08);
+		kbd(0x00, 0x2B); released(); CHECK(typed() == 0x09);
+
+		// ALT sets bit 7 on a printable result, the CoCo3 convention:
+		// $20-$7E become $A0-$FE, with either Alt key. It leaves control
+		// characters alone (CR, Esc, Backspace, Tab, Ctrl chords) and
+		// anything already high. Alt-* is $AA, the not sign's byte and
+		// the same CP437 character -- the one deliberate overlap.
+		{
+			static const struct { uint8_t mod, usage; int want; } AL[] = {
+				{ 0x04, 0x04, 0xE1 },	// LAlt a
+				{ 0x40, 0x04, 0xE1 },	// RAlt a
+				{ 0x44, 0x04, 0xE1 },	// both
+				{ 0x06, 0x04, 0xC1 },	// LAlt Shift a = 'A'|$80
+				{ 0x04, 0x2C, 0xA0 },	// Alt space, the low end
+				{ 0x24, 0x31, 0xFE },	// Alt Shift # = '~'|$80, the top
+				{ 0x04, 0x1E, 0xB1 },	// Alt 1
+				{ 0x04, 0x55, 0xAA },	// Alt keypad * = the not sign
+				{ 0x04, 0x28, 0x0D },	// Alt Enter: CR
+				{ 0x04, 0x29, 0x1B },	// Alt Esc
+				{ 0x04, 0x2A, 0x08 },	// Alt Backspace
+				{ 0x04, 0x2B, 0x09 },	// Alt Tab
+				{ 0x05, 0x04, 0x01 },	// Alt Ctrl a: ^A, unmarked
+				{ 0x04, 0x3A, 0x80 },	// Alt F1
+				{ 0x06, 0x20, 0x9C },	// Alt Shift 3: pound stays
+				{ 0x06, 0x35, 0xAA },	// Alt Shift `: not stays
+			};
+			int bad = 0;
+			for (const auto &k : AL) {
+				kbd(k.mod, k.usage); released();
+				const int got = typed();
+				if (got != k.want) {
+					fprintf(stderr, "  alt 0x%02X mod 0x%02X sent"
+					    " %d, not %d\n", k.usage, k.mod, got,
+					    k.want);
+					bad++;
+				}
+			}
+			CHECK(bad == 0);
+		}
+
+		// THE SPECIAL CODES ARE DISTINGUISHABLE: across every usage and
+		// a spread of modifier chords, only the function keys, arrows and
+		// editing keys produce $80-$9B, $9D or $9E. An oracle over the
+		// whole keyboard, not a spot check, because the Alt bit could
+		// land a chord on one of them.
+		{
+			auto special_code = [](int c) {
+				return c >= 0x80 && c <= 0x9E && c != 0x9C;
+			};
+			auto special_key = [](uint8_t u) {
+				return (u >= 0x3A && u <= 0x45) ||	// F1-F12
+				    (u >= 0x49 && u <= 0x52);		// edit, arrows
+			};
+			static const uint8_t MODS[] = {
+				0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40,
+				0x80, 0x03, 0x06, 0x05, 0x07, 0x60, 0xFF,
+			};
+			int bad = 0, specials = 0;
+			for (unsigned u = 0x04; u <= 0x65; u++) {
+				if (u == 0x39 || u == 0x53)
+					continue;	// the lock keys toggle
+				for (uint8_t mod : MODS) {
+					kbd(mod, (uint8_t)u); released();
+					const int got = typed();
+					if (special_code(got) != special_key((uint8_t)u)) {
+						fprintf(stderr, "  usage 0x%02X mod"
+						    " 0x%02X sent %d\n", u, mod, got);
+						bad++;
+					}
+					specials += special_code(got);
+				}
+			}
+			CHECK(bad == 0);
+			CHECK(specials == 22 * 15);	// 12 F, 6 edit, 4 arrows; each chord
 		}
 
 		// The keypad, Num Lock on (the power-on state): the same bytes
@@ -816,33 +918,38 @@ int main()
 			CHECK(bad == 0);
 		}
 
-		// Num Lock off: 8/2/4/6 are the arrows, the keypad's editing
-		// keys send nothing (as the dedicated ones do), and the
-		// operators and Enter are unaffected. Num Lock itself sends
-		// nothing either way.
+		// Num Lock off: 8/2/4/6 are the arrows and 7/1/9/3/0/. the
+		// editing keys, sending what the dedicated keys send; 5 sends
+		// nothing, and the operators and Enter are unaffected. Num Lock
+		// itself sends nothing either way.
 		kbd(0x00, 0x53); released(); CHECK(typed() == -1);
 		CHECK(!hid_cook_num_lock());
-		kbd(0x00, 0x60); released(); CHECK(typed() == 0x0C);   // KP8 up
-		kbd(0x00, 0x5A); released(); CHECK(typed() == 0x0A);   // KP2 down
-		kbd(0x00, 0x5C); released(); CHECK(typed() == 0x08);   // KP4 left
-		kbd(0x00, 0x5E); released(); CHECK(typed() == 0x09);   // KP6 right
-		kbd(0x02, 0x60); released(); CHECK(typed() == 0x1C);   // Shift KP8
-		kbd(0x01, 0x5C); released(); CHECK(typed() == 0x10);   // Ctrl KP4
-		kbd(0x00, 0x5F); released(); CHECK(typed() == -1);     // KP7 Home
+		kbd(0x00, 0x60); released(); CHECK(typed() == 0x8C);   // KP8 up
+		kbd(0x00, 0x5A); released(); CHECK(typed() == 0x8D);   // KP2 down
+		kbd(0x00, 0x5C); released(); CHECK(typed() == 0x8E);   // KP4 left
+		kbd(0x00, 0x5E); released(); CHECK(typed() == 0x8F);   // KP6 right
+		kbd(0x02, 0x60); released(); CHECK(typed() == 0x90);   // Shift KP8
+		kbd(0x01, 0x5C); released(); CHECK(typed() == 0x96);   // Ctrl KP4
+		kbd(0x00, 0x5F); released(); CHECK(typed() == 0x98);   // KP7 Home
+		kbd(0x00, 0x59); released(); CHECK(typed() == 0x99);   // KP1 End
+		kbd(0x00, 0x61); released(); CHECK(typed() == 0x9A);   // KP9 PgUp
+		kbd(0x00, 0x5B); released(); CHECK(typed() == 0x9B);   // KP3 PgDn
+		kbd(0x00, 0x62); released(); CHECK(typed() == 0x9D);   // KP0 Ins
+		kbd(0x00, 0x63); released(); CHECK(typed() == 0x9E);   // KP. Del
+		kbd(0x04, 0x63); released(); CHECK(typed() == 0x9E);   // Alt: same
 		kbd(0x00, 0x5D); released(); CHECK(typed() == -1);     // KP5
-		kbd(0x00, 0x63); released(); CHECK(typed() == -1);     // KP. Del
 		kbd(0x00, 0x57); released(); CHECK(typed() == '+');
 		kbd(0x00, 0x58); released(); CHECK(typed() == 0x0D);
 		kbd(0x00, 0x53); released();
 		CHECK(hid_cook_num_lock());
 		kbd(0x00, 0x60); released(); CHECK(typed() == '8');    // back on
 
-		// Unmapped usages still produce nothing at all. Home, here --
-		// this check used F1 until F1 acquired a meaning, which is the
-		// same trap the reserved graphics sub-code fell into: a test
-		// written about "nothing" quietly becomes a test about
-		// something.
-		kbd(0x00, 0x4A); released(); CHECK(typed() == -1);
+		// Unmapped usages still produce nothing at all. Print Screen,
+		// here -- this check used F1, then Home, until each acquired a
+		// meaning, which is the same trap the reserved graphics sub-code
+		// fell into: a test written about "nothing" quietly becomes a
+		// test about something.
+		kbd(0x00, 0x46); released(); CHECK(typed() == -1);
 
 		// A short keyboard report is ignored rather than read past.
 		const uint8_t stub[4] = { 0, 0, 0x04, 0 };
@@ -926,10 +1033,16 @@ int main()
 			// The arrows DO repeat -- holding one to walk a cursor is
 			// the reason repeat exists -- and Num Lock does not.
 			held(0, 0x52, 0);			// up arrow
-			CHECK(typed() == 0x0C);
+			CHECK(typed() == 0x8C);
 			tick(0);
 			tick(500);
-			CHECK(typed() == 0x0C);
+			CHECK(typed() == 0x8C);
+			released();
+			held(0, 0x4C, 0);			// Delete, likewise
+			CHECK(typed() == 0x9E);
+			tick(0);
+			tick(500);
+			CHECK(typed() == 0x9E);
 			released();
 			held(0, 0x53, 0);			// Num Lock
 			tick(0);
@@ -1053,7 +1166,10 @@ int main()
 				kbd(0x02, 0x04); released();	// Shift-a
 				kbd(0x01, 0x06); released();	// Ctrl-c
 				kbd(0x00, 0x3A); released();	// F1
-				kbd(0x00, 0x4A); released();	// Home: unmapped
+				kbd(0x00, 0x46); released();	// PrtSc: unmapped
+				kbd(0x00, 0x4A); released();	// Home
+				kbd(0x02, 0x50); released();	// Shift Left
+				kbd(0x04, 0x04); released();	// Alt a
 				kbd(0x00, 0x39); released();	// Caps Lock
 				kbd(0x00, 0x39); released();	// ...and off
 				kbd(0x00, 0x53); released();	// Num Lock off
@@ -1075,13 +1191,17 @@ int main()
 			CHECK(has(e, "-> 0x03 ^C"));
 			CHECK(has(e, "usage 0x3A"));
 			CHECK(has(e, "-> 0x80 F1"));
-			CHECK(has(e, "usage 0x4A"));
+			CHECK(has(e, "usage 0x46"));
 			CHECK(has(e, "-> nothing: no mapping for this key"));
+			CHECK(has(e, "-> 0x98 Home"));
+			CHECK(has(e, "-> 0x92 Shift+Left"));
+			CHECK(has(e, "mod 0x04 LAlt"));
+			CHECK(has(e, "-> 0xE1 Alt+'a'"));
 			CHECK(has(e, "-> nothing: Caps Lock now ON"));
 			CHECK(has(e, "-> nothing: Caps Lock now OFF"));
 			CHECK(has(e, "-> nothing: Num Lock now OFF"));
 			CHECK(has(e, "-> nothing: Num Lock now ON"));
-			CHECK(has(e, "usage 0x52  mod 0x00 -              -> 0x0C ^L"));
+			CHECK(has(e, "usage 0x52  mod 0x00 -              -> 0x8C Up"));
 			CHECK(has(e, "KEY mods now 0x00 -"));
 			CHECK(has(e, "rollover: too many keys"));
 			CHECK(has(e, "KEY rpt  usage 0x05"));
