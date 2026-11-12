@@ -1954,6 +1954,64 @@ int main()
 		settle(v);
 	}
 
+	// Text to a HIDDEN window whose working area CWArea has narrowed. The
+	// parked screen is laid out as the whole window, while text is
+	// addressed in the working area, so a write, a wrap and a scroll must
+	// all land where they would have landed on screen -- and nothing in the
+	// window outside the working area may move. They used to be indexed at
+	// the working area's width from the window's corner.
+	{
+		static const uint8_t ESC = 0x1B;
+		auto out = [&](std::initializer_list<uint8_t> b) {
+			for (uint8_t x : b) v.write(DATA, x);
+		};
+		v.write(STAT, VID_CTL_RESET);
+		settle(v);
+		out({ 0x0C });
+		out({ ESC, 0x20, 1, 0, 4, 2, 12, 5, 0, 0 });	// id 1: 12x5 at 4,2
+		out({ ESC, 0x26, 1 });				// shown, for now
+		out({ 0x02, 0x20 + 11, 0x20 + 0, 'Z' });	// window cell 11,0
+		out({ ESC, 0x25, 2, 1, 6, 3 });			// area 6x3 at 2,1
+		out({ ESC, 0x26, 0 });				// hide it
+		settle(v);
+		CHECK(!check_cell(15, 2, 'Z'));			// really hidden
+
+		out({ 'A', 'B', 'C', 'D', 'E', 'F', 'G' });	// wraps after F
+		out({ ESC, 0x26, 1 });
+		settle(v);
+		CHECK(check_cell(6, 3, 'A'));			// the area's corner
+		CHECK(check_cell(11, 3, 'F'));			// its last column
+		CHECK(check_cell(6, 4, 'G'));			// wrapped in the area
+		CHECK(!check_cell(4, 2, 'A'));			// not the window's
+		CHECK(check_cell(15, 2, 'Z'));			// outside: untouched
+
+		// Scroll it while hidden: two line feeds from the second row
+		// reach the bottom and then scroll the area by one row.
+		out({ ESC, 0x26, 0 });
+		out({ 0x0A, 0x0A });
+		out({ ESC, 0x26, 1 });
+		settle(v);
+		CHECK(check_cell(6, 3, 'G'));			// moved up a row
+		CHECK(check_cell(7, 3, ' '));
+		CHECK(check_cell(6, 5, ' '));			// bottom row blank
+		CHECK(check_cell(15, 2, 'Z'));			// still untouched
+
+		// Insert a line at the top while hidden: G moves down again,
+		// within the area only.
+		out({ ESC, 0x26, 0 });
+		out({ 0x01, 0x1F, 0x30 });
+		out({ ESC, 0x26, 1 });
+		settle(v);
+		CHECK(check_cell(6, 4, 'G'));
+		CHECK(check_cell(6, 3, ' '));
+		CHECK(check_cell(15, 2, 'Z'));
+
+		out({ ESC, 0x26, 0 });
+		out({ ESC, 0x24 });				// DWEnd window 1
+		out({ 0x0C });
+		settle(v);
+	}
+
 	// A blank cell in a row where NO graphics has been drawn, while other
 	// rows HAVE been. That mixture is what every real screen looks like
 	// and what no previous test here produced: they either clear and draw
