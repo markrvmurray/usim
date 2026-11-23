@@ -18,6 +18,11 @@
 //	Breakpoints compare the PC rather than patching code, so software
 //	(Z0) and hardware (Z1) breakpoints behave the same.
 //
+//	"monitor" commands (qRcmd) reach the stub's own (help, trace,
+//	cycles) and then the machine's, through the monitor hook. A
+//	machine can also change what the debugger's memory accesses
+//	reach, as usim09pt does to look through another DAT task.
+//
 //	The end of the program is a stop first, with the machine still
 //	inspectable; continuing from there reports the exit status. An
 //	invalid instruction stops with SIGILL the same way.
@@ -27,6 +32,7 @@
 
 #pragma once
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -55,6 +61,7 @@ class GdbStub {
 	std::string		reg(unsigned n);
 	bool			set_reg(unsigned n, unsigned value);
 	std::string		query(const std::string& q);
+	std::string		monitor_command(const std::string& cmd);
 
 	// Serve packets until the client resumes (true) or ends (false).
 	bool			serve(const std::string& stop);
@@ -64,6 +71,16 @@ public:
 	static const int	DEFAULT_PORT = 2159;	// as MAME's
 
 	explicit		GdbStub(mc6809& cpu);
+
+	// What the debugger's memory reads and writes reach: by default the
+	// CPU's address space as it stands, without cycles or side effects.
+	std::function<Byte(Word)>	read_memory;
+	std::function<void(Word, Byte)>	write_memory;
+
+	// The machine's monitor commands: true if it knows cmd, with its
+	// output (lines ending in newlines) in out.
+	std::function<bool(const std::string& cmd, std::string& out)> monitor;
+	std::string			monitor_help;	// its lines for "help"
 				~GdbStub();
 
 	// Wait for one client. Port 0 takes any free port; port_file, if

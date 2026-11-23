@@ -95,6 +95,8 @@ static bool parse_hex(const std::string& s, size_t& pos, unsigned long& value)
 GdbStub::GdbStub(mc6809& cpu)
 	: cpu(cpu), breakpoints(0x10000, false)
 {
+	read_memory = [&cpu](Word a) { return cpu.debug_read(a); };
+	write_memory = [&cpu](Word a, Byte v) { cpu.debug_write(a, v); };
 }
 
 GdbStub::~GdbStub()
@@ -324,6 +326,30 @@ std::string GdbStub::stop_reply(int signal, bool breakpoint)
 }
 
 //----------------------------------------------------------------------------
+// Monitor commands
+//----------------------------------------------------------------------------
+
+std::string GdbStub::monitor_command(const std::string& cmd)
+{
+	std::string out;
+	if (cmd == "help" || cmd.empty()) {
+		out =	"help              this list\n"
+			"trace on|off      the instruction trace, to stderr\n"
+			"cycles            the CPU's total cycles\n";
+		out += monitor_help;
+	} else if (cmd == "trace on") {
+		cpu.tron();
+	} else if (cmd == "trace off") {
+		cpu.troff();
+	} else if (cmd == "cycles") {
+		out = std::to_string(cpu.get_total_cycles()) + "\n";
+	} else if (!(monitor && monitor(cmd, out))) {
+		out = "unknown command: " + cmd + " (try \"monitor help\")\n";
+	}
+	return out;
+}
+
+//----------------------------------------------------------------------------
 // Queries
 //----------------------------------------------------------------------------
 
@@ -352,6 +378,19 @@ std::string GdbStub::query(const std::string& q)
 	// sessions always start from one.
 	if (q == "qHostInfo")
 		return "triple:" + TRIPLE_HEX + ";endian:big;ptrsize:2;";
+	if (q.rfind("qRcmd,", 0) == 0) {
+		std::string cmd;
+		for (size_t i = 6; i + 1 < q.size(); i += 2)
+			cmd += (char)strtoul(q.substr(i, 2).c_str(), nullptr, 16);
+		std::string out = monitor_command(cmd);
+		if (!out.empty()) {
+			std::string hex = "O";
+			for (unsigned char c : out)
+				hex += hex8(c);
+			send(hex);
+		}
+		return "OK";
+	}
 	if (q == "qProcessInfo")
 		return "pid:1;triple:" + TRIPLE_HEX + ";endian:big;ptrsize:2;";
 	if (q == "qC")
@@ -412,7 +451,7 @@ bool GdbStub::serve(const std::string& stop)
 			    parse_hex(p, pos, len)) {
 				std::string out;
 				for (unsigned long i = 0; i < len; i++)
-					out += hex8(cpu.debug_read((Word)(addr + i)));
+					out += hex8(read_memory((Word)(addr + i)));
 				send(out);
 			} else
 				send("E01");
@@ -422,7 +461,7 @@ bool GdbStub::serve(const std::string& stop)
 			    parse_hex(p, pos, len) && pos < p.size() && p[pos++] == ':' &&
 			    p.size() - pos >= 2 * len) {
 				for (unsigned long i = 0; i < len; i++)
-					cpu.debug_write((Word)(addr + i), (Byte)strtoul(p.substr(pos + 2 * i, 2).c_str(), nullptr, 16));
+					write_memory((Word)(addr + i), (Byte)strtoul(p.substr(pos + 2 * i, 2).c_str(), nullptr, 16));
 				send("OK");
 			} else
 				send("E01");

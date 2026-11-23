@@ -2,8 +2,9 @@
 //	test_gdbstub.cpp
 //	The GDB remote protocol stub, driven over a socket pair the way lldb
 //	drives it: the stop at reset, the CPU description, registers,
-//	memory, single step, breakpoints, Ctrl-C, kill, detach, and the
-//	stops at the program's exit and at an invalid instruction.
+//	memory, single step, breakpoints, monitor commands, Ctrl-C, kill,
+//	detach, and the stops at the program's exit and at an invalid
+//	instruction.
 //
 //	The emulator runs on its own thread, as the run loop in usim09batch
 //	does; the test is the client.
@@ -125,6 +126,24 @@ struct Client {
 	{
 		send(payload);
 		return reply();
+	}
+
+	// A monitor command's output, and whether it ended in OK
+	std::string monitor(const std::string& command, bool& ok)
+	{
+		std::string hex = "qRcmd,";
+		for (unsigned char ch : command) {
+			char b[3];
+			snprintf(b, sizeof b, "%02x", ch);
+			hex += b;
+		}
+		send(hex);
+		std::string out, r;
+		while ((r = reply())[0] == 'O' && r != "OK")
+			for (size_t i = 1; i + 1 < r.size(); i += 2)
+				out += (char)strtoul(r.substr(i, 2).c_str(), nullptr, 16);
+		ok = r == "OK";
+		return out;
 	}
 };
 
@@ -272,6 +291,44 @@ static void test_invalid()
 	expect("faulted", s.finish() == -2);
 }
 
+static void test_monitor()
+{
+	Session s({ 0x12, 0x20, 0xFE });	// NOP; BRA *
+	Client& c = s.c;
+	bool ok;
+	std::string peeked;
+
+	// a machine's own command, and its view of memory
+	s.gdb.monitor_help = "poke VALUE        the machine's command\n";
+	s.gdb.monitor = [](const std::string& cmd, std::string& out) {
+		if (cmd != "hello")
+			return false;
+		out = "hello from the machine\n";
+		return true;
+	};
+	s.gdb.read_memory = [](Word a) { return (Byte)(a & 0xff); };
+
+	c.cmd("?");
+	std::string out = c.monitor("help", ok);
+	expect("help", ok && has(out, "trace on|off") && has(out, "the machine's command"), out);
+	out = c.monitor("cycles", ok);
+	expect("cycles", ok && out == "0\n", out);
+	c.cmd("s");
+	// the total lags the instruction just run (USim folds it in at
+	// the next tick), so only that it moves is certain
+	out = c.monitor("cycles", ok);
+	expect("cycles after a NOP", ok && strtoul(out.c_str(), nullptr, 10) > 0, out);
+	out = c.monitor("hello", ok);
+	expect("machine command", ok && out == "hello from the machine\n", out);
+	out = c.monitor("frobnicate", ok);
+	expect("unknown command", ok && has(out, "unknown command: frobnicate"), out);
+	std::string r = c.cmd("m1234,2");
+	expect("memory view hook", r == "3435", r);
+
+	c.send("k");
+	expect("kill", s.finish() == -1);
+}
+
 // A debugger's memory access costs the guest no cycles
 static void test_cycle_neutral()
 {
@@ -294,6 +351,7 @@ int main()
 	test_interrupt_and_kill();
 	test_detach();
 	test_invalid();
+	test_monitor();
 	test_cycle_neutral();
 
 	if (failures) {
