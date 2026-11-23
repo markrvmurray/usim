@@ -23,6 +23,14 @@ void vid_link_input(uint8_t c)
 	got.push_back(c);
 }
 
+// A console reply to a terminal query reaches the guest as input, in the
+// same queue as keystrokes.
+bool vid_link_input_reply(const uint8_t* bytes, unsigned n)
+{
+	got.insert(got.end(), bytes, bytes + n);
+	return true;
+}
+
 // picovideo.cpp's side of the link, which this test leaves out.
 void vid_link_bell(void)
 {
