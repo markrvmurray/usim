@@ -67,6 +67,7 @@ public:
 
 	virtual Byte		read(Word offset);
 	virtual void		write(Word offset, Byte val);
+	virtual Byte		peek(Word offset);
 
 // Other exposed interfaces
 public:

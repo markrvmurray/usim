@@ -84,5 +84,6 @@ public:
 	virtual		~PicoIDE();
 
 	Byte		read(Word offset) override;
+	Byte		peek(Word offset) override;
 	void		write(Word offset, Byte val) override;
 };

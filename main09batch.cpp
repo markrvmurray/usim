@@ -270,7 +270,7 @@ int main(int argc, char *argv[])
 	// instruction count. Use --trace alongside for full CPU state.
 	Byte watch_prev = 0;
 	if (watching) {
-		watch_prev = cpu.read(watch_addr);
+		watch_prev = cpu.debug_read(watch_addr);
 		fprintf(stderr, "WATCH: $%04X initial=%02X\n", watch_addr, watch_prev);
 	}
 
@@ -352,9 +352,9 @@ int main(int argc, char *argv[])
 				prof_have_prev = true;
 			}
 			if (watching) {
-				Byte cur = cpu.read(watch_addr);
+				Byte cur = cpu.debug_read(watch_addr);
 				if (cur != watch_prev) {
-					Byte next = cpu.read(watch_addr + 1);
+					Byte next = cpu.debug_read(watch_addr + 1);
 					fprintf(stderr, "WATCH: $%04X %02X->%02X (word=%02X%02X) "
 						"PC=$%04X A=%02X B=%02X X=%04X Y=%04X U=%04X S=%04X "
 						"[insn#%lu]\n",

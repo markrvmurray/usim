@@ -157,12 +157,13 @@ test: tests/test6809 tests/test6809.bin tests/test6309 tests/test6309.bin \
       tests/test_mmu_tick tests/test_system_watchpoint tests/test_picoide \
       tests/test_picortc tests/test_cycles6309 tests/test_picovideo \
       tests/test_picovideo_keys tests/cycletest09 tests/cycletest09.bin tests/test_exgtfr \
-      tests/test_prefix tests/test_gdbstub
+      tests/test_prefix tests/test_gdbstub tests/test_peek
 	./tests/test6809
 	./tests/cycletest09
 	./tests/test_exgtfr
 	./tests/test_prefix
 	./tests/test_gdbstub
+	./tests/test_peek
 	./tests/test6309
 	./tests/test_mmu_tick
 	./tests/test_system_watchpoint
@@ -194,6 +195,9 @@ tests/test_prefix: tests/test_prefix.cpp $(LIB)
 
 tests/test_gdbstub: tests/test_gdbstub.cpp $(LIB)
 	$(CXX) $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_gdbstub.cpp -L. -lusim -o $(@)
+
+tests/test_peek: tests/test_peek.cpp $(LIB)
+	$(CXX) $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_peek.cpp -L. -lusim -o $(@)
 
 # Links the real firmware link/renderer objects; the SDL display TU is
 # replaced by stubs inside the test, so no SDL dependency here.
@@ -303,7 +307,7 @@ cycles6309: tests/test6309 tests/test6309.bin
 
 .PHONY: clean
 clean:
-	$(RM) $(BIN) $(LIB) *.o *.d tests/test_mmu_tick tests/*.o tests/*.d tests/test6809.bin tests/test_system_watchpoint tests/test_picoide tests/test_picortc tests/test_exgtfr tests/test_prefix tests/test_gdbstub tests/test_cycles6309 tests/test_picovideo tests/test_picovideo_keys tests/cycletest09.bin
+	$(RM) $(BIN) $(LIB) *.o *.d tests/test_mmu_tick tests/*.o tests/*.d tests/test6809.bin tests/test_system_watchpoint tests/test_picoide tests/test_picortc tests/test_exgtfr tests/test_prefix tests/test_gdbstub tests/test_peek tests/test_cycles6309 tests/test_picovideo tests/test_picovideo_keys tests/cycletest09.bin
 
 # Compiler-generated header dependencies (see CPPFLAGS -MMD -MP). Pulling
 # these in means editing any header recompiles exactly the objects that

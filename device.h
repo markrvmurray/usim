@@ -36,6 +36,12 @@ public:
 	virtual Byte		read(Word offset) = 0;
 	virtual void		write(Word offset, Byte val) = 0;
 
+	// What read() would return, for a debugger or a monitor looking
+	// at the machine, without read()'s side effects: no status flag
+	// cleared, no FIFO popped, no fault raised. A device whose reads
+	// change its state must override this.
+	virtual Byte		peek(Word offset) { return read(offset); }
+
 public:
 	using shared_ptr = std::shared_ptr<MappedDevice>;
 

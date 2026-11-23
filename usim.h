@@ -49,7 +49,8 @@ public:
 
 	// Debugger access: the same device dispatch as read() and write()
 	// but charging no bus cycle, so inspecting the machine never moves
-	// its clock. A device with read side effects still sees them.
+	// its clock. A read peeks, so it disturbs no device either; a
+	// write is a deliberate store and has a store's effects.
 	Byte			debug_read(Word offset);
 	void			debug_write(Word offset, Byte val);
 

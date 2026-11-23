@@ -73,6 +73,12 @@ Byte mc6850::read(Word offset)
 	}
 }
 
+// reading the data register leaves the received byte pending
+Byte mc6850::peek(Word offset)
+{
+	return (offset & 1) ? rd : sr;
+}
+
 void mc6850::write(Word offset, Byte val)
 {
 	switch (offset & 1) {

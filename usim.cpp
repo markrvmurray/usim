@@ -117,7 +117,8 @@ MappedDeviceEntry* USim::mapped_at(Word offset)
 Byte USim::read(Word offset)
 {
 	++cycles;
-	return debug_read(offset);
+	auto d = mapped_at(offset);
+	return d ? d->device->read(offset - d->base) : 0xff;
 }
 
 // Single byte write
@@ -130,7 +131,7 @@ void USim::write(Word offset, Byte val)
 Byte USim::debug_read(Word offset)
 {
 	auto d = mapped_at(offset);
-	return d ? d->device->read(offset - d->base) : 0xff;
+	return d ? d->device->peek(offset - d->base) : 0xff;
 }
 
 void USim::debug_write(Word offset, Byte val)

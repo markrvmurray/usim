@@ -221,6 +221,16 @@ Byte PicoIDE::read(Word offset)
 	}
 }
 
+// the data register's low byte without advancing the buffer
+Byte PicoIDE::peek(Word offset)
+{
+	if (offset == 1) {
+		const Drive& d = sel();
+		return (d.status & SR_DRQ) ? d.buffer[d.buf_ptr + 1] : 0xFF;
+	}
+	return read(offset);
+}
+
 void PicoIDE::write(Word offset, Byte val)
 {
 	switch (offset) {
