@@ -204,6 +204,10 @@ struct WlogSpec {
 	unsigned long	len;
 };
 
+// The exit status of a run a detector stopped: a suspicion, so neither
+// success nor a crash.
+static const int	DETECTOR_STOP = 3;
+
 // A store's physical target, when it has none: a logical address the
 // DAT leaves unmapped, or one outside RAM (the DAT table, I/O, vectors).
 static const size_t	UNMAPPED = (size_t)-1;	// as DATRAM::virt_to_phys says
@@ -269,9 +273,19 @@ static void usage(const char* prog)
 		"  --tick=N            cycles per 50Hz timer tick (default 20000).\n"
 		"                      Lower = more frequent IRQs: an amplifier for\n"
 		"                      timer-IRQ-vs-kernel-window timing races.\n"
-		"  --trap-sled         fire the crash post-mortem at the FIRST wild\n"
-		"                      control transfer onto a $00 sled (catches the\n"
-		"                      originating jump, not the final invalid op).\n"
+		"  --trap-sled         stop at the first jump onto a $00 sled (12+\n"
+		"                      zero bytes): the wild jump that starts a\n"
+		"                      crash, long before its invalid opcode. Any\n"
+		"                      guest.\n"
+		"  --trap-uniflex      stop when UniFLEX's kernel invariants break:\n"
+		"                      a bad vector dispatch, user code entering its\n"
+		"                      trampoline ($E400-$E4FF), tr_exit returning\n"
+		"                      into it. UniFLEX only: other guests trip it.\n"
+		"  --trap-spin         stop when UniFLEX's trap entries ($E400,\n"
+		"                      $E42F) come densely: a trap spiral. UniFLEX\n"
+		"                      only.\n"
+		"                      A detector's stop prints a post-mortem headed\n"
+		"                      HEURISTIC STOP, and the run exits 3.\n"
 		"  --shadow            track the last-writer (PC+cycle) of every\n"
 		"                      physical byte; post-mortem reports who last\n"
 		"                      wrote the corrupt resume-PC slot.\n"
@@ -356,6 +370,7 @@ int main(int argc, char* argv[])
 	unsigned long long	ctrace_from = 0, ctrace_to = 0;	// cycle-windowed trace
 	bool			trap_sled = false;	// dump at first wild transfer onto a $00 sled
 	bool			trap_spin = false;	// dump when trampoline entries go dense (spiral start)
+	bool			trap_uniflex = false;	// UniFLEX kernel invariants (its trampoline layout)
 	bool			detect_dbl = false;	// U-067 Detector A: page double-allocation
 	bool			detect_stray = false;	// Detector B: stray write into another task / DAT
 	bool			detect_free = false;	// getpag/givpag of a live task page
@@ -421,6 +436,8 @@ int main(int argc, char* argv[])
 			trap_sled = true;
 		} else if (strcmp(argv[i], "--trap-spin") == 0) {
 			trap_spin = true;
+		} else if (strcmp(argv[i], "--trap-uniflex") == 0) {
+			trap_uniflex = true;
 		} else if (strcmp(argv[i], "--detect-dbl") == 0) {
 			detect_dbl = true;
 		} else if (strcmp(argv[i], "--detect-stray") == 0) {
@@ -1042,11 +1059,11 @@ int main(int argc, char* argv[])
 		}
 	};
 
-	// Automatic post-mortem on a fatal abort (e.g. the $BF3D invalid
-	// instruction). Fires at the deterministic instant of death, reading
-	// only host-side state (peek/read_physical) — zero perturbation.
-	cpu.on_invalid = [&](const char* /*msg*/) {
-		fprintf(stderr, "\n==== CRASH POST-MORTEM ====\n");
+	// The post-mortem: the machine's state at the instant something
+	// stopped the run, read only from host-side state (peek/read_physical)
+	// so it perturbs nothing. The headline says what stopped it.
+	auto post_mortem = [&](const std::string& headline) {
+		fprintf(stderr, "\n==== %s ====\n", headline.c_str());
 		fprintf(stderr, "PC=$%04X insn_pc=$%04X A=%02X B=%02X X=%04X Y=%04X "
 			"U=%04X S=%04X CC=%02X DP=%02X cycles=%llu\n",
 			(unsigned)cpu.get_pc(), (unsigned)cpu.get_insn_pc(),
@@ -1183,6 +1200,19 @@ int main(int argc, char* argv[])
 		fprintf(stderr, "==== END POST-MORTEM ====\n");
 	};
 
+	// A fatal abort (an invalid instruction) is a crash, certainly.
+	cpu.on_invalid = [&](const char* msg) {
+		post_mortem(std::string("CRASH POST-MORTEM: ") + msg);
+	};
+
+	// A detector's stop is a heuristic's suspicion, not a crash, and says
+	// so: its headline cannot be mistaken for a real crash, and the run
+	// ends with its own status rather than success.
+	auto suspect = [&](const std::string& why) -> int {
+		post_mortem("HEURISTIC STOP (not a confirmed crash): " + why);
+		return DETECTOR_STOP;
+	};
+
 	// --gdb: the debugger takes over before the first instruction. An
 	// invalid instruction becomes a stop it can inspect, after the
 	// post-mortem above, rather than an abort.
@@ -1278,10 +1308,15 @@ int main(int argc, char* argv[])
 	// are active. --brk-gated implies --brk semantics even without --brk
 	// addresses, but on its own it's a no-op until the guest pokes
 	// $FFCB and there are addresses to fire on.
+	// The detectors run in the step loop too, and must engage it: without
+	// this they were silently inert unless something else (--timeout) had.
 	bool stepping = (timeout > 0) || !watches.empty()
 		     || !dumps.empty() || !brk_addrs.empty()
 		     || trace_from || trace_to || trace_procs
-		     || pc_hist_top || gdb;
+		     || pc_hist_top || gdb
+		     || trap_sled || trap_uniflex || trap_spin
+		     || detect_dbl || detect_stray || detect_free
+		     || detect_iostk || detect_srise || detect_sphi;
 
 	for (auto& w : watches) {
 		w.prev = read_byte(w.phys, w.addr);
@@ -1408,8 +1443,7 @@ int main(int argc, char* argv[])
 									if (pcnow==0x6212 && ti!=curidx) {
 										fprintf(stderr, "GIVPAG frees LIVE PAGE $%02X: task#%u stat=%u mode=$%02X "
 											"caller=$%04X [insn#%lu]\n", pg, ti, st, rb(e+6), caller, count);
-										if (cpu.on_invalid) cpu.on_invalid("givpag non-self live page");
-										return 0;
+										return suspect("givpag non-self live page");
 									} else if (pcnow==0x61FC) {
 										fprintf(stderr, "GETPAG=$%02X claimed by task#%u stat=%u mode=$%02X "
 											"curidx=%u caller=$%04X [insn#%lu]\n", pg, ti, st, rb(e+6),
@@ -1456,8 +1490,7 @@ int main(int argc, char* argv[])
 					if (rapid >= 20) {
 						fprintf(stderr, "SPIRAL-START: ~insn#%lu cyc=%llu (20 dense entries)\n",
 							start_cnt, (unsigned long long)start_cyc);
-						if (cpu.on_invalid) cpu.on_invalid("SPIRAL DETECTED");
-						return 0;
+						return suspect("UniFLEX trap entries came densely: a trap spiral");
 					}
 				}
 				prev_pc = ip;
@@ -1524,67 +1557,64 @@ int main(int argc, char* argv[])
 					    && cpu.get_total_cycles() > 300000
 					    && sp < min_ksp) { min_ksp = sp; min_ksp_pc = ip; min_ksp_cyc = cpu.get_total_cycles(); }
 				}
-				// First wild transfer onto a $00 sled: a control-flow
-				// discontinuity landing on a RUN of $00 bytes (a real
-				// NEG-<$00 sled, not a lone NEG <$01 = $00 $01 from a
-				// legit syscall return). 12+ consecutive zeros is never
-				// real code. Catches the originating wild jump ~30K insns
-				// before the final invalid opcode.
-				// FIRST bad kernel vector dispatch (spiral-proof first domino):
-				// a jsr [irqvec]/[sw3vec] in the trampoline ($E41F/$E42A ->
-				// irqhan $88AB; $E449 -> swi3han $890B) resolving to anything
-				// else means slot 0 of the current bank is not kernel page 0.
-				if (trap_sled && disc
+				// --trap-uniflex: invariants of UniFLEX's kernel, keyed
+				// to its trampoline at $E400-$E4FF. Under any other guest
+				// these addresses mean nothing, and the checks fire on
+				// ordinary code (a NitrOS-9 task switch trips the second
+				// one at once), so they are a separate option.
+				//
+				// A bad kernel vector dispatch: a jsr [irqvec]/[sw3vec]
+				// in the trampoline ($E41F/$E42A -> irqhan, $E449 ->
+				// swi3han) made with a user bank mapped means slot 0 of
+				// that bank is not kernel page 0.
+				if (trap_uniflex && disc
 				    && (src_pc == 0xE41F || src_pc == 0xE42A || src_pc == 0xE449)
-				    && datram->get_task() != 0) {  // bad only if dispatched in a USER bank
-					fprintf(stderr, "BAD-DISPATCH: src=$%04X -> $%04X "
-						"(TASKREG/task=%u)\n", (unsigned)src_pc, (unsigned)ip,
-						(unsigned)datram->get_task());
-					if (cpu.on_invalid)
-						cpu.on_invalid("BAD VECTOR DISPATCH (first domino)");
-					return 0;
+				    && datram->get_task() != 0) {
+					char why[96];
+					snprintf(why, sizeof why, "UniFLEX bad vector dispatch "
+						"$%04X -> $%04X (task %u)", (unsigned)src_pc,
+						(unsigned)ip, (unsigned)datram->get_task());
+					return suspect(why);
 				}
-				// FIRST DOMINO: a user-bank process (get_task()!=0) entering
-				// the fixed page ($E000-$FDFF) via a jump/rti at a NON-vector
-				// address. Legit trap entries are $E400/$E42F/$E450/$E451; a
-				// jump/rti to anywhere else in the fixed page with a user bank
-				// mapped means corrupt control flow JUST reached the trampoline.
-				// U-069 added the task-1 bootstrap INTO the fixed page: strtup
-				// jmps to tr_uent ($E4AC) which rti's to ts1cnt ($E4B0), both run
-				// as user code in the user bank during init -- legit, exclude them
-				// (plus tr_irqk $E426, the kernel-context IRQ entry).
-				if (trap_sled && disc && datram->get_task() != 0
+				// A user-bank process entering the fixed page ($E000-$FDFF)
+				// anywhere but a trap entry ($E400 IRQ, $E426 tr_irqk,
+				// $E42F SWI3, $E450 FIRQ, $E451 SWI2) or the task-1
+				// bootstrap (tr_uent $E4AC, ts1cnt $E4B0).
+				if (trap_uniflex && disc && datram->get_task() != 0
 				    && ip >= 0xE000 && ip <= 0xFDFF
 				    && ip != 0xE400 && ip != 0xE42F && ip != 0xE450 && ip != 0xE451
 				    && ip != 0xE426 && ip != 0xE4AC && ip != 0xE4B0) {
-					fprintf(stderr, "FIRST-DOMINO: $%04X -> $%04X (task=%u)\n",
-						(unsigned)src_pc, (unsigned)ip, (unsigned)datram->get_task());
-					if (cpu.on_invalid) cpu.on_invalid("USER ENTERED TRAMPOLINE (first domino)");
-					return 0;
+					char why[96];
+					snprintf(why, sizeof why, "UniFLEX user code entered the "
+						"trampoline $%04X -> $%04X (task %u)", (unsigned)src_pc,
+						(unsigned)ip, (unsigned)datram->get_task());
+					return suspect(why);
 				}
-				// Spiral entry: tr_exit's rti ($E475) returning a process
-				// into the FIXED page ($E000-$FDFF) -- a "user return" into
-				// the trampoline, run as user code (the $E4xx death-spiral
-				// the $00-sled trap misses).
-				// Exclude the 5 legit trap-entry points ($E400 IRQ, $E426
-				// tr_irqk, $E42F SWI3, $E450 FIRQ, $E451 SWI2) -- a return
-				// landing on those is a normal IRQ-at-rti, not a spiral.
-				if (trap_sled && disc && src_pc == 0xE475
+				// tr_exit's rti ($E475) returning a process into the
+				// fixed page other than at a trap entry: the $E4xx spiral.
+				if (trap_uniflex && disc && src_pc == 0xE475
 				    && ip >= 0xE000 && ip <= 0xFDFF
 				    && ip != 0xE400 && ip != 0xE426 && ip != 0xE42F
 				    && ip != 0xE450 && ip != 0xE451) {
-					if (cpu.on_invalid)
-						cpu.on_invalid("SPIRAL ENTRY (tr_exit rti -> fixed page)");
-					return 0;
+					char why[96];
+					snprintf(why, sizeof why, "UniFLEX tr_exit returned into "
+						"the trampoline at $%04X", (unsigned)ip);
+					return suspect(why);
 				}
-				if (trap_sled && disc && datram->peek(ip) == 0x00) {
-					bool sled = true;
-					for (int z = 1; z < 12; z++)
-						if (datram->peek((Word)(ip + z)) != 0x00) { sled = false; break; }
-					if (sled) {
-						if (cpu.on_invalid)
-							cpu.on_invalid("SLED ENTRY (first wild transfer)");
-						return 0;
+				// --trap-sled, for any guest: a transfer of control onto a
+				// run of twelve or more $00 bytes. That is a NEG <$00 sled,
+				// never code (a lone $00 $01 is a legitimate NEG <$01), so
+				// this catches the wild jump that starts a crash long before
+				// the invalid opcode that ends it.
+				if (trap_sled && disc) {
+					int zeros = 0;
+					while (zeros < 12 && cpu.debug_read((Word)(ip + zeros)) == 0x00)
+						zeros++;
+					if (zeros == 12) {
+						char why[96];
+						snprintf(why, sizeof why, "jump onto a $00 sled "
+							"$%04X -> $%04X", (unsigned)src_pc, (unsigned)ip);
+						return suspect(why);
 					}
 				}
 			}
@@ -1622,8 +1652,7 @@ int main(int argc, char* argv[])
 											"task@$%04X (stat=%u) & task@$%04X (stat=%u) both "
 											"own user-block page $%02X; first seen insn#%lu\n",
 											count - da_since, e1, st1, e2, rb(e2 + 5), pg1, da_since);
-										if (cpu.on_invalid) cpu.on_invalid("PAGE DOUBLE-ALLOC");
-										return 0;
+										return suspect("PAGE DOUBLE-ALLOC");
 									}
 								} else {
 									da_have=true; da_pg=pg1; da_e1=e1; da_e2=e2; da_since=count;
@@ -1669,15 +1698,13 @@ int main(int argc, char* argv[])
 						"phys=$%05zX, inside SLEEPING task#%u's saved frame "
 						"(user page $%02X) [insn#%lu]\n", (unsigned)stray_pc,
 						(unsigned)stray_virt, stray_phys, stray_vtask, stray_page, count);
-					if (cpu.on_invalid) cpu.on_invalid("STRAY WRITE into sleeping frame");
-					return 0;
+					return suspect("STRAY WRITE into sleeping frame");
 				}
 				if (dat_hit) {
 					fprintf(stderr, "STRAY-DAT: PC=$%04X wrote kernel bank-0 DAT slot %u "
 						"$%02X->$%02X (kernel mapping corruption) [insn#%lu]\n",
 						(unsigned)dat_pc, dat_slot, (unsigned)dat_old, (unsigned)dat_new, count);
-					if (cpu.on_invalid) cpu.on_invalid("STRAY DAT WRITE");
-					return 0;
+					return suspect("STRAY DAT WRITE");
 				}
 			}
 			for (auto& w : watches) {
