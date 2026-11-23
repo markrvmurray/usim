@@ -72,6 +72,12 @@
 //	                     terminal program or a file-transfer program such
 //	                     as Kermit can log in and drive the console.
 //	                     Excludes --input.
+//	  --gdb[=PORT]       wait for lldb or gdb on localhost:PORT (default
+//	                     2159; 0 takes any free port) and run under its
+//	                     control (see gdbstub.h). Its memory accesses
+//	                     see the CPU's task unless "monitor task N" picks
+//	                     another; "monitor help" lists the DAT commands.
+//	  --gdb-port-file=FILE  write the --gdb port to FILE (implies --gdb=0)
 //	  <firmware>         .hex / .s19 / .srec — autodetected by extension
 //
 //	No HaltDevice: pico-thing firmware has no host-exit mechanism;
@@ -104,6 +110,7 @@
 #include "picortc.h"
 #include "tracectl.h"
 #include "system_watchpoint.h"
+#include "gdbstub.h"
 
 //
 // Null terminal for auxiliary ACIA — discards output, never has input
@@ -292,6 +299,10 @@ static void usage(const char* prog)
 		"                      \\r \\n \\t \\0 \\\\ escapes honoured.\n"
 		"  --input-first=N     cycle to release input byte 0 (default 30M)\n"
 		"  --input-step=N      cycles between input bytes (default 200000)\n"
+		"  --gdb[=PORT]        wait for lldb or gdb on localhost:PORT (default\n"
+		"                      2159, 0 = any free port) and run under it;\n"
+		"                      \"monitor help\" lists the DAT commands\n"
+		"  --gdb-port-file=FILE  write the --gdb port to FILE (implies --gdb=0)\n"
 		"\n"
 		"Firmware may be Intel HEX (.hex) or Motorola S-record (.s19/.srec).\n",
 		prog);
@@ -346,6 +357,8 @@ int main(int argc, char* argv[])
 	std::string		input_script;		// the bytes to feed (\\r \\n \\t escapes honoured)
 	uint64_t		input_first = 30000000;	// --input-first: cycle to release byte 0 (after boot)
 	uint64_t		input_step = 200000;	// --input-step: cycles between bytes
+	int			gdb_port = -1;		// --gdb: debugger port, -1 = none
+	const char*		gdb_port_file = nullptr;	// --gdb-port-file
 
 	for (int i = 1; i < argc; i++) {
 		if (strncmp(argv[i], "--timeout=", 10) == 0) {
@@ -449,6 +462,17 @@ int main(int argc, char* argv[])
 			aux_pty_enable = true;
 		} else if (strcmp(argv[i], "--console-pty") == 0) {
 			console_pty_enable = true;
+		} else if (strcmp(argv[i], "--gdb") == 0) {
+			gdb_port = GdbStub::DEFAULT_PORT;
+		} else if (strncmp(argv[i], "--gdb=", 6) == 0) {
+			char* end;
+			gdb_port = (int)strtol(argv[i] + 6, &end, 10);
+			if (*end || end == argv[i] + 6 || gdb_port < 0 || gdb_port > 65535) {
+				usage(argv[0]);
+				return EXIT_FAILURE;
+			}
+		} else if (strncmp(argv[i], "--gdb-port-file=", 16) == 0) {
+			gdb_port_file = argv[i] + 16;
 		} else if (strcmp(argv[i], "--hd6309") == 0) {
 			use_hd6309 = true;
 		} else if (strcmp(argv[i], "--md-native") == 0) {
@@ -1114,6 +1138,97 @@ int main(int argc, char* argv[])
 		fprintf(stderr, "==== END POST-MORTEM ====\n");
 	};
 
+	// --gdb: the debugger takes over before the first instruction. An
+	// invalid instruction becomes a stop it can inspect, after the
+	// post-mortem above, rather than an abort.
+	std::unique_ptr<GdbStub> gdb;
+	bool invalid_hit = false;
+	int view_task = -1;		// the debugger's DAT task; -1 = the CPU's
+	if (gdb_port_file && gdb_port < 0)
+		gdb_port = 0;		// a port file implies --gdb=0
+	if (gdb_port >= 0) {
+		gdb = std::make_unique<GdbStub>(cpu);
+
+		// $0000-$FEFF through the chosen task; the I/O page as is
+		gdb->read_memory = [&](Word a) -> Byte {
+			if (view_task >= 0 && a < 0xFF00)
+				return datram->peek_task((Byte)view_task, a);
+			return cpu.debug_read(a);
+		};
+		gdb->write_memory = [&](Word a, Byte v) {
+			if (view_task >= 0 && a < 0xFF00)
+				datram->poke_task((Byte)view_task, a, v);
+			else
+				cpu.debug_write(a, v);
+		};
+
+		gdb->monitor_help =
+			"task              the CPU's DAT task and the debugger's\n"
+			"task N            look at memory through task N (0-31)\n"
+			"task cpu          look through whichever task the CPU has\n"
+			"dat [N]           task N's page map (default: the debugger's)\n"
+			"phys ADDR [LEN]   physical memory, bypassing the DAT\n";
+		gdb->monitor = [&](const std::string& cmd, std::string& out) {
+			char buf[160];
+			unsigned long n, len = 64;
+			auto map = [&](unsigned t) {
+				snprintf(buf, sizeof buf, "task %u:", t);
+				out += buf;
+				for (unsigned s = 0; s < 7; s++) {
+					Byte e = datram->peek((Word)(0xFE00 + (t << 3) + s));
+					if (e == 0xFF)
+						snprintf(buf, sizeof buf, "  $%04X ----", s << 13);
+					else
+						snprintf(buf, sizeof buf, "  $%04X=%02X", s << 13, (unsigned)e);
+					out += buf;
+				}
+				out += "  ($E000 fixed)\n";
+			};
+			const unsigned shown = view_task >= 0 ? (unsigned)view_task
+							      : datram->get_task();
+			if (cmd == "task") {
+				snprintf(buf, sizeof buf, "CPU task %u; debugger sees %s\n",
+					(unsigned)datram->get_task(),
+					view_task >= 0 ? ("task " + std::to_string(view_task)).c_str()
+						       : "the CPU's task");
+				out = buf;
+			} else if (cmd == "task cpu") {
+				view_task = -1;
+			} else if (sscanf(cmd.c_str(), "task %lu", &n) == 1) {
+				if (n > 31)
+					out = "tasks are 0-31\n";
+				else
+					view_task = (int)n;
+			} else if (cmd == "dat") {
+				map(shown);
+			} else if (sscanf(cmd.c_str(), "dat %lu", &n) == 1) {
+				if (n > 31)
+					out = "tasks are 0-31\n";
+				else
+					map((unsigned)n);
+			} else if (sscanf(cmd.c_str(), "phys %lx %lx", &n, &len) >= 1) {
+				len = std::min(len, 4096ul);
+				for (unsigned long i = 0; i < len; i += 16) {
+					snprintf(buf, sizeof buf, "%06lX:", n + i);
+					out += buf;
+					for (unsigned long j = i; j < len && j < i + 16; j++) {
+						snprintf(buf, sizeof buf, " %02X",
+							(unsigned)datram->read_physical(n + j));
+						out += buf;
+					}
+					out += "\n";
+				}
+			} else {
+				return false;
+			}
+			return true;
+		};
+
+		if (!gdb->listen(gdb_port, gdb_port_file))
+			return EXIT_FAILURE;
+		cpu.abort = [&]() { invalid_hit = true; };
+	}
+
 	// Step loop is engaged when any of --timeout, --watch, --dump, --brk
 	// are active. --brk-gated implies --brk semantics even without --brk
 	// addresses, but on its own it's a no-op until the guest pokes
@@ -1121,7 +1236,7 @@ int main(int argc, char* argv[])
 	bool stepping = (timeout > 0) || !watches.empty()
 		     || !dumps.empty() || !brk_addrs.empty()
 		     || trace_from || trace_to || trace_procs
-		     || pc_hist_top;
+		     || pc_hist_top || gdb;
 
 	for (auto& w : watches) {
 		w.prev = read_byte(w.phys, w.addr);
@@ -1132,6 +1247,10 @@ int main(int argc, char* argv[])
 	if (stepping) {
 		unsigned long count = 0;
 		while (timeout == 0 || count < timeout) {
+			if (gdb && !gdb->before_insn()) {
+				fprintf(stderr, "%s: killed by the debugger\n", argv[0]);
+				return EXIT_FAILURE;
+			}
 			// Windowed trace: enable per-instruction trace for the
 			// instruction-count window [trace_from, trace_to). Lets a
 			// long multitasking run be traced in a tight window without
@@ -1258,6 +1377,11 @@ int main(int argc, char* argv[])
 				}
 			}
 			cpu.tick();
+			if (invalid_hit) {
+				cpu.set_pc(cpu.get_insn_pc());	// show the culprit
+				gdb->faulted();
+				return EXIT_FAILURE;
+			}
 			{
 				Word ip = cpu.get_insn_pc();
 				if (pc_hist_top && count >= pc_hist_from)
@@ -1546,6 +1670,8 @@ int main(int argc, char* argv[])
 			fprintf(stderr, "%s: timeout after %lu instructions\n",
 				argv[0], timeout);
 			dump_pc_hist();
+			if (gdb)
+				gdb->exited(124);
 			return 124;
 		}
 	} else {
