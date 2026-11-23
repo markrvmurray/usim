@@ -125,7 +125,8 @@ Byte USim::read(Word offset)
 void USim::write(Word offset, Byte val)
 {
 	++cycles;
-	debug_write(offset, val);
+	if (auto d = mapped_at(offset))
+		d->device->write(offset - d->base, val);
 }
 
 Byte USim::debug_read(Word offset)
@@ -137,7 +138,7 @@ Byte USim::debug_read(Word offset)
 void USim::debug_write(Word offset, Byte val)
 {
 	if (auto d = mapped_at(offset))
-		d->device->write(offset - d->base, val);
+		d->device->poke(offset - d->base, val);
 }
 
 //----------------------------------------------------------------------------

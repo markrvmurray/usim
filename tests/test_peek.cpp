@@ -8,6 +8,11 @@
 //	unmapped DAT page raises no fault. USim::debug_read goes through
 //	peek(), so a debugger's memory read inherits all of this.
 //
+//	A debugger's write, poke(), reaches a device as a store does, but
+//	is not the guest's: the DAT logs none of it and faults on none of
+//	it, and the system watchpoint's armed window lets it land without
+//	tripping NMI.
+//
 //	vim: ts=8 sw=8 noet:
 //
 
@@ -22,6 +27,7 @@
 #include "memory.h"
 #include "picoide.h"
 #include "picotick.h"
+#include "system_watchpoint.h"
 
 static int failures = 0;
 
@@ -120,6 +126,50 @@ static void test_dat()
 	CHECK((bool)dat.NMI == false);		// the CPU's read faults
 }
 
+static void test_dat_poke()
+{
+	DATRAM dat(0xFE00, 2 * 1024 * 1024, 0x100);
+	dat.set_fixed_window(0xE000, 0x1E00, 0x1E000);
+	int logged = 0, stored = 0;
+	dat.add_wlog_range(false, 0x0000, 0x10000);
+	dat.set_wlog_cb([&](Word, size_t, Byte, Byte) { logged++; });
+	dat.set_store_cb([&](Word, size_t, Byte, bool) { stored++; });
+
+	dat.poke(0x0100, 0x5A);
+	dat.poke(0xE100, 0xA5);			// the fixed window
+	dat.poke(0xFE00 + 0x08 + 1, 0x40);	// task 1, page 1 -> block $40
+	CHECK(dat.peek(0x0100) == 0x5A);
+	CHECK(dat.peek(0xE100) == 0xA5);
+	CHECK(logged == 0 && stored == 0);	// none of it the guest's
+
+	// through task 1, while task 0 runs
+	dat.poke_task(1, 0x2005, 0x77);
+	CHECK(dat.read_physical(((size_t)0x40 << 13) | 0x0005) == 0x77);
+	CHECK(dat.peek_task(1, 0x2005) == 0x77);
+	CHECK(dat.peek(0x2005) != 0x77);	// task 0's page 1 is elsewhere
+
+	// an unmapped page drops the store, with no fault
+	dat.poke(0xFE00 + 0x00, 0xFF);
+	dat.poke(0x0010, 0x11);
+	CHECK((bool)dat.NMI == true);
+	dat.write(0x0010, 0x11);
+	CHECK((bool)dat.NMI == false);		// the guest's store faults
+}
+
+static void test_watchpoint_poke()
+{
+	mc6809 cpu;
+	SystemWatchpoint w(cpu);
+	SystemWatchpointVec vec(w);
+	w.ctrl_write(0x01);			// arm
+	vec.poke(0x08, 0x99);
+	CHECK(!w.nmi_asserted());
+	CHECK(vec.peek(0x08) == 0x99);
+	vec.write(0x08, 0x66);			// the guest's store trips it
+	CHECK(w.nmi_asserted());
+	CHECK(vec.peek(0x08) == 0x99);
+}
+
 // A debugger's memory read goes through peek()
 static void test_debug_read()
 {
@@ -143,6 +193,8 @@ int main()
 	test_tick();
 	test_ide();
 	test_dat();
+	test_dat_poke();
+	test_watchpoint_poke();
 	test_debug_read();
 
 	if (failures) {

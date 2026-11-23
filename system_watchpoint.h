@@ -124,6 +124,8 @@ public:
 	void			ctrl_write(Byte val);
 	Byte			vec_read(Word offset_in_window) const;
 	void			vec_write(Word offset_in_window, Byte val);
+	// a debugger's store: lands even while armed, and trips nothing
+	void			vec_poke(Word offset_in_window, Byte val);
 
 	// Introspection (for tests).
 	bool			armed() const { return m_armed; }
@@ -159,4 +161,5 @@ public:
 				SystemWatchpointVec(SystemWatchpoint& w) : w(w) {}
 	Byte			read(Word offset) override { return w.vec_read(offset); }
 	void			write(Word offset, Byte val) override { w.vec_write(offset, val); }
+	void			poke(Word offset, Byte val) override { w.vec_poke(offset, val); }
 };

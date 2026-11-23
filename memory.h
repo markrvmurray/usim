@@ -252,36 +252,55 @@ public:
 				}
 
 	// Translate a CPU (logical) address to its physical backing address
-	// under the CURRENT task's DAT. Returns (size_t)-1 if unmapped/out of
-	// the translated+fixed range. Pure (no side-effects).
-	size_t			virt_to_phys(Word offset) const {
+	// under task t's DAT, by default the current task's. Returns
+	// (size_t)-1 if unmapped or outside the translated and fixed range.
+	// Pure (no side-effects).
+	size_t			virt_to_phys(Word offset, Byte t) const {
 					if (offset < size) {
 						if (in_fixed_window(offset))
 							return fixed_phys_base + (offset - fixed_start);
-						Byte e = datram[(Byte)(task << 3) | (Byte)(offset >> 13)];
+						Byte e = datram[(Byte)((t & 0x1F) << 3) | (Byte)(offset >> 13)];
 						if (e == 0xFF) return (size_t)-1;
 						return ((size_t)e << 13) | (offset & 0x1FFF);
 					}
 					return (size_t)-1;
 				}
+	size_t			virt_to_phys(Word offset) const {
+					return virt_to_phys(offset, task);
+				}
 
-	// DAT-translating read that is PURE: no cycle increment, no NMI
-	// side-effect. For host-side observation only (--watch/--dump/crash
-	// dump) so watching can't detune the cycle-based timer race.
-	Byte			peek(Word offset) override {
+	// What the CPU would read at offset if task t were current, but
+	// PURE: no cycle increment, no NMI for an unmapped page. For
+	// host-side observation (--watch/--dump/crash dump, a debugger),
+	// so watching can't detune the cycle-based timer race.
+	Byte			peek_task(Byte t, Word offset) const {
 					if (offset < size) {
-						if (in_fixed_window(offset)) {
-							size_t phys = fixed_phys_base + (offset - fixed_start);
-							return (phys < memory.size()) ? memory[phys] : (Byte)0xFFu;
-						}
-						Byte e = datram[(Byte)(task << 3) | (Byte)(offset >> 13)];
-						if (e == 0xFF) return (Byte)0xFFu;
-						size_t phys = ((size_t)e << 13) | (offset & 0x1FFF);
+						size_t phys = virt_to_phys(offset, t);
 						return (phys < memory.size()) ? memory[phys] : (Byte)0xFFu;
 					} else if (offset < size + datsize) {
 						return datram[offset - size];
 					}
 					return (Byte)0xFFu;
+				}
+	Byte			peek(Word offset) override {
+					return peek_task(task, offset);
+				}
+
+	// A debugger's store at offset as task t sees it. It lands where
+	// the CPU's would, but it is not the guest's: no write log, no
+	// shadow or store observer, and no NMI for an unmapped page (the
+	// store is simply dropped).
+	void			poke_task(Byte t, Word offset, Byte val) {
+					if (offset < size) {
+						size_t phys = virt_to_phys(offset, t);
+						if (phys < memory.size())
+							memory[phys] = val;
+					} else if (offset < size + datsize) {
+						datram[offset - size] = val;
+					}
+				}
+	void			poke(Word offset, Byte val) override {
+					poke_task(task, offset, val);
 				}
 
 	// Driven by DATRAMTicker. Pulse: tick(N) where the bad access

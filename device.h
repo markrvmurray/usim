@@ -42,6 +42,12 @@ public:
 	// change its state must override this.
 	virtual Byte		peek(Word offset) { return read(offset); }
 
+	// A debugger's store. It reaches the device as write() does, so
+	// writing a register is a deliberate act with its usual effect,
+	// but a device that watches the guest's own stores (to log them,
+	// or to fault on them) must keep a debugger's out of that account.
+	virtual void		poke(Word offset, Byte val) { write(offset, val); }
+
 public:
 	using shared_ptr = std::shared_ptr<MappedDevice>;
 

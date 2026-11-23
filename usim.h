@@ -50,7 +50,8 @@ public:
 	// Debugger access: the same device dispatch as read() and write()
 	// but charging no bus cycle, so inspecting the machine never moves
 	// its clock. A read peeks, so it disturbs no device either; a
-	// write is a deliberate store and has a store's effects.
+	// write pokes, a deliberate store that the guest is not charged
+	// with.
 	Byte			debug_read(Word offset);
 	void			debug_write(Word offset, Byte val);
 

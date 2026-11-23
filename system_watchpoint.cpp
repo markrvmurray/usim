@@ -104,6 +104,12 @@ void SystemWatchpoint::vec_write(Word offset_in_window, Byte val)
 	store_shadow(offset_in_window, val);
 }
 
+void SystemWatchpoint::vec_poke(Word offset_in_window, Byte val)
+{
+	if (offset_in_window < WINDOW_SIZE)
+		store_shadow(offset_in_window, val);
+}
+
 void SystemWatchpoint::arm()
 {
 	if (m_armed) return;	// idempotent
