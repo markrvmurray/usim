@@ -38,6 +38,10 @@
 //	BatchTerminal (unbuffered stdio, no termios)
 //	--timeout=N instruction count limit
 //	--profile=FILE write cycles and instruction counts per address
+//	--gdb[=PORT]   wait for lldb or gdb on localhost:PORT (default 2159)
+//	               and run under its control (see gdbstub.h); PORT 0
+//	               takes any free port
+//	--gdb-port-file=FILE  write the port --gdb is listening on to FILE
 //
 
 #include <cstdlib>
@@ -55,11 +59,13 @@
 #include "tracectl.h"
 #include "memory.h"
 #include "system_watchpoint.h"
+#include "gdbstub.h"
 
 static void usage(const char *prog)
 {
 	fprintf(stderr, "usage: %s [--hd6309] [--md-native] [--timeout=N] [--cycles] [--trace]"
 		" [--watch=ADDR] [--brk=ADDR[,ADDR,...]] [--brk-gated] [--profile=FILE]"
+		" [--gdb[=PORT]] [--gdb-port-file=FILE]"
 		" <hexfile>\n", prog);
 	exit(EXIT_FAILURE);
 }
@@ -94,6 +100,8 @@ int main(int argc, char *argv[])
 	std::vector<Word> brk_addrs;
 	bool brk_gated = false;
 	const char *profile_file = nullptr;
+	int gdb_port = -1;
+	const char *gdb_port_file = nullptr;
 
 	// Parse arguments
 	for (int i = 1; i < argc; ++i) {
@@ -120,6 +128,15 @@ int main(int argc, char *argv[])
 			brk_gated = true;
 		} else if (strncmp(argv[i], "--profile=", 10) == 0) {
 			profile_file = argv[i] + 10;
+		} else if (strcmp(argv[i], "--gdb") == 0) {
+			gdb_port = GdbStub::DEFAULT_PORT;
+		} else if (strncmp(argv[i], "--gdb=", 6) == 0) {
+			char *end;
+			gdb_port = (int)strtol(argv[i] + 6, &end, 10);
+			if (*end || end == argv[i] + 6 || gdb_port < 0 || gdb_port > 65535)
+				usage(argv[0]);
+		} else if (strncmp(argv[i], "--gdb-port-file=", 16) == 0) {
+			gdb_port_file = argv[i] + 16;
 		} else if (strcmp(argv[i], "--hd6309") == 0) {
 			use_hd6309 = true;
 		} else if (strcmp(argv[i], "--md-native") == 0) {
@@ -234,6 +251,20 @@ int main(int argc, char *argv[])
 	}
 	if (trace) cpu.tron();
 
+	// --gdb: the debugger takes over before the first instruction. An
+	// invalid instruction becomes a stop it can inspect rather than an
+	// abort.
+	std::unique_ptr<GdbStub> gdb;
+	bool invalid_hit = false;
+	if (gdb_port_file && gdb_port < 0)
+		gdb_port = 0;		// a port file implies --gdb=0
+	if (gdb_port >= 0) {
+		gdb = std::make_unique<GdbStub>(cpu);
+		if (!gdb->listen(gdb_port, gdb_port_file))
+			return EXIT_FAILURE;
+		cpu.abort = [&]() { invalid_hit = true; };
+	}
+
 	// Memory watchpoint: monitor writes to a specific address.
 	// When the watched byte changes, print the new value and
 	// instruction count. Use --trace alongside for full CPU state.
@@ -270,13 +301,18 @@ int main(int argc, char *argv[])
 		fclose(pf);
 	};
 
-	bool stepping = (timeout > 0) || !brk_addrs.empty() || profile_file;
+	bool stepping = (timeout > 0) || !brk_addrs.empty() || profile_file || gdb;
+	bool killed = false;
 	unsigned long count = 0;
 	if (stepping) {
 		// Only a stepped run counts instructions, so only a
 		// stepped run offers them to the gated counter.
 		tracectl->count_instructions(&count);
 		while (!halted && (timeout == 0 || count < timeout)) {
+			if (gdb && !gdb->before_insn()) {
+				killed = true;
+				break;
+			}
 			// Brk: dump full register state when PC is about to
 			// execute one of the listed addresses. Print BEFORE
 			// tick so register values reflect the inputs to the
@@ -302,6 +338,11 @@ int main(int argc, char *argv[])
 			Word prof_pc = cpu.get_pc();
 			uint64_t prof_before = cpu.get_total_cycles();
 			cpu.tick();
+			if (invalid_hit) {
+				cpu.set_pc(cpu.get_insn_pc());	// show the culprit
+				gdb->faulted();
+				return EXIT_FAILURE;
+			}
 			if (profile_file) {
 				if (prof_have_prev) {
 					prof_cycles[prof_prev_pc] += cpu.get_total_cycles() - prof_before;
@@ -328,6 +369,12 @@ int main(int argc, char *argv[])
 			}
 			++count;
 		}
+		if (killed) {
+			fprintf(stderr, "usim09batch: killed by the debugger\n");
+			return EXIT_FAILURE;
+		}
+		if (halted && gdb)
+			gdb->exited(halt->getExitCode());
 		if (!halted && timeout > 0) {
 			if (report_cycles) {
 				fprintf(stderr, "cycles=%llu\n",

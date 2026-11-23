@@ -47,10 +47,18 @@ public:
 	virtual void		write_word(Word offset, Word val) = 0;
 	virtual Byte		fetch();
 
+	// Debugger access: the same device dispatch as read() and write()
+	// but charging no bus cycle, so inspecting the machine never moves
+	// its clock. A device with read side effects still sees them.
+	Byte			debug_read(Word offset);
+	void			debug_write(Word offset, Byte val);
+
 // Device handling:
 protected:
 	ActiveDevList	        dev_active;
 	MappedDevList   	dev_mapped;
+
+	MappedDeviceEntry*	mapped_at(Word offset);
 
 	virtual void		attach(const MappedDevice::shared_ptr& dev, Word base, Word mask, rank<0>);
 	virtual void		attach(const ActiveMappedDevice::shared_ptr& dev, Word base, Word mask, rank<1>);

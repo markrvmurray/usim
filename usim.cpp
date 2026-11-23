@@ -96,10 +96,9 @@ void USim::attach_range(const ActiveMappedDevice::shared_ptr& dev, Word base, Wo
 // Mapped Device IO
 //----------------------------------------------------------------------------
 
-// Single byte read
-Byte USim::read(Word offset)
+// The first device mapped at offset, if any
+MappedDeviceEntry* USim::mapped_at(Word offset)
 {
-	++cycles;
 	for (auto& d : dev_mapped) {
 		// Range-mode uses 32-bit math on the upper bound so a range
 		// that reaches $FFFF (e.g. pico-thing's FRAM at $FFD0-$FFFF)
@@ -108,30 +107,36 @@ Byte USim::read(Word offset)
 			? (offset >= d.base &&
 			   (uint32_t)offset < (uint32_t)d.base + (uint32_t)d.size)
 			: ((offset & d.mask) == d.base);
-		if (hit) {
-			return d.device->read(offset - d.base);
-		}
+		if (hit)
+			return &d;
 	}
-	return 0xff;
+	return nullptr;
+}
+
+// Single byte read
+Byte USim::read(Word offset)
+{
+	++cycles;
+	return debug_read(offset);
 }
 
 // Single byte write
 void USim::write(Word offset, Byte val)
 {
 	++cycles;
-	for (auto& d : dev_mapped) {
-		// Range-mode uses 32-bit math on the upper bound so a range
-		// that reaches $FFFF (e.g. pico-thing's FRAM at $FFD0-$FFFF)
-		// doesn't wrap to 0 and silently miss every address.
-		bool hit = d.size
-			? (offset >= d.base &&
-			   (uint32_t)offset < (uint32_t)d.base + (uint32_t)d.size)
-			: ((offset & d.mask) == d.base);
-		if (hit) {
-			d.device->write(offset - d.base, val);
-			break;
-		}
-	}
+	debug_write(offset, val);
+}
+
+Byte USim::debug_read(Word offset)
+{
+	auto d = mapped_at(offset);
+	return d ? d->device->read(offset - d->base) : 0xff;
+}
+
+void USim::debug_write(Word offset, Byte val)
+{
+	if (auto d = mapped_at(offset))
+		d->device->write(offset - d->base, val);
 }
 
 //----------------------------------------------------------------------------
