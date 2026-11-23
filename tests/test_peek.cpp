@@ -13,6 +13,10 @@
 //	it, and the system watchpoint's armed window lets it land without
 //	tripping NMI.
 //
+//	A log of the guest's stores sees every one the CPU makes, at any
+//	address, and none of a debugger's: USim::on_store for logical
+//	addresses, DATRAM's physical write log for physical ones.
+//
 //	vim: ts=8 sw=8 noet:
 //
 
@@ -20,6 +24,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <vector>
 #include <unistd.h>
 
 #include "mc6809.h"
@@ -131,7 +136,7 @@ static void test_dat_poke()
 	DATRAM dat(0xFE00, 2 * 1024 * 1024, 0x100);
 	dat.set_fixed_window(0xE000, 0x1E00, 0x1E000);
 	int logged = 0, stored = 0;
-	dat.add_wlog_range(false, 0x0000, 0x10000);
+	dat.add_wlog_range(0, 2 * 1024 * 1024);
 	dat.set_wlog_cb([&](Word, size_t, Byte, Byte) { logged++; });
 	dat.set_store_cb([&](Word, size_t, Byte, bool) { stored++; });
 
@@ -170,6 +175,69 @@ static void test_watchpoint_poke()
 	CHECK(vec.peek(0x08) == 0x99);
 }
 
+// The CPU's stores, at any address, with the bytes they replace
+static void test_on_store()
+{
+	struct Store { Word addr; Byte oldv, newv; };
+	std::vector<Store> seen;
+	uint64_t cycles[2];
+
+	for (int observe = 0; observe < 2; observe++) {
+		mc6809 cpu;
+		auto ram = std::make_shared<RAM>(0x10000);
+		SystemWatchpoint w(cpu);
+		auto vec = std::make_shared<SystemWatchpointVec>(w);
+		cpu.attach_range(vec, 0xFFE0, 0x20);
+		cpu.attach(ram, 0x0000, 0x0000);
+		const Byte code[] = {
+			0x8E, 0x12, 0x34,	// LDX #$1234
+			0xBF, 0xFF, 0xF2,	// STX $FFF2 (a vector)
+			0x8E, 0x56, 0x78,	// LDX #$5678
+			0xBF, 0x05, 0x00,	// STX $0500
+			0x20, 0xFE,		// BRA *
+		};
+		for (Word i = 0; i < sizeof code; i++)
+			ram->write((Word)(0x0400 + i), code[i]);
+		vec->write(0x1E, 0x04);	// reset vector $0400
+		vec->write(0x1F, 0x00);
+		vec->write(0x12, 0xAA);	// $FFF2's old value
+		cpu.reset();
+		if (observe)
+			cpu.on_store = [&](Word a, Byte o, Byte n) { seen.push_back({ a, o, n }); };
+		for (int i = 0; i < 4; i++)
+			cpu.tick();
+		cpu.debug_write(0x0600, 0x11);	// a debugger's: not logged
+		cpu.tick();
+		cycles[observe] = cpu.get_total_cycles();
+	}
+
+	CHECK(seen.size() == 4);
+	if (seen.size() == 4) {
+		CHECK(seen[0].addr == 0xFFF2 && seen[0].oldv == 0xAA && seen[0].newv == 0x12);
+		CHECK(seen[1].addr == 0xFFF3 && seen[1].newv == 0x34);
+		CHECK(seen[2].addr == 0x0500 && seen[2].oldv == 0x00 && seen[2].newv == 0x56);
+		CHECK(seen[3].addr == 0x0501 && seen[3].newv == 0x78);
+	}
+	CHECK(cycles[0] == cycles[1]);		// observing costs nothing
+}
+
+// DATRAM's own log is physical: a page's stores, wherever it is mapped
+static void test_dat_wlog()
+{
+	DATRAM dat(0xFE00, 2 * 1024 * 1024, 0x100);
+	dat.set_fixed_window(0xE000, 0x1E00, 0x1E000);
+	std::vector<size_t> phys;
+	dat.add_wlog_range(0x40 << 13, 0x2000);		// block $40
+	dat.set_wlog_cb([&](Word, size_t p, Byte, Byte) { phys.push_back(p); });
+
+	dat.write(0x2005, 0x01);		// task 0 page 1: block 1
+	dat.write(0xFE00 + 1, 0x40);		// map block $40 there
+	dat.write(0x2005, 0x02);
+	CHECK(phys.size() == 1);
+	if (phys.size() == 1)
+		CHECK(phys[0] == (((size_t)0x40 << 13) | 0x0005));
+}
+
 // A debugger's memory read goes through peek()
 static void test_debug_read()
 {
@@ -195,6 +263,8 @@ int main()
 	test_dat();
 	test_dat_poke();
 	test_watchpoint_poke();
+	test_on_store();
+	test_dat_wlog();
 	test_debug_read();
 
 	if (failures) {

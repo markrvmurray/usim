@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstdlib>
+#include <functional>
 #include "device.h"
 #include "memory.h"
 #include "wiring.h"
@@ -68,6 +69,13 @@ public:
 	};
 	const Byte*		watch_flags = nullptr;
 	WatchHit		watch_hit;
+
+	// Every store the CPU makes, with the byte it replaces, before it
+	// lands: for a host-side log of the guest's stores at any address.
+	// A debugger's writes do not come this way. The old byte is read
+	// as a debugger reads it, so taking it disturbs nothing; unset,
+	// the observer costs one test per store.
+	std::function<void(Word offset, Byte oldv, Byte newv)>	on_store;
 
 // Device handling:
 protected:

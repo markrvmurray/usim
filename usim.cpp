@@ -137,6 +137,8 @@ void USim::write(Word offset, Byte val)
 	++cycles;
 	if (watch_flags && (watch_flags[offset] & WATCH_WRITE))
 		watched(offset, WATCH_WRITE);
+	if (on_store)
+		on_store(offset, debug_read(offset), val);
 	if (auto d = mapped_at(offset))
 		d->device->write(offset - d->base, val);
 }

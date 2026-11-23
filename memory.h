@@ -151,8 +151,8 @@ class DATRAM : public GenericMemory {
 	bool			m_nmi_request   = false;
 	bool			m_clear_pending = false;
 
-	// Non-perturbing write-log state (see public add_wlog_range/peek).
-	struct WLogRange { bool phys; size_t lo, hi; };
+	// Non-perturbing physical write-log state (see add_wlog_range).
+	struct WLogRange { size_t lo, hi; };
 	std::vector<WLogRange>	m_wlog;
 	std::function<void(Word, size_t, Byte, Byte)> m_wlog_cb;
 	std::function<void(size_t)> m_shadow_cb;	// full last-writer shadow
@@ -162,14 +162,13 @@ class DATRAM : public GenericMemory {
 	// DAT slot index (0-255), not a backing-store address.
 	std::function<void(Word, size_t, Byte, bool)> m_store_cb;
 
-	// Report a pending store at (virt, phys) if it falls in a watched
+	// Report a pending store at (virt, phys) if phys falls in a watched
 	// range. Reads only host-side state; never touches the cycle counter
 	// or any device. No-op (one empty-vector test) when no range is set.
 	void			wlog_check(Word virt, size_t phys, Byte newv) const {
 					if (m_wlog.empty() || !m_wlog_cb) return;
 					for (const auto& r : m_wlog) {
-						size_t key = r.phys ? phys : (size_t)virt;
-						if (key >= r.lo && key < r.hi) {
+						if (phys >= r.lo && phys < r.hi) {
 							Byte oldv = (phys < memory.size())
 								  ? memory[phys] : (Byte)0xFFu;
 							m_wlog_cb(virt, phys, oldv, newv);
@@ -226,13 +225,16 @@ public:
 						memory[offset + i] = data[i];
 				}
 
-	// --- Non-perturbing write-log (U-067 Heisenbug breaker) -------------
-	// A guest store whose target falls in a registered range is reported
-	// through m_wlog_cb BEFORE the store lands (so the callback can read
-	// the old byte). This path adds NO guest cycles and triggers NO device
-	// side-effects, so the deterministic crash is preserved while watched.
-	void			add_wlog_range(bool phys, size_t base, size_t len) {
-					m_wlog.push_back({ phys, base, base + (len ? len : 1) });
+	// --- Non-perturbing physical write-log ------------------------------
+	// A guest store whose physical target falls in a registered range is
+	// reported through m_wlog_cb BEFORE the store lands (so the callback
+	// can read the old byte). This path adds NO guest cycles and triggers
+	// NO device side-effects, so a timing-sensitive crash is preserved
+	// while watched. Logical addresses are logged at the CPU's bus
+	// instead (USim::on_store), which sees every address, not only the
+	// ones DATRAM serves.
+	void			add_wlog_range(size_t base, size_t len) {
+					m_wlog.push_back({ base, base + (len ? len : 1) });
 				}
 	// Callback args: (virtual offset, physical addr, old byte, new byte).
 	void			set_wlog_cb(std::function<void(Word, size_t, Byte, Byte)> cb) {
@@ -360,11 +362,8 @@ public:
 						if (m_store_cb) m_store_cb(offset, phys, val, false);
 						memory[phys] = val;
 					} else if (offset < size + datsize) {
-						// DAT page-table store ($FE00-$FEFF). No backing-
-						// store phys; use a high pseudo-phys (> real 2MB) so
-						// p:-watches don't match but a virtual watch on
-						// $FE00+slot does — lets us catch DAT corruption.
-						wlog_check(offset, (size_t)0x1000000u + (offset - size), val);
+						// DAT page-table store ($FE00-$FEFF): no backing-
+						// store address, so nothing for the physical log.
 						if (m_store_cb) m_store_cb(offset, offset - size, val, true);
 						datram[offset - size] = val;
 					}

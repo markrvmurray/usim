@@ -92,6 +92,7 @@
 #include <csignal>
 #include <cstring>
 #include <strings.h>
+#include <string>
 #include <vector>
 #include <memory>
 #include <algorithm>
@@ -195,12 +196,29 @@ struct DumpSpec {
 };
 
 // --wlog spec: a physical (p:) or logical address range whose guest
-// stores are logged non-perturbingly through DATRAM::write (U-067).
+// stores are logged non-perturbingly: a physical range by DATRAM, a
+// logical one at the CPU's bus (USim::on_store).
 struct WlogSpec {
 	bool		phys;
 	unsigned long	addr;
 	unsigned long	len;
 };
+
+// A store's physical target, when it has none: a logical address the
+// DAT leaves unmapped, or one outside RAM (the DAT table, I/O, vectors).
+static const size_t	UNMAPPED = (size_t)-1;	// as DATRAM::virt_to_phys says
+static const size_t	NOT_RAM  = (size_t)-2;
+
+static std::string phys_name(size_t phys)
+{
+	if (phys == UNMAPPED)
+		return "unmapped";
+	if (phys == NOT_RAM)
+		return "-";
+	char buf[16];
+	snprintf(buf, sizeof buf, "$%05zX", phys);
+	return buf;
+}
 
 // One recorded store: the canonical cycle, the PC of the storing
 // instruction, the logical + physical target, and the old/new bytes.
@@ -258,11 +276,12 @@ static void usage(const char* prog)
 		"                      physical byte; post-mortem reports who last\n"
 		"                      wrote the corrupt resume-PC slot.\n"
 		"  --watch=[p:]ADDR    watch a byte for changes (repeatable).\n"
-		"                      ADDR is a 16-bit CPU address (DAT-translated\n"
-		"                      as the guest sees it, incl. DAT RAM $FE00-\n"
-		"                      $FEFF). Prefix p: for a physical backing-\n"
-		"                      store address (bypasses the DAT), e.g.\n"
-		"                      --watch=p:0x15F55 to watch one task's page.\n"
+		"                      ADDR is a 16-bit CPU address, read as the\n"
+		"                      guest sees it: any of $0000-$FFFF, I/O and\n"
+		"                      vectors included. Prefix p: for a physical\n"
+		"                      backing-store address (bypasses the DAT),\n"
+		"                      e.g. --watch=p:0x15F55 to watch one task's\n"
+		"                      page.\n"
 		"  --dump=[p:]ADDR[,LEN]  hex+ASCII dump (repeatable). Same address\n"
 		"                      forms as --watch (LEN default 256). Dumped at\n"
 		"                      every --brk hit and once at exit/timeout.\n"
@@ -270,7 +289,9 @@ static void usage(const char* prog)
 		"                      report every guest store into the range with\n"
 		"                      cycle+PC+old/new, adding ZERO guest cycles and\n"
 		"                      no side-effects (preserves a timing-race crash).\n"
-		"                      Same address forms as --watch (LEN default 1).\n"
+		"                      Same address forms as --watch (LEN default 1);\n"
+		"                      a store with no RAM behind it shows phys=-, or\n"
+		"                      phys=unmapped for a page the DAT marks $FF.\n"
 		"  --brk=ADDR[,...]    dump registers before listed PCs\n"
 		"  --brk-gated         start with --brk output disabled; guest\n"
 		"                      pokes $FFCB to toggle (0x00 off, 0x01 brk,\n"
@@ -757,15 +778,16 @@ int main(int argc, char* argv[])
 	if (trace) cpu.tron();
 
 	// Read one byte either physically (bypassing the DAT) or as the
-	// CPU sees it (DAT-translated). Both forms are NON-PERTURBING:
-	// read_physical and peek() add no guest cycles and trigger no device
-	// side-effects, so observing a watch/dump can't detune the cycle-based
-	// timer race that produces the U-067 crash. (Previously the logical
-	// form went through cpu.read(), whose ++cycles advanced the timer and
-	// made the bug vanish — the Heisenbug.)
+	// CPU sees it: through the DAT for RAM, and from whichever device
+	// serves the rest of the 64K, the I/O page and the vectors included.
+	// Both forms are NON-PERTURBING: read_physical and debug_read (a
+	// device peek) add no guest cycles and trigger no device side-
+	// effects, so observing a watch/dump can't detune a cycle-based
+	// timer race. (Going through cpu.read() would advance the timer and
+	// could make the very crash being watched vanish.)
 	auto read_byte = [&](bool phys, unsigned long a) -> Byte {
 		return phys ? datram->read_physical((size_t)a)
-			    : datram->peek((Word)a);
+			    : cpu.debug_read((Word)a);
 	};
 
 	// Hex + ASCII dump of every --dump spec. Called at each --brk hit
@@ -931,18 +953,40 @@ int main(int argc, char* argv[])
 			fprintf(stderr, "\n");
 		});
 	}
-	if (!wlogs.empty()) {
-		for (const auto& w : wlogs)
-			datram->add_wlog_range(w.phys, (size_t)w.addr, (size_t)w.len);
-		datram->set_wlog_cb([&](Word virt, size_t phys, Byte oldv, Byte newv) {
-			wlog_recs.push_back({ cpu.get_total_cycles(), cpu.get_insn_pc(),
-					      virt, phys, oldv, newv });
-			fprintf(stderr, "WLOG: cyc=%llu PC=$%04X virt=$%04X phys=$%05zX "
-				"%02X->%02X\n",
-				(unsigned long long)cpu.get_total_cycles(),
-				(unsigned)cpu.get_insn_pc(), (unsigned)virt, phys,
-				(unsigned)oldv, (unsigned)newv);
-		});
+	// A physical range can only be seen where the DAT translates, so
+	// DATRAM logs those; a logical range is logged at the CPU's bus,
+	// which sees every store to every address: RAM, the DAT table, the
+	// I/O page and the vectors alike. Either way only the guest's own
+	// stores appear, never a debugger's or the emulator's.
+	std::vector<WlogSpec> wlog_logical;
+	auto log_store = [&](Word virt, size_t phys, Byte oldv, Byte newv) {
+		wlog_recs.push_back({ cpu.get_total_cycles(), cpu.get_insn_pc(),
+				      virt, phys, oldv, newv });
+		fprintf(stderr, "WLOG: cyc=%llu PC=$%04X virt=$%04X phys=%s "
+			"%02X->%02X\n",
+			(unsigned long long)cpu.get_total_cycles(),
+			(unsigned)cpu.get_insn_pc(), (unsigned)virt,
+			phys_name(phys).c_str(), (unsigned)oldv, (unsigned)newv);
+	};
+	for (const auto& w : wlogs) {
+		if (w.phys)
+			datram->add_wlog_range((size_t)w.addr, (size_t)w.len);
+		else
+			wlog_logical.push_back(w);
+	}
+	if (wlogs.size() > wlog_logical.size())
+		datram->set_wlog_cb(log_store);
+	if (!wlog_logical.empty()) {
+		cpu.on_store = [&](Word virt, Byte oldv, Byte newv) {
+			for (const auto& w : wlog_logical) {
+				if (virt >= w.addr && virt < w.addr + w.len) {
+					size_t phys = virt < dat_addr_space_end
+						    ? datram->virt_to_phys(virt) : NOT_RAM;
+					log_store(virt, phys, oldv, newv);
+					return;
+				}
+			}
+		};
 	}
 
 	// --- PC histogram (--pc-hist) -------------------------------------
@@ -1088,9 +1132,10 @@ int main(int argc, char* argv[])
 		fprintf(stderr, "write-log: %zu entries (last %zu):\n", n, n - start);
 		for (size_t k = start; k < n; k++) {
 			const auto& r = wlog_recs[k];
-			fprintf(stderr, "  cyc=%llu PC=$%04X virt=$%04X phys=$%05zX %02X->%02X\n",
+			fprintf(stderr, "  cyc=%llu PC=$%04X virt=$%04X phys=%s %02X->%02X\n",
 				(unsigned long long)r.cyc, (unsigned)r.pc,
-				(unsigned)r.virt, r.phys, (unsigned)r.oldv, (unsigned)r.newv);
+				(unsigned)r.virt, phys_name(r.phys).c_str(),
+				(unsigned)r.oldv, (unsigned)r.newv);
 		}
 		fprintf(stderr, "recent executed PCs (oldest->newest, last %zu):\n",
 			PC_RING);
