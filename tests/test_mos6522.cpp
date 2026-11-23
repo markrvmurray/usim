@@ -316,6 +316,56 @@ static void test_shift_out_t2()
 	CHECK_EQ(v.read(via::IFR), via::IF_SR);
 }
 
+// A debugger's peek sees what a read would, and leaves the chip as it was
+static void test_peek()
+{
+	mos6522 v;
+
+	v.write(via::PCR, 0x09);	// CA1 rising; CA2 handshake output
+	v.write(via::ACR, 0x01);	// latch PA on CA1
+	v.set_ca1(false);
+	v.set_pa(0x42);
+	v.set_ca1(true);
+	CHECK_EQ(v.peek(via::ORA), 0x42);
+	CHECK_EQ(v.read(via::IFR), via::IF_CA1);	// flag kept
+	CHECK(v.ca2());					// no handshake
+	CHECK_EQ(v.read(via::ORA), 0x42);
+	CHECK_EQ(v.read(via::IFR), 0x00);
+	CHECK(!v.ca2());				// the read does both
+
+	mos6522 cb;
+	cb.write(via::PCR, 0x10);	// CB1 rising
+	cb.set_cb1(false);
+	cb.set_cb1(true);
+	cb.peek(via::ORB);
+	CHECK_EQ(cb.read(via::IFR), via::IF_CB1);
+	cb.read(via::ORB);
+	CHECK_EQ(cb.read(via::IFR), 0x00);
+
+	mos6522 t;
+	t.write(via::T1CL, 0x03);
+	t.write(via::T1CH, 0x00);
+	t.write(via::T2CL, 0x03);
+	t.write(via::T2CH, 0x00);
+	t.tick(5);
+	CHECK_EQ(t.read(via::IFR), via::IF_T1 | via::IF_T2);
+	const Byte t1 = t.peek(via::T1CL), t2 = t.peek(via::T2CL);
+	CHECK_EQ(t.read(via::IFR), via::IF_T1 | via::IF_T2);	// both kept
+	CHECK_EQ(t.read(via::T1CL), t1);
+	CHECK_EQ(t.read(via::T2CL), t2);
+	CHECK_EQ(t.read(via::IFR), 0x00);
+
+	mos6522 s;
+	s.write(via::ACR, 0x0c);	// in under CB1: a read starts it
+	s.peek(via::SR);
+	CHECK(!s.cb1_driven());
+	for (int i = 0; i < 8; i++) {
+		s.set_cb1(false);
+		s.set_cb1(true);
+	}
+	CHECK_EQ(s.read(via::IFR) & via::IF_SR, 0x00);	// nothing started
+}
+
 int main()
 {
 	test_ports();
@@ -329,6 +379,7 @@ int main()
 	test_shift_out_phi2();
 	test_shift_in_external();
 	test_shift_out_t2();
+	test_peek();
 
 	if (failures) {
 		fprintf(stderr, "test_mos6522: %d FAILED\n", failures);

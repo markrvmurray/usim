@@ -115,6 +115,7 @@ public:
 	void			tick(uint32_t cycles) override;
 	Byte			read(Word offset) override;
 	void			write(Word offset, Byte val) override;
+	Byte			peek(Word offset) override;
 
 	// the far side of the pins
 	void			set_pa(Byte val);

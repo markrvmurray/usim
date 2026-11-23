@@ -410,6 +410,26 @@ Byte mos6522::read(Word offset)
 	}
 }
 
+// What read() returns, leaving the chip alone: no CA/CB or timer flag
+// cleared, no CA2 handshake, no shift started.
+Byte mos6522::peek(Word offset)
+{
+	switch (offset & 0x0f) {
+	case ORB:
+		return read_irb();
+	case ORA:
+		return read_ira();
+	case T1CL:
+		return t1c & 0xff;
+	case T2CL:
+		return t2c & 0xff;
+	case SR:
+		return sr;
+	default:
+		return read(offset);
+	}
+}
+
 void mos6522::write(Word offset, Byte val)
 {
 	switch (offset & 0x0f) {
