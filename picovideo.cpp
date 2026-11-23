@@ -119,6 +119,15 @@ Byte PicoVideo::read(Word offset)
 	return val;
 }
 
+/* The staged byte, leaving the link where it is */
+Byte PicoVideo::peek(Word offset)
+{
+	uint8_t val;
+
+	registers::copy_out(&val, offset, 1);
+	return val;
+}
+
 /* The portable link code calls this when its !IRQ state changes; see
  * vid_link.h. On the board it drives GP21 as a simulated open collector. Here
  * it feeds the wired-OR chain that main_picothing binds to cpu.IRQ, so the

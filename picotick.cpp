@@ -48,6 +48,12 @@ Byte PicoTick::read(Word offset)
 	}
 }
 
+// the status register without acknowledging the IRQ
+Byte PicoTick::peek(Word offset)
+{
+	return offset == 1 ? status : read(offset);
+}
+
 void PicoTick::write(Word offset, Byte val)
 {
 	switch (offset) {

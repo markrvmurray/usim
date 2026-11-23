@@ -268,7 +268,7 @@ public:
 	// DAT-translating read that is PURE: no cycle increment, no NMI
 	// side-effect. For host-side observation only (--watch/--dump/crash
 	// dump) so watching can't detune the cycle-based timer race.
-	Byte			peek(Word offset) const {
+	Byte			peek(Word offset) override {
 					if (offset < size) {
 						if (in_fixed_window(offset)) {
 							size_t phys = fixed_phys_base + (offset - fixed_start);
@@ -303,7 +303,7 @@ public:
 					m_clear_pending = false;
 				}
 
-	virtual Byte		read(Word offset) {
+	Byte			read(Word offset) override {
 					if (offset < size) {
 						if (in_fixed_window(offset)) {
 							size_t phys = fixed_phys_base + (offset - fixed_start);
@@ -321,7 +321,7 @@ public:
 					}
 				}
 
-	virtual void		write(Word offset, Byte val) {
+	void			write(Word offset, Byte val) override {
 					if (offset < size) {
 						if (in_fixed_window(offset)) {
 							size_t phys = fixed_phys_base + (offset - fixed_start);

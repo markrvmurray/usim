@@ -173,6 +173,9 @@ int main()
 	v.write(DATA, 'Y');
 	settle(v);
 	CHECK(v.read(STAT) & VID_STAT_RDRF);
+	// a debugger's peek sees the staged byte without popping it
+	CHECK(v.peek(DATA) == 'X');
+	CHECK(v.peek(DATA) == 'X');
 	CHECK(v.read(DATA) == 'X');
 	CHECK(v.read(STAT) & VID_STAT_RDRF);
 	CHECK(v.read(DATA) == 'Y');

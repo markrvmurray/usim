@@ -242,6 +242,17 @@ public:
 	Byte			get_cc() const { return (Byte)cc.value; }
 	Byte			get_dp() const { return dp; }
 
+	// and for a debugger changing them while the CPU is stopped
+	void			set_pc(Word v) { pc = v; }
+	void			set_a(Byte v) { a = v; }
+	void			set_b(Byte v) { b = v; }
+	void			set_x(Word v) { x = v; }
+	void			set_y(Word v) { y = v; }
+	void			set_u(Word v) { u = v; }
+	void			set_s(Word v) { s = v; }
+	void			set_cc(Byte v) { cc.value = v; }
+	void			set_dp(Byte v) { dp = v; }
+
 	Word			read_exgtfr(int, bool cc_dp_dup) const;
 	void			write_exgtfr(int, Word);
 

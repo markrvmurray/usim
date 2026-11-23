@@ -66,5 +66,6 @@ public:
 	void		reset() override;
 	void		tick(uint32_t ticks) override;
 	Byte		read(Word offset) override;
+	Byte		peek(Word offset) override;
 	void		write(Word offset, Byte val) override;
 };
