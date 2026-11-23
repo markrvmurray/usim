@@ -242,7 +242,8 @@ static void test_interrupt_and_kill()
 	c.send_raw("\x03");
 	std::string r = c.reply();
 	expect("Ctrl-C", r.rfind("T02", 0) == 0 && stop_reg(r, "06") == "0400", r);
-	c.send("k");
+	std::string k = c.cmd("k");
+	expect("kill reply", k == "X09", k);
 	expect("kill", s.finish() == -1);
 }
 

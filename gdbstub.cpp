@@ -23,7 +23,7 @@
 // Instructions between checks for a Ctrl-C while the program runs
 static const unsigned	POLL_INTERVAL = 4096;
 
-static const int	SIGINT_ = 2, SIGILL_ = 4, SIGTRAP_ = 5;
+static const int	SIGINT_ = 2, SIGILL_ = 4, SIGTRAP_ = 5, SIGKILL_ = 9;
 
 // The register set, in MAME's order and numbering
 static const struct {
@@ -446,6 +446,8 @@ bool GdbStub::serve(const std::string& stop)
 				send("");
 			break;
 		case 'k':
+			// gdb expects nothing back; lldb waits for the exit
+			send("X" + hex8(SIGKILL_));
 			close_fd();
 			return false;
 		case 'D':
