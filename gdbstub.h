@@ -16,7 +16,10 @@
 //	and memory the debugger reads or writes costs no cycles.
 //
 //	Breakpoints compare the PC rather than patching code, so software
-//	(Z0) and hardware (Z1) breakpoints behave the same.
+//	(Z0) and hardware (Z1) breakpoints behave the same. Watchpoints
+//	(Z2 write, Z3 read, Z4 either) watch the CPU's data accesses, not
+//	its instruction fetches, and stop after the instruction that made
+//	the access, with the PC at the next.
 //
 //	"monitor" commands (qRcmd) reach the stub's own (help, trace,
 //	cycles) and then the machine's, through the monitor hook. A
@@ -44,6 +47,18 @@ class GdbStub {
 	int			fd = -1;
 	bool			ack = true;		// until QStartNoAckMode
 	std::vector<bool>	breakpoints;		// by address
+
+	struct Watchpoint {
+		Word		addr;
+		Word		len;
+		char		type;		// '2' write, '3' read, '4' access
+	};
+	std::vector<Watchpoint>	watchpoints;
+	std::vector<Byte>	watch_flags;		// by address: USim::WATCH_*
+	std::vector<bool>	watch_access;		// by address: a Z4 covers it
+	void			set_watchpoint(bool insert, char type, Word addr, Word len);
+	void			rebuild_watch_flags();
+	void			clear_watchpoints();
 	bool			stepping = false;
 	bool			resumed = false;	// first instruction after a resume
 	bool			running = false;	// resumed, stop not yet reported
@@ -55,7 +70,8 @@ class GdbStub {
 	bool			next_packet(std::string& packet);
 	void			send(const std::string& payload);
 
-	std::string		stop_reply(int signal, bool breakpoint);
+	std::string		stop_reply(int signal, bool breakpoint, const std::string& why = "");
+	std::string		watch_reason(const USim::WatchHit& hit) const;
 	std::string		registers();
 	bool			set_registers(const std::string& hex);
 	std::string		reg(unsigned n);

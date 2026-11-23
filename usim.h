@@ -51,9 +51,23 @@ public:
 	// but charging no bus cycle, so inspecting the machine never moves
 	// its clock. A read peeks, so it disturbs no device either; a
 	// write pokes, a deliberate store that the guest is not charged
-	// with.
+	// with and that no watchpoint sees.
 	Byte			debug_read(Word offset);
 	void			debug_write(Word offset, Byte val);
+
+	// Debugger watchpoints. While watch_flags is set it holds a WATCH_
+	// mask for every address, and a data read or write of a flagged
+	// address records the instruction's first such access in
+	// watch_hit. Instruction fetches are not data accesses and never
+	// hit. With no watchpoints, the cost is one null test per access.
+	enum : Byte { WATCH_READ = 1, WATCH_WRITE = 2 };
+	struct WatchHit {
+		bool		hit = false;
+		Word		addr = 0;
+		Byte		kind = 0;	// WATCH_READ or WATCH_WRITE
+	};
+	const Byte*		watch_flags = nullptr;
+	WatchHit		watch_hit;
 
 // Device handling:
 protected:
@@ -61,6 +75,11 @@ protected:
 	MappedDevList   	dev_mapped;
 
 	MappedDeviceEntry*	mapped_at(Word offset);
+	Byte			bus_read(Word offset);
+	void			watched(Word offset, Byte kind) {
+					if (!watch_hit.hit)
+						watch_hit = { true, offset, kind };
+				}
 
 	virtual void		attach(const MappedDevice::shared_ptr& dev, Word base, Word mask, rank<0>);
 	virtual void		attach(const ActiveMappedDevice::shared_ptr& dev, Word base, Word mask, rank<1>);

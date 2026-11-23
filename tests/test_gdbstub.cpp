@@ -2,9 +2,9 @@
 //	test_gdbstub.cpp
 //	The GDB remote protocol stub, driven over a socket pair the way lldb
 //	drives it: the stop at reset, the CPU description, registers,
-//	memory, single step, breakpoints, monitor commands, Ctrl-C, kill,
-//	detach, and the stops at the program's exit and at an invalid
-//	instruction.
+//	memory, single step, breakpoints, watchpoints, monitor commands,
+//	Ctrl-C, kill, detach, and the stops at the program's exit and at
+//	an invalid instruction.
 //
 //	The emulator runs on its own thread, as the run loop in usim09batch
 //	does; the test is the client.
@@ -291,6 +291,51 @@ static void test_invalid()
 	expect("faulted", s.finish() == -2);
 }
 
+static void test_watchpoints()
+{
+	Session s({
+		0xB6, 0x20, 0x00,	// $0400 LDA $2000
+		0xB7, 0x30, 0x00,	// $0403 STA $3000
+		0xF6, 0x30, 0x00,	// $0406 LDB $3000
+		0x12,			// $0409 NOP
+		0xB7, 0x20, 0x00,	// $040A STA $2000
+		0x86, 0x05,		// $040D LDA #5
+		0xB7, 0xFF, 0xCC,	// $040F STA $FFCC (exit 5)
+	});
+	Client& c = s.c;
+	std::string r;
+
+	c.cmd("?");
+	expect("watchpoints stop after the access",
+		has(c.cmd("qHostInfo"), "watchpoint_exceptions_received:after;"));
+	expect("watchpoint count", c.cmd("qWatchpointSupportInfo:").rfind("num:", 0) == 0);
+
+	// a read watchpoint on code: fetching it is not a data read
+	expect("Z3 on code", c.cmd("Z3,401,2") == "OK");
+	expect("Z2 $3000", c.cmd("Z2,3000,1") == "OK");
+	r = c.cmd("c");
+	expect("write watchpoint", has(r, "watch:3000;") && !has(r, "rwatch") &&
+		stop_reg(r, "06") == "0406", r);
+	expect("z2", c.cmd("z2,3000,1") == "OK");
+	expect("z3", c.cmd("z3,401,2") == "OK");
+
+	// a two-byte read watchpoint is hit by a read of either byte
+	expect("Z3 $2FFF+2", c.cmd("Z3,2fff,2") == "OK");
+	r = c.cmd("c");
+	expect("read watchpoint", has(r, "rwatch:3000;") && stop_reg(r, "06") == "0409", r);
+	expect("z3 $2FFF+2", c.cmd("z3,2fff,2") == "OK");
+
+	// an access watchpoint is hit by the write, and reports awatch
+	expect("Z4 $2000", c.cmd("Z4,2000,1") == "OK");
+	r = c.cmd("c");
+	expect("access watchpoint", has(r, "awatch:2000;") && stop_reg(r, "06") == "040d", r);
+
+	// detaching takes the watchpoints with it
+	expect("detach", c.cmd("D") == "OK");
+	expect("exit code", s.finish() == 5);
+	expect("detach clears the flags", s.m.cpu.watch_flags == nullptr);
+}
+
 static void test_monitor()
 {
 	Session s({ 0x12, 0x20, 0xFE });	// NOP; BRA *
@@ -351,6 +396,7 @@ int main()
 	test_interrupt_and_kill();
 	test_detach();
 	test_invalid();
+	test_watchpoints();
 	test_monitor();
 	test_cycle_neutral();
 

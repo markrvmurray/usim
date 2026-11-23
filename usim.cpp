@@ -56,9 +56,11 @@ void USim::invalid(const char *msg)
 	this->abort();
 }
 
+// An instruction byte: a bus cycle, but not a data access
 Byte USim::fetch()
 {
-	return read(pc++);
+	++cycles;
+	return bus_read(pc++);
 }
 
 //----------------------------------------------------------------------------
@@ -113,18 +115,28 @@ MappedDeviceEntry* USim::mapped_at(Word offset)
 	return nullptr;
 }
 
+// A byte from the device at offset, as the CPU reads it
+Byte USim::bus_read(Word offset)
+{
+	auto d = mapped_at(offset);
+	return d ? d->device->read(offset - d->base) : 0xff;
+}
+
 // Single byte read
 Byte USim::read(Word offset)
 {
 	++cycles;
-	auto d = mapped_at(offset);
-	return d ? d->device->read(offset - d->base) : 0xff;
+	if (watch_flags && (watch_flags[offset] & WATCH_READ))
+		watched(offset, WATCH_READ);
+	return bus_read(offset);
 }
 
 // Single byte write
 void USim::write(Word offset, Byte val)
 {
 	++cycles;
+	if (watch_flags && (watch_flags[offset] & WATCH_WRITE))
+		watched(offset, WATCH_WRITE);
 	if (auto d = mapped_at(offset))
 		d->device->write(offset - d->base, val);
 }

@@ -5,6 +5,7 @@
 //	vim: ts=8 sw=8 noet:
 //
 
+#include <algorithm>
 #include <cctype>
 #include <csignal>
 #include <cstdio>
@@ -24,6 +25,10 @@
 static const unsigned	POLL_INTERVAL = 4096;
 
 static const int	SIGINT_ = 2, SIGILL_ = 4, SIGTRAP_ = 5, SIGKILL_ = 9;
+
+// Watchpoints cost the same however many there are; the limit only
+// keeps a runaway client from building an unbounded list.
+static const unsigned	MAX_WATCHPOINTS = 64;
 
 // The register set, in MAME's order and numbering
 static const struct {
@@ -93,7 +98,8 @@ static bool parse_hex(const std::string& s, size_t& pos, unsigned long& value)
 }
 
 GdbStub::GdbStub(mc6809& cpu)
-	: cpu(cpu), breakpoints(0x10000, false)
+	: cpu(cpu), breakpoints(0x10000, false),
+	  watch_flags(0x10000, 0), watch_access(0x10000, false)
 {
 	read_memory = [&cpu](Word a) { return cpu.debug_read(a); };
 	write_memory = [&cpu](Word a, Byte v) { cpu.debug_write(a, v); };
@@ -315,14 +321,71 @@ bool GdbStub::set_registers(const std::string& hex)
 	return true;
 }
 
-std::string GdbStub::stop_reply(int signal, bool breakpoint)
+std::string GdbStub::stop_reply(int signal, bool breakpoint, const std::string& why)
 {
-	std::string out = "T" + hex8(signal);
+	std::string out = "T" + hex8(signal) + why;
 	if (breakpoint)
 		out += "swbreak:;";
 	for (unsigned n : { REG_U, REG_PC, REG_S })
 		out += hex8(n) + ":" + reg(n) + ";";
 	return out;
+}
+
+//----------------------------------------------------------------------------
+// Watchpoints
+//----------------------------------------------------------------------------
+
+// The flags USim tests are rebuilt from the list, so overlapping
+// watchpoints come and go independently.
+void GdbStub::set_watchpoint(bool insert, char type, Word addr, Word len)
+{
+	if (len == 0)
+		len = 1;
+	for (auto it = watchpoints.begin(); it != watchpoints.end(); ++it) {
+		if (it->addr == addr && it->len == len && it->type == type) {
+			if (!insert)
+				watchpoints.erase(it);
+			rebuild_watch_flags();
+			return;
+		}
+	}
+	if (insert)
+		watchpoints.push_back({ addr, len, type });
+	rebuild_watch_flags();
+}
+
+void GdbStub::rebuild_watch_flags()
+{
+	std::fill(watch_flags.begin(), watch_flags.end(), 0);
+	std::fill(watch_access.begin(), watch_access.end(), false);
+	for (const auto& w : watchpoints) {
+		const Byte mask = w.type == '2' ? USim::WATCH_WRITE
+				: w.type == '3' ? USim::WATCH_READ
+				: USim::WATCH_READ | USim::WATCH_WRITE;
+		for (unsigned i = 0; i < w.len; i++) {
+			const Word a = (Word)(w.addr + i);
+			watch_flags[a] |= mask;
+			if (w.type == '4')
+				watch_access[a] = true;
+		}
+	}
+	// no watchpoints, no per-access test beyond the null pointer
+	cpu.watch_flags = watchpoints.empty() ? nullptr : watch_flags.data();
+	cpu.watch_hit = {};
+}
+
+void GdbStub::clear_watchpoints()
+{
+	watchpoints.clear();
+	rebuild_watch_flags();
+}
+
+// The stop reply's account of a hit, in gdb's terms
+std::string GdbStub::watch_reason(const USim::WatchHit& hit) const
+{
+	const char* kind = watch_access[hit.addr] ? "awatch"
+			 : hit.kind == USim::WATCH_WRITE ? "watch" : "rwatch";
+	return std::string(kind) + ":" + hex8(hit.addr >> 8) + hex8(hit.addr) + ";";
 }
 
 //----------------------------------------------------------------------------
@@ -376,8 +439,12 @@ std::string GdbStub::query(const std::string& q)
 	// lldb's own queries. Without an ELF loaded, these are where it
 	// learns the architecture; MAME leaves them out because its
 	// sessions always start from one.
+	// Watchpoints stop after the access, so lldb need not step over one.
 	if (q == "qHostInfo")
-		return "triple:" + TRIPLE_HEX + ";endian:big;ptrsize:2;";
+		return "triple:" + TRIPLE_HEX + ";endian:big;ptrsize:2;"
+		       "watchpoint_exceptions_received:after;";
+	if (q == "qWatchpointSupportInfo" || q == "qWatchpointSupportInfo:")
+		return "num:" + std::to_string(MAX_WATCHPOINTS) + ";";
 	if (q.rfind("qRcmd,", 0) == 0) {
 		std::string cmd;
 		for (size_t i = 6; i + 1 < q.size(); i += 2)
@@ -476,10 +543,21 @@ bool GdbStub::serve(const std::string& stop)
 			return true;
 		case 'Z':
 		case 'z':
-			// software and hardware breakpoints alike; no watchpoints yet
-			if ((p[1] == '0' || p[1] == '1') && p.size() > 2 && p[2] == ',' &&
-			    (pos = 3, parse_hex(p, pos, addr)) && addr <= 0xffff) {
-				breakpoints[addr] = p[0] == 'Z';
+			// Ztype,addr,kind: kind is a breakpoint's size, ignored,
+			// or the number of bytes a watchpoint covers
+			if (p.size() > 2 && p[1] >= '0' && p[1] <= '4' && p[2] == ',' &&
+			    (pos = 3, parse_hex(p, pos, addr)) && addr <= 0xffff &&
+			    pos < p.size() && p[pos++] == ',' && parse_hex(p, pos, len)) {
+				const bool insert = p[0] == 'Z';
+				if (p[1] <= '1') {
+					breakpoints[addr] = insert;
+				} else if (insert && watchpoints.size() >= MAX_WATCHPOINTS) {
+					send("E02");
+					break;
+				} else {
+					set_watchpoint(insert, p[1], (Word)addr,
+						(Word)std::min(len, 0xfffful));
+				}
 				send("OK");
 			} else
 				send("");
@@ -488,11 +566,13 @@ bool GdbStub::serve(const std::string& stop)
 			// gdb expects nothing back; lldb waits for the exit
 			send("X" + hex8(SIGKILL_));
 			close_fd();
+			clear_watchpoints();
 			return false;
 		case 'D':
 			send("OK");
 			close_fd();
 			breakpoints.assign(0x10000, false);
+			clear_watchpoints();
 			return true;
 		case 'H':
 		case 'T':
@@ -510,6 +590,7 @@ bool GdbStub::serve(const std::string& stop)
 
 	// the client has gone
 	close_fd();
+	clear_watchpoints();
 	return false;
 }
 
@@ -518,12 +599,18 @@ bool GdbStub::before_insn()
 	if (fd < 0)
 		return true;		// detached, or never attached: run on
 
-	// A resume from a breakpoint executes the instruction there
+	// A resume from a breakpoint executes the instruction there. A
+	// watchpoint hit by the last instruction stops here, after it.
 	const bool at_breakpoint = breakpoints[cpu.get_pc()] && !resumed;
 	resumed = false;
-	if (stepping || at_breakpoint) {
+	std::string why;
+	if (cpu.watch_hit.hit) {
+		why = watch_reason(cpu.watch_hit);
+		cpu.watch_hit = {};
+	}
+	if (stepping || at_breakpoint || !why.empty()) {
 		stepping = false;
-		return serve(stop_reply(SIGTRAP_, at_breakpoint));
+		return serve(stop_reply(SIGTRAP_, at_breakpoint, why));
 	}
 
 	if (poll_countdown-- == 0) {
