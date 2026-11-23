@@ -131,6 +131,23 @@ static bool check_cell(int col, int row, uint8_t ch)
 	return true;
 }
 
+// A cell drawn in given colours: the glyph's pixels in `fg`, the rest in
+// `bg`. Exact, so it also proves nothing else was mixed in.
+static bool check_cell_colours(int col, int row, uint8_t ch, uint8_t fg,
+    uint8_t bg)
+{
+	vidterm_cursor_hide();
+	for (int gy = 0; gy < CHAR_H; gy++) {
+		uint8_t mask = font_8x16[ch][gy];
+		for (int gx = 0; gx < CHAR_W; gx++) {
+			uint8_t want = (mask & (0x80 >> gx)) ? fg : bg;
+			if (video_framebuffer[row * CHAR_H + gy][col * CHAR_W + gx] != want)
+				return false;
+		}
+	}
+	return true;
+}
+
 int main()
 {
 	mc6809 cpu;
@@ -365,7 +382,7 @@ int main()
 			v.write(DATA, (Byte)b);
 	};
 
-	// Point with the default palette (FColor=7 -> white 0xFF).
+	// Point in the default colour: FColor 0, white in CoWin's palette.
 	v.write(DATA, 0x0C);			// clean screen
 	esc({0x42, 0, 200, 0, 100});		// Point (200,100)
 	settle(v);
@@ -379,7 +396,7 @@ int main()
 	CHECK(video_framebuffer[100][210] == 0xE0);
 
 	// SetDPtr + LineM: a diagonal, and the pointer must follow.
-	esc({0x32, 7});				// FColor back to white
+	esc({0x32, 0});				// FColor back to white
 	esc({0x40, 0, 50, 0, 200});		// SetDPtr (50,200)
 	esc({0x46, 0, 60, 0, 210});		// LineM to (60,210)
 	settle(v);
@@ -1957,6 +1974,469 @@ int main()
 		settle(v);
 	}
 
+	// Text to a HIDDEN window whose working area CWArea has narrowed. The
+	// parked screen is laid out as the whole window, while text is
+	// addressed in the working area, so a write, a wrap and a scroll must
+	// all land where they would have landed on screen -- and nothing in the
+	// window outside the working area may move. They used to be indexed at
+	// the working area's width from the window's corner.
+	{
+		static const uint8_t ESC = 0x1B;
+		auto out = [&](std::initializer_list<uint8_t> b) {
+			for (uint8_t x : b) v.write(DATA, x);
+		};
+		v.write(STAT, VID_CTL_RESET);
+		settle(v);
+		out({ 0x0C });
+		out({ ESC, 0x20, 1, 0, 4, 2, 12, 5, 0, 0 });	// id 1: 12x5 at 4,2
+		out({ ESC, 0x26, 1 });				// shown, for now
+		out({ 0x02, 0x20 + 11, 0x20 + 0, 'Z' });	// window cell 11,0
+		out({ ESC, 0x25, 2, 1, 6, 3 });			// area 6x3 at 2,1
+		out({ ESC, 0x26, 0 });				// hide it
+		settle(v);
+		CHECK(!check_cell(15, 2, 'Z'));			// really hidden
+
+		out({ 'A', 'B', 'C', 'D', 'E', 'F', 'G' });	// wraps after F
+		out({ ESC, 0x26, 1 });
+		settle(v);
+		CHECK(check_cell(6, 3, 'A'));			// the area's corner
+		CHECK(check_cell(11, 3, 'F'));			// its last column
+		CHECK(check_cell(6, 4, 'G'));			// wrapped in the area
+		CHECK(!check_cell(4, 2, 'A'));			// not the window's
+		CHECK(check_cell(15, 2, 'Z'));			// outside: untouched
+
+		// Scroll it while hidden: two line feeds from the second row
+		// reach the bottom and then scroll the area by one row.
+		out({ ESC, 0x26, 0 });
+		out({ 0x0A, 0x0A });
+		out({ ESC, 0x26, 1 });
+		settle(v);
+		CHECK(check_cell(6, 3, 'G'));			// moved up a row
+		CHECK(check_cell(7, 3, ' '));
+		CHECK(check_cell(6, 5, ' '));			// bottom row blank
+		CHECK(check_cell(15, 2, 'Z'));			// still untouched
+
+		// Insert a line at the top while hidden: G moves down again,
+		// within the area only.
+		out({ ESC, 0x26, 0 });
+		out({ 0x01, 0x1F, 0x30 });
+		out({ ESC, 0x26, 1 });
+		settle(v);
+		CHECK(check_cell(6, 4, 'G'));
+		CHECK(check_cell(6, 3, ' '));
+		CHECK(check_cell(15, 2, 'Z'));
+
+		out({ ESC, 0x26, 0 });
+		out({ ESC, 0x24 });				// DWEnd window 1
+		out({ 0x0C });
+		settle(v);
+	}
+
+	// TEXT COLOURS. FColor and BColor name palette registers, and text is
+	// drawn as a CoCo 3 draws hardware text: the attribute keeps three bits
+	// of each, the foreground shown from registers 8-15 and the background
+	// from 0-7. So the colour follows the PALETTE -- loading a register
+	// recolours text already on screen -- and the defaults are CoWin's
+	// (white, blue, black, green, red, yellow, magenta, cyan, twice).
+	{
+		static const uint8_t ESC = 0x1B;
+		auto out = [&](std::initializer_list<uint8_t> b) {
+			for (uint8_t x : b) v.write(DATA, x);
+		};
+		const uint8_t WHITE = 0xFF, BLUE = 0x03, BLACK = 0x00,
+		    RED = 0xE0, YELLOW = 0xFC, GREEN = 0x1C;
+		v.write(STAT, VID_CTL_RESET);
+		settle(v);
+
+		// The default: white on black (FColor 0, BColor 2), opaque or
+		// not, since the graphics plane under it is black too.
+		out({ 0x0C, ESC, 0x3C, 0, 'A' });		// opaque text
+		settle(v);
+		CHECK(check_cell_colours(0, 0, 'A', WHITE, BLACK));
+
+		// DynaStar's colours: FColor 0, BColor 1 -- white on blue. Text
+		// written before keeps its colours; an erase uses the new ones.
+		out({ ESC, 0x32, 0, ESC, 0x33, 1, 'B', 0x02, 0x20, 0x21, 0x04 });
+		settle(v);
+		CHECK(check_cell_colours(0, 0, 'A', WHITE, BLACK));
+		CHECK(check_cell_colours(1, 0, 'B', WHITE, BLUE));
+		CHECK(check_cell_colours(5, 1, ' ', WHITE, BLUE));	// erased
+
+		// Transparent, the same colours show the graphics plane behind
+		// instead of the background colour.
+		out({ ESC, 0x3C, 1, 0x02, 0x22, 0x20, 'C' });
+		settle(v);
+		CHECK(check_cell_colours(2, 0, 'C', WHITE, BLACK));
+
+		// The palette drives text already on screen. Register 8 is what
+		// foreground index 0 shows, register 1 background index 1.
+		out({ ESC, 0x31, 8, 36 });			// reg 8 := red
+		out({ ESC, 0x31, 1, 18 });			// reg 1 := green
+		settle(v);
+		CHECK(check_cell_colours(1, 0, 'B', RED, GREEN));
+		CHECK(check_cell_colours(0, 0, 'A', RED, BLACK));
+
+		// THE GIME MAPPING, against graphics. FColor 9 and FColor 1 are
+		// the same text colour -- index 1, register 9 -- but different
+		// drawing colours, registers 9 and 1.
+		out({ ESC, 0x31, 9, 36, ESC, 0x31, 1, 18 });	// 9 red, 1 green
+		// (Text opaque to see its background, then transparent again so
+		// the cells over the Points show the drawing.)
+		out({ ESC, 0x3C, 0 });
+		out({ ESC, 0x32, 9, 0x02, 0x20, 0x22, 'D' });
+		out({ ESC, 0x3C, 1, ESC, 0x42, 0, 200, 0, 200 });	// Point
+		settle(v);
+		CHECK(check_cell_colours(0, 2, 'D', RED, GREEN));
+		CHECK(video_framebuffer[200][200] == RED);
+		out({ ESC, 0x3C, 0 });
+		out({ ESC, 0x32, 1, 0x02, 0x21, 0x22, 'E' });
+		out({ ESC, 0x3C, 1, ESC, 0x42, 0, 210, 0, 200 });
+		settle(v);
+		CHECK(check_cell_colours(1, 2, 'E', RED, GREEN));
+		CHECK(video_framebuffer[200][210] == GREEN);
+
+		// DefPal restores CoWin's registers and leaves FColor/BColor
+		// alone, and the text recolours with it: 'E' is still index 1
+		// on index 1, which is blue on blue again (registers 9 and 1).
+		out({ ESC, 0x30 });
+		settle(v);
+		CHECK(check_cell_colours(1, 2, 'E', BLUE, BLUE));
+		out({ ESC, 0x3C, 0, 0x02, 0x24, 0x22, 'K', ESC, 0x3C, 1 });
+		settle(v);
+		CHECK(check_cell_colours(4, 2, 'K', BLUE, BLUE));	// FColor kept
+		out({ ESC, 0x32, 0 });				// white again
+
+		// Inverse swaps them: the cell is the foreground, the glyph
+		// shows the background.
+		out({ ESC, 0x3C, 0 });
+		out({ 0x1F, 0x20, 0x02, 0x22, 0x22, 'F', 0x1F, 0x21 });
+		out({ ESC, 0x3C, 1 });
+		settle(v);
+		CHECK(check_cell_colours(2, 2, 'F', BLUE, WHITE));
+
+		// PER WINDOW. DWSet's colours are the window's: red on yellow.
+		// Its FColor changes neither the root's text nor the root's
+		// drawing colour.
+		out({ ESC, 0x20, 1, 0, 40, 10, 10, 2, 4, 5 });	// id 1, fg 4, bg 5
+		out({ ESC, 0x26, 1, ESC, 0x3C, 0, 'G' });
+		settle(v);
+		CHECK(check_cell_colours(40, 10, 'G', RED, YELLOW));
+		out({ ESC, 0x32, 3 });				// window 1: green
+		out({ ESC, 0x26, 0 });				// show the root
+		settle(v);
+		// The root comes back empty (it keeps no parked screen) and in
+		// ITS colours -- transparent, so black from the plane -- not in
+		// the yellow of the window that was being written to.
+		CHECK(check_cell_colours(0, 0, ' ', WHITE, BLACK));
+		out({ ESC, 0x21, 0, 0x02, 0x23, 0x22, 'H' });	// write there
+		out({ ESC, 0x42, 0, 220, 0, 200 });
+		settle(v);
+		CHECK(check_cell_colours(3, 2, 'H', WHITE, BLACK));
+		CHECK(video_framebuffer[200][220] == WHITE);	// root's FColor 0
+		CHECK(video_framebuffer[200][220] != GREEN);
+
+		out({ ESC, 0x21, 1, ESC, 0x24 });		// DWEnd window 1
+		v.write(STAT, VID_CTL_RESET);
+		out({ 0x0C });
+		settle(v);
+	}
+
+	// OVERLAY WINDOWS (OWSet $1B $22, OWEnd $1B $23), as CoCo 3 GrfDrv has
+	// them and DynaStar uses them for its menus and help: an overlay opens
+	// inside the current window, takes its output -- addressing, clears and
+	// erases all relative to it, and VID.Info and the size query describe
+	// it -- and with the save switch on, closing it puts back exactly what
+	// it covered. The byte sequences are DynaStar's own, captured on /TERM.
+	{
+		static const uint8_t ESC = 0x1B;
+		const uint8_t WHITE = 0xFF, BLUE = 0x03, BLACK = 0x00;
+		auto out = [&](std::initializer_list<uint8_t> b) {
+			for (uint8_t x : b) v.write(DATA, x);
+		};
+		auto info = [&](int &cols, int &rows) {
+			settle(v);
+			v.write(3, 0);
+			v.read(3); v.read(3); v.read(3); v.read(3);
+			cols = v.read(3);
+			rows = v.read(3);
+		};
+		// The whole text grid, characters and attributes: the oracle a
+		// restore is checked against, every cell rather than a few.
+		auto grid = [&]() {
+			std::string g;
+			uint8_t row[TEXT_COLS * 2];
+			settle(v);
+			for (int r = 0; r < TEXT_ROWS; r++) {
+				vidterm_read_row(0, r, TEXT_COLS, row);
+				g.append((const char *)row, sizeof(row));
+			}
+			return g;
+		};
+		auto fill_root = [&]() {	// distinct text in every cell
+			out({ 0x0C });
+			for (int r = 0; r < TEXT_ROWS; r++) {
+				out({ 0x02, 0x20, (uint8_t)(0x20 + r) });
+				for (int c = 0; c < TEXT_COLS - 1; c++)
+					v.write(DATA, (uint8_t)('!' + (r * 7 + c) % 90));
+				settle(v);	// a 2 KB FIFO: never outrun it
+			}
+			out({ 0x02, 0x27, 0x21 });		// cursor to 7,1
+		};
+		const uint8_t HELP[] = { ESC, 0x22, 0x01, 0x00, 0x01, 0x50, 0x05,
+		    0x00, 0x01 };				// 80x5 at 0,1
+		const uint8_t FULL[] = { ESC, 0x22, 0x01, 0x00, 0x00, 0x50, 0x18,
+		    0x00, 0x01 };				// 80x24 at 0,0
+		int cols, rows;
+
+		v.write(STAT, VID_CTL_RESET);
+		settle(v);
+		fill_root();
+		const std::string before = grid();
+		const uint8_t under = before[(1 * TEXT_COLS + 0) * 2];
+
+		// Open the help panel: cleared to white on blue, 80x5 reported
+		// both ways, and the cursor home in IT.
+		for (uint8_t b : HELP) v.write(DATA, b);
+		info(cols, rows);
+		CHECK(cols == 80 && rows == 5);
+		CHECK(check_cell_colours(0, 1, ' ', WHITE, BLUE));
+		CHECK(check_cell_colours(79, 5, ' ', WHITE, BLUE));
+		CHECK(!check_cell_colours(80, 1, ' ', WHITE, BLUE));	// outside
+		CHECK(!check_cell_colours(0, 0, ' ', WHITE, BLUE));
+		out({ ESC, '[', '1', '8', 't' });
+		settle(v);
+		{
+			std::string got;
+			while (v.read(STAT) & VID_STAT_RDRF)
+				got += (char)v.read(DATA);
+			CHECK(got == "\x1b[8;5;80t");
+		}
+
+		// Its own coordinates: text at its corner, $02 relative to it,
+		// clear and erase confined to it.
+		out({ 'H', 'E', 'L', 'P', 0x02, 0x22, 0x21, 'X' });
+		settle(v);
+		CHECK(check_cell_colours(0, 1, 'H', WHITE, BLUE));
+		CHECK(check_cell_colours(2, 2, 'X', WHITE, BLUE));
+		out({ 0x0C, 'Y' });				// clears the panel only
+		settle(v);
+		CHECK(check_cell_colours(0, 1, 'Y', WHITE, BLUE));
+		CHECK(check_cell_colours(2, 2, ' ', WHITE, BLUE));
+		CHECK(grid().compare(0, TEXT_COLS * 2, before, 0,
+		    TEXT_COLS * 2) == 0);			// row 0 untouched
+
+		// Close it: every cell of the grid is back as it was, and the
+		// cursor resumes where the root left it.
+		out({ ESC, 0x23 });
+		CHECK(grid() == before);
+		info(cols, rows);
+		CHECK(cols == TEXT_COLS && rows == TEXT_ROWS);
+		out({ 'Q' });
+		settle(v);
+		CHECK(check_cell(7, 1, 'Q'));
+		CHECK((uint8_t)before[(1 * TEXT_COLS) * 2] == under);
+
+		// NESTED, as DynaStar opens them: full screen, then the panel
+		// inside. Each close restores what was there when IT opened.
+		fill_root();
+		const std::string base = grid();
+		for (uint8_t b : FULL) v.write(DATA, b);
+		out({ 'M', 'E', 'N', 'U' });
+		const std::string menu = grid();
+		CHECK(menu != base);
+		for (uint8_t b : HELP) v.write(DATA, b);
+		out({ 'H', 'E', 'L', 'P' });
+		info(cols, rows);
+		CHECK(cols == 80 && rows == 5);
+		out({ ESC, 0x23 });
+		CHECK(grid() == menu);				// the menu again
+		info(cols, rows);
+		CHECK(cols == 80 && rows == 24);
+		out({ '!' });					// after MENU, in it
+		settle(v);
+		CHECK(check_cell_colours(4, 0, '!', WHITE, BLUE));
+		out({ ESC, 0x23 });
+		CHECK(grid() == base);				// and the root
+		info(cols, rows);
+		CHECK(cols == TEXT_COLS && rows == TEXT_ROWS);
+
+		// SAVE SWITCH OFF: GrfDrv neither saves nor clears, so the
+		// overlay opens on what is there and leaves its text behind.
+		fill_root();
+		const std::string plain = grid();
+		out({ ESC, 0x22, 0, 10, 10, 20, 3, 0, 1 });
+		CHECK(grid() == plain);				// not cleared
+		out({ 'Z' });
+		settle(v);
+		CHECK(check_cell_colours(10, 10, 'Z', WHITE, BLUE));
+		out({ ESC, 0x23 });
+		settle(v);
+		CHECK(check_cell_colours(10, 10, 'Z', WHITE, BLUE));	// stays
+
+		// CLAMPED to the window, as DWSet is to the panel: 80 columns
+		// from column 120 of 128 can only be 8.
+		out({ ESC, 0x22, 1, 120, 28, 80, 24, 0, 1 });
+		info(cols, rows);
+		CHECK(cols == 8 && rows == 2);
+		out({ ESC, 0x23 });
+
+		// NESTED overlays are placed from the WINDOW's corner, not the
+		// overlay beneath (GrfDrv measures against the device window):
+		// one at 0,0 inside one at 10,5 is at the window's 0,0.
+		out({ ESC, 0x22, 1, 10, 5, 20, 6, 0, 1 });
+		out({ ESC, 0x22, 1, 0, 0, 4, 2, 0, 1, 'N' });
+		settle(v);
+		CHECK(check_cell_colours(0, 0, 'N', WHITE, BLUE));
+		CHECK(!check_cell_colours(10, 5, 'N', WHITE, BLUE));
+		out({ ESC, 0x23, ESC, 0x23 });
+
+		// A DRAWING under an overlay comes back when it closes. The
+		// overlay's text is opaque, so it covers the drawing; the
+		// drawing itself is never touched.
+		out({ 0x0C, ESC, 0x40, 0, 40, 0, 40, ESC, 0x4A, 0, 120, 0, 80 });
+		settle(v);
+		const uint8_t drawn = video_framebuffer[60][80];
+		CHECK(drawn == WHITE);
+		out({ ESC, 0x22, 1, 0, 0, 20, 10, 0, 1 });
+		settle(v);
+		CHECK(video_framebuffer[60][80] == BLUE);	// covered
+		out({ ESC, 0x23 });
+		settle(v);
+		CHECK(video_framebuffer[60][80] == drawn);	// and back
+		CHECK(video_framebuffer[100][80] == BLACK);
+
+		// An overlay the size of the panel is still an overlay: its
+		// clear is a text clear, and the drawing survives it -- even
+		// with its text made transparent, when a clear of the ROOT
+		// would repaint the graphics plane in the background colour.
+		out({ ESC, 0x22, 1, 0, 0, TEXT_COLS, TEXT_ROWS, 0, 1 });
+		out({ ESC, 0x3C, 1, 0x0C });
+		out({ ESC, 0x23 });
+		settle(v);
+		CHECK(video_framebuffer[60][80] == drawn);
+
+		// SELECT leaves an overlay in place: another window's output
+		// goes there, and selecting back finds the overlay current.
+		out({ 0x0C });
+		out({ ESC, 0x20, 1, 0, 100, 20, 20, 5, 0, 2 });	// id 1, hidden
+		out({ ESC, 0x21, 0 });
+		for (uint8_t b : HELP) v.write(DATA, b);
+		out({ ESC, 0x21, 1 });
+		info(cols, rows);
+		CHECK(cols == 20 && rows == 5);
+		out({ ESC, 0x21, 0 });
+		info(cols, rows);
+		CHECK(cols == 80 && rows == 5);
+		out({ ESC, 0x23 });
+
+		// A HIDDEN window's overlay works on its parked screen: open,
+		// write and close it while hidden, and the window shows as it
+		// was; open and write, then show, and the overlay is there.
+		out({ ESC, 0x21, 1, 'W', 'I', 'N' });
+		out({ ESC, 0x22, 1, 0, 0, 5, 2, 0, 1, 'O', ESC, 0x23 });
+		out({ ESC, 0x26, 1 });
+		settle(v);
+		CHECK(check_cell(100, 20, 'W'));
+		CHECK(check_cell(102, 20, 'N'));
+		out({ ESC, 0x26, 0 });
+		out({ ESC, 0x22, 1, 1, 1, 5, 2, 0, 1, 'O' });
+		out({ ESC, 0x26, 1 });
+		settle(v);
+		CHECK(check_cell_colours(101, 21, 'O', WHITE, BLUE));
+		CHECK(check_cell(100, 20, 'W'));
+		out({ ESC, 0x23 });
+		settle(v);
+		CHECK(!check_cell_colours(101, 21, 'O', WHITE, BLUE));
+
+		// DWSet and DWEnd forget a window's overlays: redefined, its
+		// output goes to the window itself again.
+		out({ ESC, 0x22, 1, 0, 0, 4, 2, 0, 1 });
+		out({ ESC, 0x20, 1, 0, 100, 20, 20, 5, 0, 2 });
+		info(cols, rows);
+		CHECK(cols == 20 && rows == 5);
+		out({ ESC, 0x22, 1, 0, 0, 4, 2, 0, 1, ESC, 0x24 });	// DWEnd
+		out({ ESC, 0x20, 1, 0, 100, 20, 20, 5, 0, 2 });
+		info(cols, rows);
+		CHECK(cols == 20 && rows == 5);
+		out({ ESC, 0x24, ESC, 0x26, 0 });
+
+		// OUT OF RECORDS: twelve overlays open; a thirteenth is
+		// refused, and its OWEnd closes nothing -- not the twelfth.
+		out({ ESC, 0x21, 0, 0x0C });
+		for (uint8_t i = 0; i < 13; i++)
+			out({ ESC, 0x22, 0, 0, 0, (uint8_t)(30 + i), 10, 0, 1 });
+		info(cols, rows);
+		CHECK(cols == 41);				// the twelfth
+		out({ ESC, 0x23 });
+		info(cols, rows);
+		CHECK(cols == 41);				// still the twelfth
+		out({ ESC, 0x23 });
+		info(cols, rows);
+		CHECK(cols == 40);				// now the eleventh
+		for (int i = 0; i < 11; i++)
+			out({ ESC, 0x23 });
+		info(cols, rows);
+		CHECK(cols == TEXT_COLS);
+		out({ ESC, 0x23 });				// one too many: nothing
+		info(cols, rows);
+		CHECK(cols == TEXT_COLS);
+
+		// NO PSRAM: there is nowhere to save, so the overlay opens and
+		// works, and closing it clears its area in the root's colours
+		// instead of restoring it. Nothing outside it changes.
+		pv_psram_set_absent(true);
+		fill_root();
+		const std::string bare = grid();
+		for (uint8_t b : HELP) v.write(DATA, b);
+		out({ 'H', 'E', 'L', 'P' });
+		info(cols, rows);
+		CHECK(cols == 80 && rows == 5);
+		out({ ESC, 0x23 });
+		settle(v);
+		CHECK(check_cell_colours(0, 1, ' ', WHITE, BLACK));
+		CHECK(check_cell_colours(79, 5, ' ', WHITE, BLACK));
+		{
+			const std::string g = grid();
+			int changed_outside = 0;
+			for (int r = 0; r < TEXT_ROWS; r++)
+				for (int c = 0; c < TEXT_COLS; c++) {
+					if (r >= 1 && r <= 5 && c < 80)
+						continue;
+					const size_t at = (size_t)(r * TEXT_COLS + c) * 2u;
+					changed_outside += g[at] != bare[at] ||
+					    g[at + 1] != bare[at + 1];
+				}
+			CHECK(changed_outside == 0);
+		}
+		pv_psram_set_absent(false);
+
+		// `status` says both happened: one overlay refused for want of
+		// a record, one opened without a save.
+		{
+			fflush(stdout);
+			FILE *tmp = tmpfile();
+			const int saved = dup(1);
+			dup2(fileno(tmp), 1);
+			vid_link_print_status();
+			fflush(stdout);
+			dup2(saved, 1);
+			close(saved);
+			rewind(tmp);
+			std::string st;
+			char c;
+			while (fread(&c, 1, 1, tmp) == 1)
+				st += c;
+			fclose(tmp);
+			CHECK(st.find("1 overlays REFUSED") != std::string::npos);
+			CHECK(st.find("1 overlays opened UNSAVED") !=
+			    std::string::npos);
+		}
+
+		v.write(STAT, VID_CTL_RESET);
+		out({ 0x0C });
+		settle(v);
+	}
+
 	// A blank cell in a row where NO graphics has been drawn, while other
 	// rows HAVE been. That mixture is what every real screen looks like
 	// and what no previous test here produced: they either clear and draw
@@ -2097,10 +2577,10 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x2E);
 		v.write(DATA, 3); v.write(DATA, 1);	// pattern on
 
-		// An OUTLINE is woven: FColor 7 is white, so its pixels are the
+		// An OUTLINE is woven: FColor 0 is white, so its pixels are the
 		// pattern's own, tiled from the window origin (the root, 0,0).
 		// Box from 600,300 to 700,360; check its whole top edge.
-		v.write(DATA, ESC); v.write(DATA, 0x32); v.write(DATA, 7);
+		v.write(DATA, ESC); v.write(DATA, 0x32); v.write(DATA, 0);
 		v.write(DATA, ESC); v.write(DATA, 0x40);
 		v.write(DATA, 2); v.write(DATA, 0x58);	// 600,300
 		v.write(DATA, 1); v.write(DATA, 0x2C);
@@ -2525,9 +3005,10 @@ int main()
 		settle(v);
 		CHECK(video_framebuffer[150][150] == under);   // and undone
 
-		// Back to replace, and a bar really does replace again.
+		// Back to replace, and a bar really does replace again, in
+		// green (register 3; 2 is black in CoWin's palette).
 		v.write(DATA, ESC); v.write(DATA, 0x2F); v.write(DATA, 0);
-		v.write(DATA, ESC); v.write(DATA, 0x32); v.write(DATA, 2);
+		v.write(DATA, ESC); v.write(DATA, 0x32); v.write(DATA, 3);
 		v.write(DATA, ESC); v.write(DATA, 0x40);
 		v.write(DATA, 0); v.write(DATA, 120);
 		v.write(DATA, 0); v.write(DATA, 120);
@@ -2810,6 +3291,7 @@ int main()
 	// quietly spans the full row width would pass any check that only
 	// looked inside it, so every case below asserts the neighbours too.
 	{
+		vidterm_text_colours(nullptr, nullptr);	// attributes as R,G,B bits
 		// 0xE0 is the console's own attribute (white on opaque black),
 		// which is what check_cell compares the rendered pixels
 		// against; the grid alone proves nothing until it is blitted.
@@ -3374,6 +3856,7 @@ int main()
 	// neither, and check the undrawn (implicit) and drawn (resident) cases
 	// give the SAME answer -- they must, since both mean "the plane is C".
 	{
+		vidterm_text_colours(nullptr, nullptr);	// attributes as R,G,B bits
 		static const uint8_t C = 0x6Du;
 		static const uint8_t WHITE_TRANSP = 0xE1u;	// fg white, bit0 set
 		const int col = 10, row = 5;
@@ -3442,6 +3925,7 @@ int main()
 	// two. Every pixel of the panel is checked, so a write to a cell that
 	// was not dirty is caught too. Then again through the bounded refresh.
 	{
+		vidterm_text_colours(nullptr, nullptr);	// attributes as R,G,B bits
 		static uint8_t model[FB_HEIGHT][FB_WIDTH];
 		static const uint8_t U = 0x92u;		// undrawn rows' colour
 		auto plane = [](int x, int y) {
@@ -4362,6 +4846,7 @@ int main()
 	// paths that have been exercised. Each check states the degradation the
 	// design promises, and the switch is put back before anything else runs.
 	{
+		vidterm_text_colours(nullptr, nullptr);	// attributes as R,G,B bits
 		static const uint8_t ESC = 0x1B;
 		pv_psram_set_absent(true);
 		v.write(STAT, VID_CTL_RESET);
@@ -4392,6 +4877,7 @@ int main()
 			// (0x00) nor the bar. Cleared to 0x00, a blit that fell
 			// back to the uniform colour would be indistinguishable
 			// from one that painted the background, and did pass.
+			vidterm_text_colours(nullptr, nullptr);	// R,G,B bits
 			vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, 0x49);
 			vidterm_fill_rect(x - 8, y - 8, 40, 40, 0x6D);
 			vidterm_putch(col, row, 'M', 0xE1);	// white, transparent
