@@ -78,6 +78,8 @@ static void handle_event(const SDL_Event& ev)
 			vid_link_input(0x09);
 		else if (k == SDLK_ESCAPE)
 			vid_link_input(0x1B);
+		else if (k >= SDLK_F1 && k <= SDLK_F12)
+			vid_link_input((uint8_t)(0x80 + (k - SDLK_F1)));
 		else if ((ev.key.keysym.mod & KMOD_CTRL) != 0 &&
 		    k >= SDLK_a && k <= SDLK_z)
 			vid_link_input((uint8_t)(k - SDLK_a + 1));

@@ -81,6 +81,7 @@ protected:	// internal processor state (visible to the HD6309 subclass)
 	bool			waiting_sync;
 	bool			waiting_cwai;
 	bool			nmi_previous;
+	bool			refetched = false;	// prefix ignored, its byte to rerun
 
 protected:	// operand fetch + dispatch (used and/or overridden by HD6309)
 	Word&			ix_refreg(Byte);
@@ -92,6 +93,7 @@ protected:	// operand fetch + dispatch (used and/or overridden by HD6309)
 	void			do_postincrement();
 
 	virtual void		fetch_instruction();
+	void			decode_mode();
 	virtual void		execute_instruction();
 	virtual void		illegal_opcode();	// unknown opcode (HD6309 traps)
 	// EXG/TFR are shared opcodes ($1E/$1F) but the HD6309 extends them to a

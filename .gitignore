@@ -14,8 +14,10 @@ tests/test_picoide
 tests/test_picortc
 tests/test_mos6522
 tests/test_exgtfr
+tests/test_prefix
 tests/test_cycles6309
 tests/test_picovideo
+tests/test_picovideo_keys
 tests/cycletest09
 tests/test6309
 tests/test6309.bin

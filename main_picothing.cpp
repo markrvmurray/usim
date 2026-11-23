@@ -30,6 +30,8 @@
 //	               --aux-pty binds it to a host pseudo-terminal (for
 //	               DriveWire etc.) — the /dev/ttysNNN slave path is
 //	               printed to stderr at startup.
+//	               The console ACIA ($FFC4-5) can be bound the same way
+//	               with --console-pty.
 //	      $FFC8-9  50Hz tick timer
 //	      $FFCA    SystemWatchpoint control (hardware-faithful)
 //	      $FFCB    TraceCtl (emulator-only; pT hardware has nothing
@@ -69,6 +71,11 @@
 //	                     pseudo-terminal instead of the null device; the
 //	                     slave /dev/ttysNNN path is printed at startup so
 //	                     an external program (e.g. DriveWire) can attach.
+//	  --console-pty      back the console ACIA ($FFC4-5) with a host
+//	                     pseudo-terminal instead of stdin/stdout, so a
+//	                     terminal program or a file-transfer program such
+//	                     as Kermit can log in and drive the console.
+//	                     Excludes --input.
 //	  <firmware>         .hex / .s19 / .srec — autodetected by extension
 //
 //	No HaltDevice: pico-thing firmware has no host-exit mechanism;
@@ -287,6 +294,8 @@ static void usage(const char* prog)
 		"                      with no file: reproducible with --input\n"
 		"  --aux-pty           back the aux ACIA ($FFC6-7) with a host PTY\n"
 		"                      (prints the /dev/ttysNNN slave path at startup)\n"
+		"  --console-pty       back the console ACIA ($FFC4-5) with a host PTY\n"
+		"                      instead of stdin/stdout (excludes --input)\n"
 		"  --input=STR         deterministic scripted console input; bytes\n"
 		"                      released on guest CYCLE count (reproducible).\n"
 		"                      \\r \\n \\t \\0 \\\\ escapes honoured.\n"
@@ -339,6 +348,7 @@ int main(int argc, char* argv[])
 	std::vector<Word>	brk_addrs;
 	bool			brk_gated = false;
 	bool			aux_pty_enable = false;	// --aux-pty: PTY-back the aux ACIA
+	bool			console_pty_enable = false;	// --console-pty: PTY-back the console ACIA
 	bool			use_hd6309 = false;	// --hd6309: run as an HD6309
 	bool			md_native = false;	// --md-native: MD bit 0 at reset
 	unsigned		pc_hist_top = 0;	// --pc-hist: top clusters to print (0 = disabled)
@@ -454,6 +464,8 @@ int main(int argc, char* argv[])
 			slave_path = argv[++i];
 		} else if (strcmp(argv[i], "--aux-pty") == 0) {
 			aux_pty_enable = true;
+		} else if (strcmp(argv[i], "--console-pty") == 0) {
+			console_pty_enable = true;
 		} else if (strcmp(argv[i], "--hd6309") == 0) {
 			use_hd6309 = true;
 		} else if (strcmp(argv[i], "--md-native") == 0) {
@@ -513,6 +525,12 @@ int main(int argc, char* argv[])
 		return EXIT_FAILURE;
 	}
 
+	// A scripted console and a PTY console both want the console ACIA.
+	if (console_pty_enable && have_input) {
+		fprintf(stderr, "%s: --console-pty and --input are exclusive\n", argv[0]);
+		return EXIT_FAILURE;
+	}
+
 	// Native mode is an HD6309 concept; the MC6809 has no MD register.
 	if (md_native && !use_hd6309) {
 		fprintf(stderr, "%s: --md-native requires --hd6309\n", argv[0]);
@@ -546,13 +564,23 @@ int main(int argc, char* argv[])
 	// Console ACIA backend: interactive Terminal by default, or a
 	// deterministic cycle-scheduled ScriptTerminal with --input (for
 	// reproducible runs / trace diffs). Both subclass mc6850_impl and
-	// send output to stdout.
+	// send output to stdout. --console-pty instead hands the console to
+	// a host pseudo-terminal, as --aux-pty does for the aux ACIA; if the
+	// PTY fails to open, the Terminal is used so the emulator still boots.
 	std::unique_ptr<Terminal>	console_owned;
 	if (have_input)
 		console_owned = std::make_unique<ScriptTerminal>(cpu, input_script, input_first, input_step);
 	else
 		console_owned = std::make_unique<Terminal>(cpu);
-	Terminal&	console_term = *console_owned;
+	std::unique_ptr<PtySerial>	console_pty;
+	mc6850_impl*			console_impl = console_owned.get();
+	if (console_pty_enable) {
+		console_pty = std::make_unique<PtySerial>("console");
+		if (console_pty->ok())
+			console_impl = console_pty.get();
+		else
+			fprintf(stderr, "ptyserial: falling back to the stdin/stdout console\n");
+	}
 
 	// Auxiliary ACIA backend: null by default (discards TX, no RX), or a
 	// host pseudo-terminal with --aux-pty so an external program such as
@@ -580,7 +608,7 @@ int main(int argc, char* argv[])
 	datram->set_fixed_window(fixed_window_start, fixed_window_size, fixed_window_phys);
 	auto datram_tk  = std::make_shared<DATRAMTicker>(*datram);
 	auto taskreg    = std::make_shared<PicoTask>(*datram);
-	auto console    = std::make_shared<mc6850>(console_term);
+	auto console    = std::make_shared<mc6850>(*console_impl);
 	auto aux_acia   = std::make_shared<mc6850>(*aux_impl);
 	auto tick       = std::make_shared<PicoTick>((uint32_t)tick_cycles);	// default 50Hz at ~1MHz; --tick to amplify IRQ-race pressure
 	auto ide        = std::make_shared<PicoIDE>(disk_path, slave_path);

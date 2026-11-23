@@ -27,7 +27,7 @@
 #include "gfx_bufs.h"
 #include "win_store.h"
 #include "pv_psram.h"
-#include "font_spleen_8x16.h"
+#include "font_8x16.h"
 
 static int failures = 0;
 
@@ -79,13 +79,30 @@ static void settle(PicoVideo &v)
 	failures++;
 }
 
+// Everything the guest could read back right now, as a string -- the input
+// FIFO drained the way the guest drains it, one RDRF-confirmed read a byte.
+static std::string take_input(PicoVideo &v)
+{
+	std::string got;
+
+	for (int i = 0; i < 1024 && (v.read(STAT) & VID_STAT_RDRF); i++)
+		got += (char)v.read(DATA);
+	return got;
+}
+
+static void send(PicoVideo &v, const char *bytes)
+{
+	for (const char *p = bytes; *p != '\0'; p++)
+		v.write(DATA, (Byte)*p);
+}
+
 // The same, for a cell in INVERSE video: the glyph's mask is flipped, so the
 // cell is white and the glyph shows the (black) background through it.
 static bool check_cell_inverse(int col, int row, uint8_t ch)
 {
 	vidterm_cursor_hide();
 	for (int gy = 0; gy < CHAR_H; gy++) {
-		uint8_t mask = font_spleen_8x16[ch][gy];
+		uint8_t mask = font_8x16[ch][gy];
 		for (int gx = 0; gx < CHAR_W; gx++) {
 			uint8_t want = (mask & (0x80 >> gx)) ? 0x00 : 0xFF;
 			if (video_framebuffer[row * CHAR_H + gy][col * CHAR_W + gx] != want)
@@ -104,9 +121,26 @@ static bool check_cell(int col, int row, uint8_t ch)
 	vidterm_cursor_hide();
 
 	for (int gy = 0; gy < CHAR_H; gy++) {
-		uint8_t mask = font_spleen_8x16[ch][gy];
+		uint8_t mask = font_8x16[ch][gy];
 		for (int gx = 0; gx < CHAR_W; gx++) {
 			uint8_t want = (mask & (0x80 >> gx)) ? 0xFF : 0x00;
+			if (video_framebuffer[row * CHAR_H + gy][col * CHAR_W + gx] != want)
+				return false;
+		}
+	}
+	return true;
+}
+
+// A cell drawn in given colours: the glyph's pixels in `fg`, the rest in
+// `bg`. Exact, so it also proves nothing else was mixed in.
+static bool check_cell_colours(int col, int row, uint8_t ch, uint8_t fg,
+    uint8_t bg)
+{
+	vidterm_cursor_hide();
+	for (int gy = 0; gy < CHAR_H; gy++) {
+		uint8_t mask = font_8x16[ch][gy];
+		for (int gx = 0; gx < CHAR_W; gx++) {
+			uint8_t want = (mask & (0x80 >> gx)) ? fg : bg;
 			if (video_framebuffer[row * CHAR_H + gy][col * CHAR_W + gx] != want)
 				return false;
 		}
@@ -345,7 +379,7 @@ int main()
 			v.write(DATA, (Byte)b);
 	};
 
-	// Point with the default palette (FColor=7 -> white 0xFF).
+	// Point in the default colour: FColor 0, white in CoWin's palette.
 	v.write(DATA, 0x0C);			// clean screen
 	esc({0x42, 0, 200, 0, 100});		// Point (200,100)
 	settle(v);
@@ -359,7 +393,7 @@ int main()
 	CHECK(video_framebuffer[100][210] == 0xE0);
 
 	// SetDPtr + LineM: a diagonal, and the pointer must follow.
-	esc({0x32, 7});				// FColor back to white
+	esc({0x32, 0});				// FColor back to white
 	esc({0x40, 0, 50, 0, 200});		// SetDPtr (50,200)
 	esc({0x46, 0, 60, 0, 210});		// LineM to (60,210)
 	settle(v);
@@ -738,25 +772,26 @@ int main()
 		kbd(0x00, 0x3B); released(); CHECK(typed() == 0x81);   // F2
 		kbd(0x00, 0x45); released(); CHECK(typed() == 0x8B);   // F12
 
-		// The arrows send the CoCo keyboard's bytes, from vtio's KeyTbl:
-		// plain, Shift and Ctrl each have their own column, and minted
-		// pages, deletes and jumps to line ends with the modified ones.
-		// Every arrow in every column, with left and right Shift and
-		// Ctrl both, and Shift winning over Ctrl as it does in vtio. A
-		// first version ignored modifiers (following the Wildbits
-		// driver) and this test asserted that; it was wrong.
+		// EVERY KEY IS ONE BYTE, and the arrows and editing keys have
+		// bit-7 codes of their own: arrows (up, down, left, right) plain
+		// $8C-$8F, Shift $90-$93, Ctrl $94-$97. They used to send vtio's
+		// KeyTbl bytes, which are control codes (left was Backspace's $08,
+		// right Tab's $09, up FF, down LF), so no program could tell them
+		// apart. Every arrow in every column, with left and right Shift
+		// and Ctrl both, and Shift winning over Ctrl as it does in vtio.
 		{
 			static const struct { uint8_t usage; uint8_t col[3]; } AR[] = {
-				{ 0x52, { 0x0C, 0x1C, 0x13 } },	// up
-				{ 0x51, { 0x0A, 0x1A, 0x12 } },	// down
-				{ 0x50, { 0x08, 0x18, 0x10 } },	// left
-				{ 0x4F, { 0x09, 0x19, 0x11 } },	// right
+				{ 0x52, { 0x8C, 0x90, 0x94 } },	// up
+				{ 0x51, { 0x8D, 0x91, 0x95 } },	// down
+				{ 0x50, { 0x8E, 0x92, 0x96 } },	// left
+				{ 0x4F, { 0x8F, 0x93, 0x97 } },	// right
 			};
 			static const struct { uint8_t mod; int col; } MODS[] = {
 				{ 0x00, 0 },
 				{ 0x02, 1 }, { 0x20, 1 },	// left, right Shift
 				{ 0x01, 2 }, { 0x10, 2 },	// left, right Ctrl
 				{ 0x03, 1 },			// both: Shift wins
+				{ 0x04, 0 }, { 0x46, 1 },	// Alt changes nothing
 			};
 			int bad = 0;
 			for (const auto &a : AR)
@@ -771,6 +806,107 @@ int main()
 					}
 				}
 			CHECK(bad == 0);
+		}
+
+		// The editing keys: Home $98, End $99, PgUp $9A, PgDn $9B, Ins
+		// $9D, Del $9E (the forward delete) -- $9C is the pound sign.
+		// Shift, Ctrl and Alt change none of them.
+		{
+			static const struct { uint8_t usage; int want; } ED[] = {
+				{ 0x4A, 0x98 }, { 0x4D, 0x99 }, { 0x4B, 0x9A },
+				{ 0x4E, 0x9B }, { 0x49, 0x9D }, { 0x4C, 0x9E },
+			};
+			int bad = 0;
+			for (const auto &k : ED)
+				for (uint8_t mod : { 0x00, 0x02, 0x01, 0x04, 0x40, 0x77 }) {
+					kbd(mod, k.usage); released();
+					const int got = typed();
+					if (got != k.want) {
+						fprintf(stderr, "  edit key 0x%02X mod"
+						    " 0x%02X sent %d, not %d\n",
+						    k.usage, mod, got, k.want);
+						bad++;
+					}
+				}
+			CHECK(bad == 0);
+		}
+
+		// Backspace and Tab are unchanged, and now unambiguous.
+		kbd(0x00, 0x2A); released(); CHECK(typed() == 0x08);
+		kbd(0x00, 0x2B); released(); CHECK(typed() == 0x09);
+
+		// ALT sets bit 7 on a printable result, the CoCo3 convention:
+		// $20-$7E become $A0-$FE, with either Alt key. It leaves control
+		// characters alone (CR, Esc, Backspace, Tab, Ctrl chords) and
+		// anything already high. Alt-* is $AA, the not sign's byte and
+		// the same CP437 character -- the one deliberate overlap.
+		{
+			static const struct { uint8_t mod, usage; int want; } AL[] = {
+				{ 0x04, 0x04, 0xE1 },	// LAlt a
+				{ 0x40, 0x04, 0xE1 },	// RAlt a
+				{ 0x44, 0x04, 0xE1 },	// both
+				{ 0x06, 0x04, 0xC1 },	// LAlt Shift a = 'A'|$80
+				{ 0x04, 0x2C, 0xA0 },	// Alt space, the low end
+				{ 0x24, 0x31, 0xFE },	// Alt Shift # = '~'|$80, the top
+				{ 0x04, 0x1E, 0xB1 },	// Alt 1
+				{ 0x04, 0x55, 0xAA },	// Alt keypad * = the not sign
+				{ 0x04, 0x28, 0x0D },	// Alt Enter: CR
+				{ 0x04, 0x29, 0x1B },	// Alt Esc
+				{ 0x04, 0x2A, 0x08 },	// Alt Backspace
+				{ 0x04, 0x2B, 0x09 },	// Alt Tab
+				{ 0x05, 0x04, 0x01 },	// Alt Ctrl a: ^A, unmarked
+				{ 0x04, 0x3A, 0x80 },	// Alt F1
+				{ 0x06, 0x20, 0x9C },	// Alt Shift 3: pound stays
+				{ 0x06, 0x35, 0xAA },	// Alt Shift `: not stays
+			};
+			int bad = 0;
+			for (const auto &k : AL) {
+				kbd(k.mod, k.usage); released();
+				const int got = typed();
+				if (got != k.want) {
+					fprintf(stderr, "  alt 0x%02X mod 0x%02X sent"
+					    " %d, not %d\n", k.usage, k.mod, got,
+					    k.want);
+					bad++;
+				}
+			}
+			CHECK(bad == 0);
+		}
+
+		// THE SPECIAL CODES ARE DISTINGUISHABLE: across every usage and
+		// a spread of modifier chords, only the function keys, arrows and
+		// editing keys produce $80-$9B, $9D or $9E. An oracle over the
+		// whole keyboard, not a spot check, because the Alt bit could
+		// land a chord on one of them.
+		{
+			auto special_code = [](int c) {
+				return c >= 0x80 && c <= 0x9E && c != 0x9C;
+			};
+			auto special_key = [](uint8_t u) {
+				return (u >= 0x3A && u <= 0x45) ||	// F1-F12
+				    (u >= 0x49 && u <= 0x52);		// edit, arrows
+			};
+			static const uint8_t MODS[] = {
+				0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40,
+				0x80, 0x03, 0x06, 0x05, 0x07, 0x60, 0xFF,
+			};
+			int bad = 0, specials = 0;
+			for (unsigned u = 0x04; u <= 0x65; u++) {
+				if (u == 0x39 || u == 0x53)
+					continue;	// the lock keys toggle
+				for (uint8_t mod : MODS) {
+					kbd(mod, (uint8_t)u); released();
+					const int got = typed();
+					if (special_code(got) != special_key((uint8_t)u)) {
+						fprintf(stderr, "  usage 0x%02X mod"
+						    " 0x%02X sent %d\n", u, mod, got);
+						bad++;
+					}
+					specials += special_code(got);
+				}
+			}
+			CHECK(bad == 0);
+			CHECK(specials == 22 * 15);	// 12 F, 6 edit, 4 arrows; each chord
 		}
 
 		// The keypad, Num Lock on (the power-on state): the same bytes
@@ -799,33 +935,38 @@ int main()
 			CHECK(bad == 0);
 		}
 
-		// Num Lock off: 8/2/4/6 are the arrows, the keypad's editing
-		// keys send nothing (as the dedicated ones do), and the
-		// operators and Enter are unaffected. Num Lock itself sends
-		// nothing either way.
+		// Num Lock off: 8/2/4/6 are the arrows and 7/1/9/3/0/. the
+		// editing keys, sending what the dedicated keys send; 5 sends
+		// nothing, and the operators and Enter are unaffected. Num Lock
+		// itself sends nothing either way.
 		kbd(0x00, 0x53); released(); CHECK(typed() == -1);
 		CHECK(!hid_cook_num_lock());
-		kbd(0x00, 0x60); released(); CHECK(typed() == 0x0C);   // KP8 up
-		kbd(0x00, 0x5A); released(); CHECK(typed() == 0x0A);   // KP2 down
-		kbd(0x00, 0x5C); released(); CHECK(typed() == 0x08);   // KP4 left
-		kbd(0x00, 0x5E); released(); CHECK(typed() == 0x09);   // KP6 right
-		kbd(0x02, 0x60); released(); CHECK(typed() == 0x1C);   // Shift KP8
-		kbd(0x01, 0x5C); released(); CHECK(typed() == 0x10);   // Ctrl KP4
-		kbd(0x00, 0x5F); released(); CHECK(typed() == -1);     // KP7 Home
+		kbd(0x00, 0x60); released(); CHECK(typed() == 0x8C);   // KP8 up
+		kbd(0x00, 0x5A); released(); CHECK(typed() == 0x8D);   // KP2 down
+		kbd(0x00, 0x5C); released(); CHECK(typed() == 0x8E);   // KP4 left
+		kbd(0x00, 0x5E); released(); CHECK(typed() == 0x8F);   // KP6 right
+		kbd(0x02, 0x60); released(); CHECK(typed() == 0x90);   // Shift KP8
+		kbd(0x01, 0x5C); released(); CHECK(typed() == 0x96);   // Ctrl KP4
+		kbd(0x00, 0x5F); released(); CHECK(typed() == 0x98);   // KP7 Home
+		kbd(0x00, 0x59); released(); CHECK(typed() == 0x99);   // KP1 End
+		kbd(0x00, 0x61); released(); CHECK(typed() == 0x9A);   // KP9 PgUp
+		kbd(0x00, 0x5B); released(); CHECK(typed() == 0x9B);   // KP3 PgDn
+		kbd(0x00, 0x62); released(); CHECK(typed() == 0x9D);   // KP0 Ins
+		kbd(0x00, 0x63); released(); CHECK(typed() == 0x9E);   // KP. Del
+		kbd(0x04, 0x63); released(); CHECK(typed() == 0x9E);   // Alt: same
 		kbd(0x00, 0x5D); released(); CHECK(typed() == -1);     // KP5
-		kbd(0x00, 0x63); released(); CHECK(typed() == -1);     // KP. Del
 		kbd(0x00, 0x57); released(); CHECK(typed() == '+');
 		kbd(0x00, 0x58); released(); CHECK(typed() == 0x0D);
 		kbd(0x00, 0x53); released();
 		CHECK(hid_cook_num_lock());
 		kbd(0x00, 0x60); released(); CHECK(typed() == '8');    // back on
 
-		// Unmapped usages still produce nothing at all. Home, here --
-		// this check used F1 until F1 acquired a meaning, which is the
-		// same trap the reserved graphics sub-code fell into: a test
-		// written about "nothing" quietly becomes a test about
-		// something.
-		kbd(0x00, 0x4A); released(); CHECK(typed() == -1);
+		// Unmapped usages still produce nothing at all. Print Screen,
+		// here -- this check used F1, then Home, until each acquired a
+		// meaning, which is the same trap the reserved graphics sub-code
+		// fell into: a test written about "nothing" quietly becomes a
+		// test about something.
+		kbd(0x00, 0x46); released(); CHECK(typed() == -1);
 
 		// A short keyboard report is ignored rather than read past.
 		const uint8_t stub[4] = { 0, 0, 0x04, 0 };
@@ -909,10 +1050,16 @@ int main()
 			// The arrows DO repeat -- holding one to walk a cursor is
 			// the reason repeat exists -- and Num Lock does not.
 			held(0, 0x52, 0);			// up arrow
-			CHECK(typed() == 0x0C);
+			CHECK(typed() == 0x8C);
 			tick(0);
 			tick(500);
-			CHECK(typed() == 0x0C);
+			CHECK(typed() == 0x8C);
+			released();
+			held(0, 0x4C, 0);			// Delete, likewise
+			CHECK(typed() == 0x9E);
+			tick(0);
+			tick(500);
+			CHECK(typed() == 0x9E);
 			released();
 			held(0, 0x53, 0);			// Num Lock
 			tick(0);
@@ -1036,7 +1183,10 @@ int main()
 				kbd(0x02, 0x04); released();	// Shift-a
 				kbd(0x01, 0x06); released();	// Ctrl-c
 				kbd(0x00, 0x3A); released();	// F1
-				kbd(0x00, 0x4A); released();	// Home: unmapped
+				kbd(0x00, 0x46); released();	// PrtSc: unmapped
+				kbd(0x00, 0x4A); released();	// Home
+				kbd(0x02, 0x50); released();	// Shift Left
+				kbd(0x04, 0x04); released();	// Alt a
 				kbd(0x00, 0x39); released();	// Caps Lock
 				kbd(0x00, 0x39); released();	// ...and off
 				kbd(0x00, 0x53); released();	// Num Lock off
@@ -1058,13 +1208,17 @@ int main()
 			CHECK(has(e, "-> 0x03 ^C"));
 			CHECK(has(e, "usage 0x3A"));
 			CHECK(has(e, "-> 0x80 F1"));
-			CHECK(has(e, "usage 0x4A"));
+			CHECK(has(e, "usage 0x46"));
 			CHECK(has(e, "-> nothing: no mapping for this key"));
+			CHECK(has(e, "-> 0x98 Home"));
+			CHECK(has(e, "-> 0x92 Shift+Left"));
+			CHECK(has(e, "mod 0x04 LAlt"));
+			CHECK(has(e, "-> 0xE1 Alt+'a'"));
 			CHECK(has(e, "-> nothing: Caps Lock now ON"));
 			CHECK(has(e, "-> nothing: Caps Lock now OFF"));
 			CHECK(has(e, "-> nothing: Num Lock now OFF"));
 			CHECK(has(e, "-> nothing: Num Lock now ON"));
-			CHECK(has(e, "usage 0x52  mod 0x00 -              -> 0x0C ^L"));
+			CHECK(has(e, "usage 0x52  mod 0x00 -              -> 0x8C Up"));
 			CHECK(has(e, "KEY mods now 0x00 -"));
 			CHECK(has(e, "rollover: too many keys"));
 			CHECK(has(e, "KEY rpt  usage 0x05"));
@@ -1817,6 +1971,469 @@ int main()
 		settle(v);
 	}
 
+	// Text to a HIDDEN window whose working area CWArea has narrowed. The
+	// parked screen is laid out as the whole window, while text is
+	// addressed in the working area, so a write, a wrap and a scroll must
+	// all land where they would have landed on screen -- and nothing in the
+	// window outside the working area may move. They used to be indexed at
+	// the working area's width from the window's corner.
+	{
+		static const uint8_t ESC = 0x1B;
+		auto out = [&](std::initializer_list<uint8_t> b) {
+			for (uint8_t x : b) v.write(DATA, x);
+		};
+		v.write(STAT, VID_CTL_RESET);
+		settle(v);
+		out({ 0x0C });
+		out({ ESC, 0x20, 1, 0, 4, 2, 12, 5, 0, 0 });	// id 1: 12x5 at 4,2
+		out({ ESC, 0x26, 1 });				// shown, for now
+		out({ 0x02, 0x20 + 11, 0x20 + 0, 'Z' });	// window cell 11,0
+		out({ ESC, 0x25, 2, 1, 6, 3 });			// area 6x3 at 2,1
+		out({ ESC, 0x26, 0 });				// hide it
+		settle(v);
+		CHECK(!check_cell(15, 2, 'Z'));			// really hidden
+
+		out({ 'A', 'B', 'C', 'D', 'E', 'F', 'G' });	// wraps after F
+		out({ ESC, 0x26, 1 });
+		settle(v);
+		CHECK(check_cell(6, 3, 'A'));			// the area's corner
+		CHECK(check_cell(11, 3, 'F'));			// its last column
+		CHECK(check_cell(6, 4, 'G'));			// wrapped in the area
+		CHECK(!check_cell(4, 2, 'A'));			// not the window's
+		CHECK(check_cell(15, 2, 'Z'));			// outside: untouched
+
+		// Scroll it while hidden: two line feeds from the second row
+		// reach the bottom and then scroll the area by one row.
+		out({ ESC, 0x26, 0 });
+		out({ 0x0A, 0x0A });
+		out({ ESC, 0x26, 1 });
+		settle(v);
+		CHECK(check_cell(6, 3, 'G'));			// moved up a row
+		CHECK(check_cell(7, 3, ' '));
+		CHECK(check_cell(6, 5, ' '));			// bottom row blank
+		CHECK(check_cell(15, 2, 'Z'));			// still untouched
+
+		// Insert a line at the top while hidden: G moves down again,
+		// within the area only.
+		out({ ESC, 0x26, 0 });
+		out({ 0x01, 0x1F, 0x30 });
+		out({ ESC, 0x26, 1 });
+		settle(v);
+		CHECK(check_cell(6, 4, 'G'));
+		CHECK(check_cell(6, 3, ' '));
+		CHECK(check_cell(15, 2, 'Z'));
+
+		out({ ESC, 0x26, 0 });
+		out({ ESC, 0x24 });				// DWEnd window 1
+		out({ 0x0C });
+		settle(v);
+	}
+
+	// TEXT COLOURS. FColor and BColor name palette registers, and text is
+	// drawn as a CoCo 3 draws hardware text: the attribute keeps three bits
+	// of each, the foreground shown from registers 8-15 and the background
+	// from 0-7. So the colour follows the PALETTE -- loading a register
+	// recolours text already on screen -- and the defaults are CoWin's
+	// (white, blue, black, green, red, yellow, magenta, cyan, twice).
+	{
+		static const uint8_t ESC = 0x1B;
+		auto out = [&](std::initializer_list<uint8_t> b) {
+			for (uint8_t x : b) v.write(DATA, x);
+		};
+		const uint8_t WHITE = 0xFF, BLUE = 0x03, BLACK = 0x00,
+		    RED = 0xE0, YELLOW = 0xFC, GREEN = 0x1C;
+		v.write(STAT, VID_CTL_RESET);
+		settle(v);
+
+		// The default: white on black (FColor 0, BColor 2), opaque or
+		// not, since the graphics plane under it is black too.
+		out({ 0x0C, ESC, 0x3C, 0, 'A' });		// opaque text
+		settle(v);
+		CHECK(check_cell_colours(0, 0, 'A', WHITE, BLACK));
+
+		// DynaStar's colours: FColor 0, BColor 1 -- white on blue. Text
+		// written before keeps its colours; an erase uses the new ones.
+		out({ ESC, 0x32, 0, ESC, 0x33, 1, 'B', 0x02, 0x20, 0x21, 0x04 });
+		settle(v);
+		CHECK(check_cell_colours(0, 0, 'A', WHITE, BLACK));
+		CHECK(check_cell_colours(1, 0, 'B', WHITE, BLUE));
+		CHECK(check_cell_colours(5, 1, ' ', WHITE, BLUE));	// erased
+
+		// Transparent, the same colours show the graphics plane behind
+		// instead of the background colour.
+		out({ ESC, 0x3C, 1, 0x02, 0x22, 0x20, 'C' });
+		settle(v);
+		CHECK(check_cell_colours(2, 0, 'C', WHITE, BLACK));
+
+		// The palette drives text already on screen. Register 8 is what
+		// foreground index 0 shows, register 1 background index 1.
+		out({ ESC, 0x31, 8, 36 });			// reg 8 := red
+		out({ ESC, 0x31, 1, 18 });			// reg 1 := green
+		settle(v);
+		CHECK(check_cell_colours(1, 0, 'B', RED, GREEN));
+		CHECK(check_cell_colours(0, 0, 'A', RED, BLACK));
+
+		// THE GIME MAPPING, against graphics. FColor 9 and FColor 1 are
+		// the same text colour -- index 1, register 9 -- but different
+		// drawing colours, registers 9 and 1.
+		out({ ESC, 0x31, 9, 36, ESC, 0x31, 1, 18 });	// 9 red, 1 green
+		// (Text opaque to see its background, then transparent again so
+		// the cells over the Points show the drawing.)
+		out({ ESC, 0x3C, 0 });
+		out({ ESC, 0x32, 9, 0x02, 0x20, 0x22, 'D' });
+		out({ ESC, 0x3C, 1, ESC, 0x42, 0, 200, 0, 200 });	// Point
+		settle(v);
+		CHECK(check_cell_colours(0, 2, 'D', RED, GREEN));
+		CHECK(video_framebuffer[200][200] == RED);
+		out({ ESC, 0x3C, 0 });
+		out({ ESC, 0x32, 1, 0x02, 0x21, 0x22, 'E' });
+		out({ ESC, 0x3C, 1, ESC, 0x42, 0, 210, 0, 200 });
+		settle(v);
+		CHECK(check_cell_colours(1, 2, 'E', RED, GREEN));
+		CHECK(video_framebuffer[200][210] == GREEN);
+
+		// DefPal restores CoWin's registers and leaves FColor/BColor
+		// alone, and the text recolours with it: 'E' is still index 1
+		// on index 1, which is blue on blue again (registers 9 and 1).
+		out({ ESC, 0x30 });
+		settle(v);
+		CHECK(check_cell_colours(1, 2, 'E', BLUE, BLUE));
+		out({ ESC, 0x3C, 0, 0x02, 0x24, 0x22, 'K', ESC, 0x3C, 1 });
+		settle(v);
+		CHECK(check_cell_colours(4, 2, 'K', BLUE, BLUE));	// FColor kept
+		out({ ESC, 0x32, 0 });				// white again
+
+		// Inverse swaps them: the cell is the foreground, the glyph
+		// shows the background.
+		out({ ESC, 0x3C, 0 });
+		out({ 0x1F, 0x20, 0x02, 0x22, 0x22, 'F', 0x1F, 0x21 });
+		out({ ESC, 0x3C, 1 });
+		settle(v);
+		CHECK(check_cell_colours(2, 2, 'F', BLUE, WHITE));
+
+		// PER WINDOW. DWSet's colours are the window's: red on yellow.
+		// Its FColor changes neither the root's text nor the root's
+		// drawing colour.
+		out({ ESC, 0x20, 1, 0, 40, 10, 10, 2, 4, 5 });	// id 1, fg 4, bg 5
+		out({ ESC, 0x26, 1, ESC, 0x3C, 0, 'G' });
+		settle(v);
+		CHECK(check_cell_colours(40, 10, 'G', RED, YELLOW));
+		out({ ESC, 0x32, 3 });				// window 1: green
+		out({ ESC, 0x26, 0 });				// show the root
+		settle(v);
+		// The root comes back empty (it keeps no parked screen) and in
+		// ITS colours -- transparent, so black from the plane -- not in
+		// the yellow of the window that was being written to.
+		CHECK(check_cell_colours(0, 0, ' ', WHITE, BLACK));
+		out({ ESC, 0x21, 0, 0x02, 0x23, 0x22, 'H' });	// write there
+		out({ ESC, 0x42, 0, 220, 0, 200 });
+		settle(v);
+		CHECK(check_cell_colours(3, 2, 'H', WHITE, BLACK));
+		CHECK(video_framebuffer[200][220] == WHITE);	// root's FColor 0
+		CHECK(video_framebuffer[200][220] != GREEN);
+
+		out({ ESC, 0x21, 1, ESC, 0x24 });		// DWEnd window 1
+		v.write(STAT, VID_CTL_RESET);
+		out({ 0x0C });
+		settle(v);
+	}
+
+	// OVERLAY WINDOWS (OWSet $1B $22, OWEnd $1B $23), as CoCo 3 GrfDrv has
+	// them and DynaStar uses them for its menus and help: an overlay opens
+	// inside the current window, takes its output -- addressing, clears and
+	// erases all relative to it, and VID.Info and the size query describe
+	// it -- and with the save switch on, closing it puts back exactly what
+	// it covered. The byte sequences are DynaStar's own, captured on /TERM.
+	{
+		static const uint8_t ESC = 0x1B;
+		const uint8_t WHITE = 0xFF, BLUE = 0x03, BLACK = 0x00;
+		auto out = [&](std::initializer_list<uint8_t> b) {
+			for (uint8_t x : b) v.write(DATA, x);
+		};
+		auto info = [&](int &cols, int &rows) {
+			settle(v);
+			v.write(3, 0);
+			v.read(3); v.read(3); v.read(3); v.read(3);
+			cols = v.read(3);
+			rows = v.read(3);
+		};
+		// The whole text grid, characters and attributes: the oracle a
+		// restore is checked against, every cell rather than a few.
+		auto grid = [&]() {
+			std::string g;
+			uint8_t row[TEXT_COLS * 2];
+			settle(v);
+			for (int r = 0; r < TEXT_ROWS; r++) {
+				vidterm_read_row(0, r, TEXT_COLS, row);
+				g.append((const char *)row, sizeof(row));
+			}
+			return g;
+		};
+		auto fill_root = [&]() {	// distinct text in every cell
+			out({ 0x0C });
+			for (int r = 0; r < TEXT_ROWS; r++) {
+				out({ 0x02, 0x20, (uint8_t)(0x20 + r) });
+				for (int c = 0; c < TEXT_COLS - 1; c++)
+					v.write(DATA, (uint8_t)('!' + (r * 7 + c) % 90));
+				settle(v);	// a 2 KB FIFO: never outrun it
+			}
+			out({ 0x02, 0x27, 0x21 });		// cursor to 7,1
+		};
+		const uint8_t HELP[] = { ESC, 0x22, 0x01, 0x00, 0x01, 0x50, 0x05,
+		    0x00, 0x01 };				// 80x5 at 0,1
+		const uint8_t FULL[] = { ESC, 0x22, 0x01, 0x00, 0x00, 0x50, 0x18,
+		    0x00, 0x01 };				// 80x24 at 0,0
+		int cols, rows;
+
+		v.write(STAT, VID_CTL_RESET);
+		settle(v);
+		fill_root();
+		const std::string before = grid();
+		const uint8_t under = before[(1 * TEXT_COLS + 0) * 2];
+
+		// Open the help panel: cleared to white on blue, 80x5 reported
+		// both ways, and the cursor home in IT.
+		for (uint8_t b : HELP) v.write(DATA, b);
+		info(cols, rows);
+		CHECK(cols == 80 && rows == 5);
+		CHECK(check_cell_colours(0, 1, ' ', WHITE, BLUE));
+		CHECK(check_cell_colours(79, 5, ' ', WHITE, BLUE));
+		CHECK(!check_cell_colours(80, 1, ' ', WHITE, BLUE));	// outside
+		CHECK(!check_cell_colours(0, 0, ' ', WHITE, BLUE));
+		out({ ESC, '[', '1', '8', 't' });
+		settle(v);
+		{
+			std::string got;
+			while (v.read(STAT) & VID_STAT_RDRF)
+				got += (char)v.read(DATA);
+			CHECK(got == "\x1b[8;5;80t");
+		}
+
+		// Its own coordinates: text at its corner, $02 relative to it,
+		// clear and erase confined to it.
+		out({ 'H', 'E', 'L', 'P', 0x02, 0x22, 0x21, 'X' });
+		settle(v);
+		CHECK(check_cell_colours(0, 1, 'H', WHITE, BLUE));
+		CHECK(check_cell_colours(2, 2, 'X', WHITE, BLUE));
+		out({ 0x0C, 'Y' });				// clears the panel only
+		settle(v);
+		CHECK(check_cell_colours(0, 1, 'Y', WHITE, BLUE));
+		CHECK(check_cell_colours(2, 2, ' ', WHITE, BLUE));
+		CHECK(grid().compare(0, TEXT_COLS * 2, before, 0,
+		    TEXT_COLS * 2) == 0);			// row 0 untouched
+
+		// Close it: every cell of the grid is back as it was, and the
+		// cursor resumes where the root left it.
+		out({ ESC, 0x23 });
+		CHECK(grid() == before);
+		info(cols, rows);
+		CHECK(cols == TEXT_COLS && rows == TEXT_ROWS);
+		out({ 'Q' });
+		settle(v);
+		CHECK(check_cell(7, 1, 'Q'));
+		CHECK((uint8_t)before[(1 * TEXT_COLS) * 2] == under);
+
+		// NESTED, as DynaStar opens them: full screen, then the panel
+		// inside. Each close restores what was there when IT opened.
+		fill_root();
+		const std::string base = grid();
+		for (uint8_t b : FULL) v.write(DATA, b);
+		out({ 'M', 'E', 'N', 'U' });
+		const std::string menu = grid();
+		CHECK(menu != base);
+		for (uint8_t b : HELP) v.write(DATA, b);
+		out({ 'H', 'E', 'L', 'P' });
+		info(cols, rows);
+		CHECK(cols == 80 && rows == 5);
+		out({ ESC, 0x23 });
+		CHECK(grid() == menu);				// the menu again
+		info(cols, rows);
+		CHECK(cols == 80 && rows == 24);
+		out({ '!' });					// after MENU, in it
+		settle(v);
+		CHECK(check_cell_colours(4, 0, '!', WHITE, BLUE));
+		out({ ESC, 0x23 });
+		CHECK(grid() == base);				// and the root
+		info(cols, rows);
+		CHECK(cols == TEXT_COLS && rows == TEXT_ROWS);
+
+		// SAVE SWITCH OFF: GrfDrv neither saves nor clears, so the
+		// overlay opens on what is there and leaves its text behind.
+		fill_root();
+		const std::string plain = grid();
+		out({ ESC, 0x22, 0, 10, 10, 20, 3, 0, 1 });
+		CHECK(grid() == plain);				// not cleared
+		out({ 'Z' });
+		settle(v);
+		CHECK(check_cell_colours(10, 10, 'Z', WHITE, BLUE));
+		out({ ESC, 0x23 });
+		settle(v);
+		CHECK(check_cell_colours(10, 10, 'Z', WHITE, BLUE));	// stays
+
+		// CLAMPED to the window, as DWSet is to the panel: 80 columns
+		// from column 120 of 128 can only be 8.
+		out({ ESC, 0x22, 1, 120, 28, 80, 24, 0, 1 });
+		info(cols, rows);
+		CHECK(cols == 8 && rows == 2);
+		out({ ESC, 0x23 });
+
+		// NESTED overlays are placed from the WINDOW's corner, not the
+		// overlay beneath (GrfDrv measures against the device window):
+		// one at 0,0 inside one at 10,5 is at the window's 0,0.
+		out({ ESC, 0x22, 1, 10, 5, 20, 6, 0, 1 });
+		out({ ESC, 0x22, 1, 0, 0, 4, 2, 0, 1, 'N' });
+		settle(v);
+		CHECK(check_cell_colours(0, 0, 'N', WHITE, BLUE));
+		CHECK(!check_cell_colours(10, 5, 'N', WHITE, BLUE));
+		out({ ESC, 0x23, ESC, 0x23 });
+
+		// A DRAWING under an overlay comes back when it closes. The
+		// overlay's text is opaque, so it covers the drawing; the
+		// drawing itself is never touched.
+		out({ 0x0C, ESC, 0x40, 0, 40, 0, 40, ESC, 0x4A, 0, 120, 0, 80 });
+		settle(v);
+		const uint8_t drawn = video_framebuffer[60][80];
+		CHECK(drawn == WHITE);
+		out({ ESC, 0x22, 1, 0, 0, 20, 10, 0, 1 });
+		settle(v);
+		CHECK(video_framebuffer[60][80] == BLUE);	// covered
+		out({ ESC, 0x23 });
+		settle(v);
+		CHECK(video_framebuffer[60][80] == drawn);	// and back
+		CHECK(video_framebuffer[100][80] == BLACK);
+
+		// An overlay the size of the panel is still an overlay: its
+		// clear is a text clear, and the drawing survives it -- even
+		// with its text made transparent, when a clear of the ROOT
+		// would repaint the graphics plane in the background colour.
+		out({ ESC, 0x22, 1, 0, 0, TEXT_COLS, TEXT_ROWS, 0, 1 });
+		out({ ESC, 0x3C, 1, 0x0C });
+		out({ ESC, 0x23 });
+		settle(v);
+		CHECK(video_framebuffer[60][80] == drawn);
+
+		// SELECT leaves an overlay in place: another window's output
+		// goes there, and selecting back finds the overlay current.
+		out({ 0x0C });
+		out({ ESC, 0x20, 1, 0, 100, 20, 20, 5, 0, 2 });	// id 1, hidden
+		out({ ESC, 0x21, 0 });
+		for (uint8_t b : HELP) v.write(DATA, b);
+		out({ ESC, 0x21, 1 });
+		info(cols, rows);
+		CHECK(cols == 20 && rows == 5);
+		out({ ESC, 0x21, 0 });
+		info(cols, rows);
+		CHECK(cols == 80 && rows == 5);
+		out({ ESC, 0x23 });
+
+		// A HIDDEN window's overlay works on its parked screen: open,
+		// write and close it while hidden, and the window shows as it
+		// was; open and write, then show, and the overlay is there.
+		out({ ESC, 0x21, 1, 'W', 'I', 'N' });
+		out({ ESC, 0x22, 1, 0, 0, 5, 2, 0, 1, 'O', ESC, 0x23 });
+		out({ ESC, 0x26, 1 });
+		settle(v);
+		CHECK(check_cell(100, 20, 'W'));
+		CHECK(check_cell(102, 20, 'N'));
+		out({ ESC, 0x26, 0 });
+		out({ ESC, 0x22, 1, 1, 1, 5, 2, 0, 1, 'O' });
+		out({ ESC, 0x26, 1 });
+		settle(v);
+		CHECK(check_cell_colours(101, 21, 'O', WHITE, BLUE));
+		CHECK(check_cell(100, 20, 'W'));
+		out({ ESC, 0x23 });
+		settle(v);
+		CHECK(!check_cell_colours(101, 21, 'O', WHITE, BLUE));
+
+		// DWSet and DWEnd forget a window's overlays: redefined, its
+		// output goes to the window itself again.
+		out({ ESC, 0x22, 1, 0, 0, 4, 2, 0, 1 });
+		out({ ESC, 0x20, 1, 0, 100, 20, 20, 5, 0, 2 });
+		info(cols, rows);
+		CHECK(cols == 20 && rows == 5);
+		out({ ESC, 0x22, 1, 0, 0, 4, 2, 0, 1, ESC, 0x24 });	// DWEnd
+		out({ ESC, 0x20, 1, 0, 100, 20, 20, 5, 0, 2 });
+		info(cols, rows);
+		CHECK(cols == 20 && rows == 5);
+		out({ ESC, 0x24, ESC, 0x26, 0 });
+
+		// OUT OF RECORDS: twelve overlays open; a thirteenth is
+		// refused, and its OWEnd closes nothing -- not the twelfth.
+		out({ ESC, 0x21, 0, 0x0C });
+		for (uint8_t i = 0; i < 13; i++)
+			out({ ESC, 0x22, 0, 0, 0, (uint8_t)(30 + i), 10, 0, 1 });
+		info(cols, rows);
+		CHECK(cols == 41);				// the twelfth
+		out({ ESC, 0x23 });
+		info(cols, rows);
+		CHECK(cols == 41);				// still the twelfth
+		out({ ESC, 0x23 });
+		info(cols, rows);
+		CHECK(cols == 40);				// now the eleventh
+		for (int i = 0; i < 11; i++)
+			out({ ESC, 0x23 });
+		info(cols, rows);
+		CHECK(cols == TEXT_COLS);
+		out({ ESC, 0x23 });				// one too many: nothing
+		info(cols, rows);
+		CHECK(cols == TEXT_COLS);
+
+		// NO PSRAM: there is nowhere to save, so the overlay opens and
+		// works, and closing it clears its area in the root's colours
+		// instead of restoring it. Nothing outside it changes.
+		pv_psram_set_absent(true);
+		fill_root();
+		const std::string bare = grid();
+		for (uint8_t b : HELP) v.write(DATA, b);
+		out({ 'H', 'E', 'L', 'P' });
+		info(cols, rows);
+		CHECK(cols == 80 && rows == 5);
+		out({ ESC, 0x23 });
+		settle(v);
+		CHECK(check_cell_colours(0, 1, ' ', WHITE, BLACK));
+		CHECK(check_cell_colours(79, 5, ' ', WHITE, BLACK));
+		{
+			const std::string g = grid();
+			int changed_outside = 0;
+			for (int r = 0; r < TEXT_ROWS; r++)
+				for (int c = 0; c < TEXT_COLS; c++) {
+					if (r >= 1 && r <= 5 && c < 80)
+						continue;
+					const size_t at = (size_t)(r * TEXT_COLS + c) * 2u;
+					changed_outside += g[at] != bare[at] ||
+					    g[at + 1] != bare[at + 1];
+				}
+			CHECK(changed_outside == 0);
+		}
+		pv_psram_set_absent(false);
+
+		// `status` says both happened: one overlay refused for want of
+		// a record, one opened without a save.
+		{
+			fflush(stdout);
+			FILE *tmp = tmpfile();
+			const int saved = dup(1);
+			dup2(fileno(tmp), 1);
+			vid_link_print_status();
+			fflush(stdout);
+			dup2(saved, 1);
+			close(saved);
+			rewind(tmp);
+			std::string st;
+			char c;
+			while (fread(&c, 1, 1, tmp) == 1)
+				st += c;
+			fclose(tmp);
+			CHECK(st.find("1 overlays REFUSED") != std::string::npos);
+			CHECK(st.find("1 overlays opened UNSAVED") !=
+			    std::string::npos);
+		}
+
+		v.write(STAT, VID_CTL_RESET);
+		out({ 0x0C });
+		settle(v);
+	}
+
 	// A blank cell in a row where NO graphics has been drawn, while other
 	// rows HAVE been. That mixture is what every real screen looks like
 	// and what no previous test here produced: they either clear and draw
@@ -1957,10 +2574,10 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x2E);
 		v.write(DATA, 3); v.write(DATA, 1);	// pattern on
 
-		// An OUTLINE is woven: FColor 7 is white, so its pixels are the
+		// An OUTLINE is woven: FColor 0 is white, so its pixels are the
 		// pattern's own, tiled from the window origin (the root, 0,0).
 		// Box from 600,300 to 700,360; check its whole top edge.
-		v.write(DATA, ESC); v.write(DATA, 0x32); v.write(DATA, 7);
+		v.write(DATA, ESC); v.write(DATA, 0x32); v.write(DATA, 0);
 		v.write(DATA, ESC); v.write(DATA, 0x40);
 		v.write(DATA, 2); v.write(DATA, 0x58);	// 600,300
 		v.write(DATA, 1); v.write(DATA, 0x2C);
@@ -2385,9 +3002,10 @@ int main()
 		settle(v);
 		CHECK(video_framebuffer[150][150] == under);   // and undone
 
-		// Back to replace, and a bar really does replace again.
+		// Back to replace, and a bar really does replace again, in
+		// green (register 3; 2 is black in CoWin's palette).
 		v.write(DATA, ESC); v.write(DATA, 0x2F); v.write(DATA, 0);
-		v.write(DATA, ESC); v.write(DATA, 0x32); v.write(DATA, 2);
+		v.write(DATA, ESC); v.write(DATA, 0x32); v.write(DATA, 3);
 		v.write(DATA, ESC); v.write(DATA, 0x40);
 		v.write(DATA, 0); v.write(DATA, 120);
 		v.write(DATA, 0); v.write(DATA, 120);
@@ -2670,6 +3288,7 @@ int main()
 	// quietly spans the full row width would pass any check that only
 	// looked inside it, so every case below asserts the neighbours too.
 	{
+		vidterm_text_colours(nullptr, nullptr);	// attributes as R,G,B bits
 		// 0xE0 is the console's own attribute (white on opaque black),
 		// which is what check_cell compares the rendered pixels
 		// against; the grid alone proves nothing until it is blitted.
@@ -3234,6 +3853,7 @@ int main()
 	// neither, and check the undrawn (implicit) and drawn (resident) cases
 	// give the SAME answer -- they must, since both mean "the plane is C".
 	{
+		vidterm_text_colours(nullptr, nullptr);	// attributes as R,G,B bits
 		static const uint8_t C = 0x6Du;
 		static const uint8_t WHITE_TRANSP = 0xE1u;	// fg white, bit0 set
 		const int col = 10, row = 5;
@@ -3302,6 +3922,7 @@ int main()
 	// two. Every pixel of the panel is checked, so a write to a cell that
 	// was not dirty is caught too. Then again through the bounded refresh.
 	{
+		vidterm_text_colours(nullptr, nullptr);	// attributes as R,G,B bits
 		static uint8_t model[FB_HEIGHT][FB_WIDTH];
 		static const uint8_t U = 0x92u;		// undrawn rows' colour
 		auto plane = [](int x, int y) {
@@ -3353,7 +3974,7 @@ int main()
 					// Bit 4 is INVERSE: the mask flips, so the
 					// cell is foreground and the glyph shows the
 					// background. 0x9C in ATTRS carries it.
-					const uint8_t m = (uint8_t)(font_spleen_8x16[ch][gy] ^
+					const uint8_t m = (uint8_t)(font_8x16[ch][gy] ^
 					    ((at & 0x10) ? 0xFF : 0x00));
 					const int py = row * CHAR_H + gy;
 
@@ -4222,6 +4843,7 @@ int main()
 	// paths that have been exercised. Each check states the degradation the
 	// design promises, and the switch is put back before anything else runs.
 	{
+		vidterm_text_colours(nullptr, nullptr);	// attributes as R,G,B bits
 		static const uint8_t ESC = 0x1B;
 		pv_psram_set_absent(true);
 		v.write(STAT, VID_CTL_RESET);
@@ -4252,6 +4874,7 @@ int main()
 			// (0x00) nor the bar. Cleared to 0x00, a blit that fell
 			// back to the uniform colour would be indistinguishable
 			// from one that painted the background, and did pass.
+			vidterm_text_colours(nullptr, nullptr);	// R,G,B bits
 			vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, 0x49);
 			vidterm_fill_rect(x - 8, y - 8, 40, 40, 0x6D);
 			vidterm_putch(col, row, 'M', 0xE1);	// white, transparent
@@ -4444,6 +5067,177 @@ int main()
 		v.write(DATA, 0x0C);
 		settle(v);
 		CHECK(gfx_shadow_base() != nullptr);
+	}
+
+	// ANSI/VT100 TERMINAL QUERIES ("ESC [", $1B $5B). These exist for a guest
+	// on a serial console, which has no register window and so no VID.Info:
+	// it learns the screen's size as xterm's resize does, by asking. The
+	// replies come back as INPUT, read like keystrokes.
+	//
+	// Positions are chosen with row != column throughout, so a reply with
+	// its numbers swapped cannot pass, and the window is neither square nor
+	// at the origin, so a reply in panel terms instead of window terms
+	// cannot pass either.
+	{
+		static const std::string E = "\x1b";
+
+		v.write(STAT, VID_CTL_RESET);
+		settle(v);
+		v.write(DATA, 0x0C);
+		settle(v);
+		CHECK(take_input(v).empty());
+
+		// The direct size query: the working area, as VID.Info has it.
+		send(v, "\x1b[18t");
+		settle(v);
+		CHECK(take_input(v) == E + "[8;30;128t");
+
+		// Cursor position and the report, 1-based.
+		send(v, "\x1b[5;17H\x1b[6n");
+		settle(v);
+		CHECK(take_input(v) == E + "[5;17R");
+		v.write(DATA, 'Q');		// and the cursor really is there
+		settle(v);
+		CHECK(check_cell(16, 4, 'Q'));
+
+		// The portable query, exactly as a resize utility sends it:
+		// the clamp finds the corner, and ESC 7 / ESC 8 must leave the
+		// cursor where it was -- just after the 'Q', at 5;18.
+		send(v, "\x1b" "7" "\x1b[999;999H" "\x1b[6n" "\x1b" "8");
+		settle(v);
+		CHECK(take_input(v) == E + "[30;128R");
+		send(v, "\x1b[6n");
+		settle(v);
+		CHECK(take_input(v) == E + "[5;18R");
+
+		// Nothing in any of that was printed: the sequences were
+		// consumed whole. Row 0 is where a stray "999;999H" would land.
+		for (int c = 0; c < 12; c++)
+			CHECK(check_cell(c, 0, ' '));
+
+		// Defaults: omitted and zero both mean 1, per parameter.
+		send(v, "\x1b[H\x1b[6n");
+		settle(v);
+		CHECK(take_input(v) == E + "[1;1R");
+		send(v, "\x1b[;7H\x1b[6n");
+		settle(v);
+		CHECK(take_input(v) == E + "[1;7R");
+		send(v, "\x1b[0;0f\x1b[6n");	// HVP, the same function
+		settle(v);
+		CHECK(take_input(v) == E + "[1;1R");
+
+		// A value too large saturates rather than wrapping. 65539 is
+		// chosen because it wraps SMALL in 16 bits (to 3), so a
+		// wrapping accumulator would put the cursor on row 3 instead
+		// of clamping it to the bottom.
+		send(v, "\x1b[65539;4H\x1b[6n");
+		settle(v);
+		CHECK(take_input(v) == E + "[30;4R");
+
+		// Consumed and NOT answered: a private sequence, DEC's extended
+		// report, a different DSR, a two-parameter 6n, and -- the one
+		// that matters -- the window RESIZE request, which shares 't'
+		// with the size query and must never be mistaken for it.
+		send(v, "\x1b[3;9H");
+		send(v, "\x1b[?25l" "\x1b[?6n" "\x1b[5n" "\x1b[6;1n"
+		    "\x1b[8;24;80t" "\x1b[2J" "\x1b[1 q");
+		v.write(DATA, 'Z');		// the stream is still in step
+		settle(v);
+		CHECK(take_input(v).empty());
+		CHECK(check_cell(8, 2, 'Z'));
+
+		// A byte that is not part of any sequence ends it early and is
+		// then acted on: CR here, so 'K' lands at column 0 and the '3'
+		// before it is not printed.
+		send(v, "\x1b[3;9H" "\x1b[4" "\r" "K");
+		settle(v);
+		CHECK(check_cell(0, 2, 'K'));
+		CHECK(!check_cell(1, 2, '4'));
+		// ... and an ESC inside one starts a fresh escape.
+		send(v, "\x1b[12\x1b[6n");
+		settle(v);
+		CHECK(take_input(v) == E + "[3;2R");
+
+		// A $1B that is a PARAMETER is not an escape at all: $02 takes
+		// two position bytes whatever they are, so '[' here is the row
+		// (clamped to the bottom) and 'W' prints there.
+		v.write(DATA, 0x02); v.write(DATA, 0x1B); v.write(DATA, 0x5B);
+		v.write(DATA, 'W');
+		settle(v);
+		CHECK(check_cell(0, 29, 'W'));
+		CHECK(take_input(v).empty());
+
+		// In a WINDOW: 10 x 3 at column 4, row 2, selected. Every answer
+		// is in that window's terms.
+		v.write(DATA, 0x1B); v.write(DATA, 0x20);
+		const uint8_t dw[8] = { 1, 0, 4, 2, 10, 3, 0, 0 };
+		for (uint8_t i = 0; i < 8; i++) v.write(DATA, dw[i]);
+		v.write(DATA, 0x1B); v.write(DATA, 0x26); v.write(DATA, 1);
+		v.write(DATA, 0x1B); v.write(DATA, 0x21); v.write(DATA, 1);
+		settle(v);
+		send(v, "\x1b[18t");
+		settle(v);
+		CHECK(take_input(v) == E + "[8;3;10t");
+		send(v, "\x1b[999;999H\x1b[6n");
+		settle(v);
+		CHECK(take_input(v) == E + "[3;10R");
+		send(v, "\x1b[2;3H" "V");
+		settle(v);
+		CHECK(check_cell(4 + 2, 2 + 1, 'V'));
+
+		// WHOLE OR NOT AT ALL. With 250 of 256 input bytes already
+		// waiting there is room for 6, and the size reply is 9
+		// (ESC [ 8 ; 3 ; 1 0 t). None of it may go: a guest reading the
+		// first six would wait for the rest and take the user's next
+		// keystrokes as the digits.
+		for (int i = 0; i < 250; i++)
+			vid_link_input('a');
+		send(v, "\x1b[18t");
+		settle(v);
+		const std::string full = take_input(v);
+		CHECK(full == std::string(250, 'a'));
+		// With room, the same query is answered in full.
+		send(v, "\x1b[18t");
+		settle(v);
+		CHECK(take_input(v) == E + "[8;3;10t");
+
+		// SAVE AND RESTORE ARE PER WINDOW. Window 1 saves 2;3, the root
+		// saves 4;9, and each restores its own: one slot shared by the
+		// console would give window 1 the root's position.
+		send(v, "\x1b[2;3H" "\x1b" "7");
+		v.write(DATA, 0x1B); v.write(DATA, 0x21); v.write(DATA, 0);
+		send(v, "\x1b[4;9H" "\x1b" "7" "\x1b[1;1H");
+		v.write(DATA, 0x1B); v.write(DATA, 0x21); v.write(DATA, 1);
+		send(v, "\x1b[1;1H" "\x1b" "8" "\x1b[6n");
+		settle(v);
+		CHECK(take_input(v) == E + "[2;3R");
+		v.write(DATA, 0x1B); v.write(DATA, 0x21); v.write(DATA, 0);
+		send(v, "\x1b" "8" "\x1b[6n");
+		settle(v);
+		CHECK(take_input(v) == E + "[4;9R");
+
+		// A restore is CLAMPED when CWArea has narrowed the working area
+		// since the save: saved at 3;10, area now 2 x 2.
+		v.write(DATA, 0x1B); v.write(DATA, 0x21); v.write(DATA, 1);
+		send(v, "\x1b[3;10H" "\x1b" "7");
+		v.write(DATA, 0x1B); v.write(DATA, 0x25);
+		v.write(DATA, 0); v.write(DATA, 0);
+		v.write(DATA, 2); v.write(DATA, 2);
+		send(v, "\x1b" "8" "\x1b[6n");
+		settle(v);
+		CHECK(take_input(v) == E + "[2;2R");
+
+		// Redefining the window forgets its saved position: a restore
+		// then homes, as one before any save does.
+		v.write(DATA, 0x1B); v.write(DATA, 0x20);
+		for (uint8_t i = 0; i < 8; i++) v.write(DATA, dw[i]);
+		v.write(DATA, 0x1B); v.write(DATA, 0x21); v.write(DATA, 1);
+		send(v, "\x1b[2;2H" "\x1b" "8" "\x1b[6n");
+		settle(v);
+		CHECK(take_input(v) == E + "[1;1R");
+
+		v.write(STAT, VID_CTL_RESET);
+		settle(v);
 	}
 
 	// M0 loopback still works after M1 (the vlink test must keep passing).
