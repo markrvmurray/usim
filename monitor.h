@@ -10,6 +10,10 @@
 //	added. Front ends word their own reply to a command that is not
 //	there, since each has its own way of being asked for help.
 //
+//	A front end with commands of its own puts them in a Monitor of its
+//	own and then() the machine's behind it: a name is looked up in
+//	front first, and help lists both, the front's commands first.
+//
 //	vim: ts=8 sw=8 noet:
 //
 
@@ -40,6 +44,9 @@ public:
 
 	std::string	help() const;
 
+	// Commands to fall back on: the machine's, behind a front end's.
+	void		then(const Monitor& more) { behind = &more; }
+
 private:
 	struct Command {
 		std::string	name;
@@ -47,6 +54,7 @@ private:
 		Handler		run;
 	};
 	std::vector<Command>	commands;
+	const Monitor*		behind = nullptr;
 };
 
 // The commands every CPU has: the instruction trace, and its cycles.

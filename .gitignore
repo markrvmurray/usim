@@ -19,6 +19,7 @@ tests/test_gdbstub
 tests/test_peek
 tests/test_traps
 tests/test_ptylink
+tests/test_prompt
 tests/test_cycles6309
 tests/test_picovideo
 tests/test_picovideo_keys

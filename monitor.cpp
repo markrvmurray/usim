@@ -5,6 +5,8 @@
 //	vim: ts=8 sw=8 noet:
 //
 
+#include <algorithm>
+
 #include "monitor.h"
 #include "usim.h"
 
@@ -47,7 +49,7 @@ bool Monitor::run(const std::string& line, std::string& out) const
 			return true;
 		}
 	}
-	return false;
+	return behind && behind->run(line, out);
 }
 
 std::string Monitor::help() const
@@ -55,6 +57,13 @@ std::string Monitor::help() const
 	std::string out;
 	for (auto& c : commands)
 		out += c.help;
+	// the machine's commands, less those the front end has (its "help"
+	// among them): a name runs the front end's
+	if (behind)
+		for (auto& c : behind->commands)
+			if (std::none_of(commands.begin(), commands.end(),
+					 [&](const Command& m) { return m.name == c.name; }))
+				out += c.help;
 	return out;
 }
 

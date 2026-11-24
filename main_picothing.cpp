@@ -73,6 +73,12 @@
 //	                     as Kermit can log in and drive the console.
 //	                     Excludes --input. The emulator's own terminal is
 //	                     left as it was.
+//	  --prompt           a command prompt on the emulator's own stdin and
+//	                     stdout, the guest held at reset until "run":
+//	                     run, stop, step, regs, mem, break, delete, reset,
+//	                     quit, and the debugger's monitor commands. Ctrl-C
+//	                     stops the guest. Needs --console-pty, which
+//	                     leaves stdin and stdout to it.
 //	  --aux-pty=PATH, --console-pty=PATH
 //	                     the same, and a symlink at PATH to the pty for
 //	                     the run, so a client can be pointed at one name
@@ -118,11 +124,13 @@
 #include "picotick.h"
 #include "picoide.h"
 #include "picovideo.h"
+#include "picovideo_display.h"
 #include "picofram.h"
 #include "picortc.h"
 #include "tracectl.h"
 #include "system_watchpoint.h"
 #include "gdbstub.h"
+#include "prompt.h"
 
 //
 // Null terminal for auxiliary ACIA — discards output, never has input
@@ -360,6 +368,9 @@ static void usage(const char* prog)
 		"                      with no file: reproducible with --input\n"
 		"  --aux-pty[=PATH]    back the aux ACIA ($FFC6-7) with a host PTY\n"
 		"                      (prints the /dev/ttysNNN slave path at startup)\n"
+		"  --prompt            commands on stdin/stdout, the guest held at\n"
+		"                      reset until \"run\" (\"help\" lists them);\n"
+		"                      needs --console-pty. Ctrl-C stops the guest\n"
 		"  --console-pty[=PATH]  back the console ACIA ($FFC4-5) with a host\n"
 		"                      PTY instead of stdin/stdout (excludes --input)\n"
 		"                      PATH: also a symlink to the PTY there, for the\n"
@@ -428,6 +439,7 @@ int main(int argc, char* argv[])
 	bool			console_pty_enable = false;	// --console-pty: PTY-back the console ACIA
 	const char*		aux_pty_link = nullptr;		// --aux-pty=PATH: a fixed name for it
 	const char*		console_pty_link = nullptr;	// --console-pty=PATH
+	bool			prompt_enable = false;	// --prompt: commands on stdin, guest held
 	bool			use_hd6309 = false;	// --hd6309: run as an HD6309
 	bool			md_native = false;	// --md-native: MD bit 0 at reset
 	unsigned		pc_hist_top = 0;	// --pc-hist: top clusters to print (0 = disabled)
@@ -550,6 +562,8 @@ int main(int argc, char* argv[])
 			aux_pty_link = argv[i] + 10;
 		} else if (strcmp(argv[i], "--console-pty") == 0) {
 			console_pty_enable = true;
+		} else if (strcmp(argv[i], "--prompt") == 0) {
+			prompt_enable = true;
 		} else if (strncmp(argv[i], "--console-pty=", 14) == 0 && argv[i][14]) {
 			console_pty_enable = true;
 			console_pty_link = argv[i] + 14;
@@ -639,6 +653,15 @@ int main(int argc, char* argv[])
 	}
 	const bool uniflex = guest == UNIFLEX || uniflex_opt;
 
+	if (prompt_enable && !console_pty_enable) {
+		fprintf(stderr, "%s: --prompt needs the console off stdin "
+			"(--console-pty)\n", argv[0]);
+		return EXIT_FAILURE;
+	}
+	if (prompt_enable && (gdb_port >= 0 || gdb_port_file)) {
+		fprintf(stderr, "%s: --prompt and --gdb cannot be used together\n", argv[0]);
+		return EXIT_FAILURE;
+	}
 	if (console_pty_enable && have_input) {
 		fprintf(stderr, "%s: --console-pty and --input are exclusive\n", argv[0]);
 		return EXIT_FAILURE;
@@ -694,8 +717,8 @@ int main(int argc, char* argv[])
 			return EXIT_FAILURE;
 		if (console_pty->ok())
 			console_impl = console_pty.get();
-		else if (console_pty_link)
-			return EXIT_FAILURE;
+		else if (console_pty_link || prompt_enable)
+			return EXIT_FAILURE;	// a client waits there, or the prompt needs stdin
 		else
 			fprintf(stderr, "ptyserial: falling back to the stdin/stdout console\n");
 	}
@@ -1406,6 +1429,24 @@ int main(int argc, char* argv[])
 		cpu.abort = [&]() { invalid_hit = true; };
 	}
 
+	// --prompt: commands on the emulator's own terminal, the guest held
+	// at reset until "run". Ctrl-C stops the guest instead of being
+	// ignored. Memory is seen as the debugger sees it (task N).
+	std::unique_ptr<Prompt> prompt;
+	if (prompt_enable) {
+		prompt = std::make_unique<Prompt>(cpu, commands);
+		prompt->name = "usim09pt";
+		prompt->read_memory = [&](Word a) -> Byte {
+			if (view_task >= 0 && a < 0xFF00)
+				return datram->peek_task((Byte)view_task, a);
+			return cpu.debug_read(a);
+		};
+		if (video_window)
+			prompt->idle = [&]() { (void)picovideo_display_service(video_scale); };
+		Prompt::catch_interrupts();
+		cpu.abort = [&]() { invalid_hit = true; };
+	}
+
 	// Step loop is engaged when any of --timeout, --watch, --dump, --brk
 	// are active. --brk-gated implies --brk semantics even without --brk
 	// addresses, but on its own it's a no-op until the guest pokes
@@ -1415,7 +1456,7 @@ int main(int argc, char* argv[])
 	bool stepping = (timeout > 0) || !watches.empty()
 		     || !dumps.empty() || !brk_addrs.empty()
 		     || trace_from || trace_to || trace_procs
-		     || pc_hist_top || gdb
+		     || pc_hist_top || gdb || prompt
 		     || trap_sled || trap_uniflex || trap_spin
 		     || detect_dbl || detect_stray || detect_free
 		     || detect_iostk || detect_srise || detect_sphi;
@@ -1433,6 +1474,8 @@ int main(int argc, char* argv[])
 				fprintf(stderr, "%s: killed by the debugger\n", argv[0]);
 				return EXIT_FAILURE;
 			}
+			if (prompt && !prompt->before_insn())
+				return EXIT_SUCCESS;
 			// Windowed trace: enable per-instruction trace for the
 			// instruction-count window [trace_from, trace_to). Lets a
 			// long multitasking run be traced in a tight window without
@@ -1560,7 +1603,10 @@ int main(int argc, char* argv[])
 			cpu.tick();
 			if (invalid_hit) {
 				cpu.set_pc(cpu.get_insn_pc());	// show the culprit
-				gdb->faulted();
+				if (gdb)
+					gdb->faulted();
+				else
+					prompt->faulted("invalid instruction");
 				return EXIT_FAILURE;
 			}
 			{

@@ -21,7 +21,7 @@ LIB_SRCS	= usim.cpp memory.cpp \
 		  hd6309.cpp hd6309in.cpp \
 		  mc6850.cpp \
 		  picotick.cpp picoide.cpp picofram.cpp picortc.cpp \
-		  system_watchpoint.cpp gdbstub.cpp monitor.cpp
+		  system_watchpoint.cpp gdbstub.cpp monitor.cpp prompt.cpp
 
 OBJS		= $(LIB_SRCS:.cpp=.o)
 BIN		= usim09 usim09batch usim09pt tests/test6809 tests/test6309 \
@@ -157,7 +157,7 @@ test: tests/test6809 tests/test6809.bin tests/test6309 tests/test6309.bin \
       tests/test_mmu_tick tests/test_system_watchpoint tests/test_picoide \
       tests/test_picortc tests/test_cycles6309 tests/test_picovideo \
       tests/test_picovideo_keys tests/cycletest09 tests/cycletest09.bin tests/test_exgtfr \
-      tests/test_prefix tests/test_monitor tests/test_gdbstub tests/test_peek tests/test_traps tests/test_ptylink usim09pt
+      tests/test_prefix tests/test_monitor tests/test_gdbstub tests/test_peek tests/test_traps tests/test_ptylink tests/test_prompt usim09pt
 	./tests/test6809
 	./tests/cycletest09
 	./tests/test_exgtfr
@@ -167,6 +167,7 @@ test: tests/test6809 tests/test6809.bin tests/test6309 tests/test6309.bin \
 	./tests/test_peek
 	./tests/test_traps
 	./tests/test_ptylink
+	./tests/test_prompt
 	./tests/test6309
 	./tests/test_mmu_tick
 	./tests/test_system_watchpoint
@@ -206,6 +207,9 @@ tests/test_peek: tests/test_peek.cpp $(LIB)
 	$(CXX) $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_peek.cpp -L. -lusim -o $(@)
 
 # runs ./usim09pt itself on small programs
+tests/test_prompt: tests/test_prompt.cpp
+	$(CXX) $(CCFLAGS) $(LDFLAGS) tests/test_prompt.cpp -o $(@)
+
 tests/test_ptylink: tests/test_ptylink.cpp ptyserial.o $(LIB)
 	$(CXX) -I. $(CCFLAGS) $(LDFLAGS) tests/test_ptylink.cpp ptyserial.o -L. -lusim -o $(@)
 
@@ -320,7 +324,7 @@ cycles6309: tests/test6309 tests/test6309.bin
 
 .PHONY: clean
 clean:
-	$(RM) $(BIN) $(LIB) *.o *.d tests/test_mmu_tick tests/*.o tests/*.d tests/test6809.bin tests/test_system_watchpoint tests/test_picoide tests/test_picortc tests/test_exgtfr tests/test_prefix tests/test_monitor tests/test_gdbstub tests/test_peek tests/test_traps tests/test_ptylink tests/test_cycles6309 tests/test_picovideo tests/test_picovideo_keys tests/cycletest09.bin
+	$(RM) $(BIN) $(LIB) *.o *.d tests/test_mmu_tick tests/*.o tests/*.d tests/test6809.bin tests/test_system_watchpoint tests/test_picoide tests/test_picortc tests/test_exgtfr tests/test_prefix tests/test_monitor tests/test_gdbstub tests/test_peek tests/test_traps tests/test_ptylink tests/test_prompt tests/test_cycles6309 tests/test_picovideo tests/test_picovideo_keys tests/cycletest09.bin
 
 # Compiler-generated header dependencies (see CPPFLAGS -MMD -MP). Pulling
 # these in means editing any header recompiles exactly the objects that

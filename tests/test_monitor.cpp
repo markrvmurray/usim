@@ -3,7 +3,8 @@
 //	The machine's command table, on its own: a command is its first
 //	word, the rest its arguments; "help" lists every command in the
 //	order added; a name added again replaces the first in its place;
-//	and a line naming no command is left to the front end to answer.
+//	a line naming no command is left to the front end to answer; and a
+//	front end's commands sit in front of the machine's.
 //
 //	vim: ts=8 sw=8 noet:
 //
@@ -83,6 +84,28 @@ int main()
 		"help              this list\n"
 		"trace on|off      the instruction trace, to stderr\n"
 		"cycles            the CPU's total cycles\n", c.help());
+
+	// a front end's commands in front of the machine's
+	Monitor front;
+	front.add("go", "go                the front end's\n",
+		[](const std::string&, std::string& o) { o += "front go\n"; });
+	front.add("cycles", "cycles            the front end's own\n",
+		[](const std::string&, std::string& o) { o += "front cycles\n"; });
+	front.then(c);
+	expect("its own", front.run("go", out) && out == "front go\n", out);
+	out.clear();
+	expect("the machine's, behind", front.run("trace bogus", out) &&
+		out == "usage: trace on|off\n", out);
+	out.clear();
+	expect("its own first, where both have one", front.run("cycles", out) &&
+		out == "front cycles\n", out);
+	out.clear();
+	expect("neither", !front.run("frob", out) && out.empty(), out);
+	expect("help: its own, then the machine's it does not hide", front.help() ==
+		"help              this list\n"
+		"go                the front end's\n"
+		"cycles            the front end's own\n"
+		"trace on|off      the instruction trace, to stderr\n", front.help());
 
 	if (failures) {
 		printf("test_monitor: FAIL (%d)\n", failures);
