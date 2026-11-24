@@ -5,7 +5,8 @@
 //	emulator's own terminal left as it was; the link gone when the run
 //	ends, by its own exit or by a signal; another running emulator's
 //	path refused, a dead run's replaced, and anything that is not a
-//	link never touched.
+//	link never touched. And PtySerial itself: a signal arriving while
+//	it looks for input is not input.
 //
 //	vim: ts=8 sw=8 noet:
 //
@@ -24,14 +25,18 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
+
+#include "ptyserial.h"
 
 static int failures = 0;
 
@@ -200,8 +205,93 @@ static std::string read_console(const std::string& link, size_t n)
 	return got;
 }
 
+static void on_alarm(int) {}
+
+// Signals landing while PtySerial looks for input, with nothing to
+// read: none of them may be taken for input. One that was would block
+// the emulator in a read for a byte that never comes, so the looking
+// is done in a child, and a child still at it after 10s has blocked.
+static void test_poll_under_signals()
+{
+	pid_t pid = fork();
+	if (pid == 0) {
+		freopen("/dev/null", "w", stderr);	// its startup banner
+		PtySerial pty("test");
+		struct sigaction sa;
+		memset(&sa, 0, sizeof sa);
+		sa.sa_handler = on_alarm;
+		sa.sa_flags = SA_RESTART;	// as a handler may: a read restarts
+		sigaction(SIGALRM, &sa, nullptr);
+		struct itimerval every = { { 0, 200 }, { 0, 200 } };
+		setitimer(ITIMER_REAL, &every, nullptr);
+		for (int i = 0; i < 20000; i++)
+			if (pty.poll_read())
+				_exit(2);	// a byte from nowhere
+		_exit(0);
+	}
+	int status = 0;
+	for (int waited = 0; waitpid(pid, &status, WNOHANG) == 0; usleep(50000)) {
+		if (++waited > 10 * 20) {
+			kill(pid, SIGKILL);
+			waitpid(pid, &status, 0);
+			expect("a signal is not input (it blocked in a read)", false);
+			return;
+		}
+	}
+	expect("a signal is not input", WIFEXITED(status) && WEXITSTATUS(status) == 0,
+		std::to_string(status));
+}
+
+// Signals landing while PtySerial waits for room to write: none may
+// cost a byte. A slow reader keeps the pty full, so every write waits.
+static void test_write_under_signals()
+{
+	pid_t pid = fork();
+	if (pid == 0) {
+		freopen("/dev/null", "w", stderr);
+		PtySerial pty("test");
+		int fd = open(pty.name().c_str(), O_RDWR | O_NOCTTY);
+		const int N = 3000;
+		int got = 0;
+		std::thread reader([&]() {
+			char c;
+			while (got < N) {
+				struct pollfd p = { fd, POLLIN, 0 };
+				if (poll(&p, 1, 2000) <= 0)
+					break;		// nothing for 2s: the rest was lost
+				if (read(fd, &c, 1) == 1)
+					got++;
+				usleep(300);
+			}
+		});
+		struct sigaction sa;
+		memset(&sa, 0, sizeof sa);
+		sa.sa_handler = on_alarm;
+		sa.sa_flags = SA_RESTART;
+		sigaction(SIGALRM, &sa, nullptr);
+		struct itimerval every = { { 0, 200 }, { 0, 200 } };
+		setitimer(ITIMER_REAL, &every, nullptr);
+		for (int i = 0; i < N; i++)
+			pty.write((Byte)'x');
+		reader.join();
+		_exit(got == N ? 0 : 3);
+	}
+	int status = 0;
+	for (int waited = 0; waitpid(pid, &status, WNOHANG) == 0; usleep(50000)) {
+		if (++waited > 30 * 20) {
+			kill(pid, SIGKILL);
+			waitpid(pid, &status, 0);
+			break;
+		}
+	}
+	expect("a signal costs no byte written", WIFEXITED(status) && WEXITSTATUS(status) == 0,
+		std::to_string(status));
+}
+
 int main()
 {
+	test_poll_under_signals();
+	test_write_under_signals();
 	if (!mkdtemp(dir)) {
 		perror("mkdtemp");
 		return EXIT_FAILURE;

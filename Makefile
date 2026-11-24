@@ -206,8 +206,8 @@ tests/test_peek: tests/test_peek.cpp $(LIB)
 	$(CXX) $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_peek.cpp -L. -lusim -o $(@)
 
 # runs ./usim09pt itself on small programs
-tests/test_ptylink: tests/test_ptylink.cpp
-	$(CXX) $(CCFLAGS) $(LDFLAGS) tests/test_ptylink.cpp -o $(@)
+tests/test_ptylink: tests/test_ptylink.cpp ptyserial.o $(LIB)
+	$(CXX) -I. $(CCFLAGS) $(LDFLAGS) tests/test_ptylink.cpp ptyserial.o -L. -lusim -o $(@)
 
 tests/test_traps: tests/test_traps.cpp
 	$(CXX) $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_traps.cpp -o $(@)

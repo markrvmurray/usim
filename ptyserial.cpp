@@ -105,12 +105,15 @@ bool PtySerial::poll_read()
 
 	// 10us select timeout, matching Terminal: keeps an idle simulation
 	// from spinning the host CPU while still being effectively instant.
+	// Only a select() that says so means a byte is there: one a signal
+	// cut short (EINTR) leaves the set as we filled it, and the read
+	// that followed would wait, blocking, for a byte that may never come.
 	fd_set		fds;
 	struct timeval	tv = { 0L, 10L };
 	FD_ZERO(&fds);
 	FD_SET(master_fd, &fds);
-	(void)select(master_fd + 1, &fds, NULL, NULL, &tv);
-	if (!FD_ISSET(master_fd, &fds))
+	if (select(master_fd + 1, &fds, NULL, NULL, &tv) <= 0 ||
+	    !FD_ISSET(master_fd, &fds))
 		return false;
 
 	unsigned char	c;
@@ -143,11 +146,16 @@ void PtySerial::write(Byte ch)
 	// normal case. The bounded wait stops a missing/stalled client from
 	// hanging the whole emulator: if no space frees up, the byte is
 	// dropped (a real UART would have overrun its shift register too).
+	// A signal cutting the wait short is not a full buffer: wait again.
 	fd_set		fds;
-	struct timeval	tv = { 0L, 100000L };	// 100ms ceiling
-	FD_ZERO(&fds);
-	FD_SET(master_fd, &fds);
-	if (select(master_fd + 1, NULL, &fds, NULL, &tv) <= 0)
+	int		ready;
+	do {
+		struct timeval	tv = { 0L, 100000L };	// 100ms ceiling
+		FD_ZERO(&fds);
+		FD_SET(master_fd, &fds);
+		ready = select(master_fd + 1, NULL, &fds, NULL, &tv);
+	} while (ready < 0 && errno == EINTR);
+	if (ready <= 0)
 		return;				// no room — drop the byte
 
 	ssize_t n;
