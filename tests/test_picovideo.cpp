@@ -2834,6 +2834,123 @@ int main()
 		v.write(DATA, ESC); v.write(DATA, 0x3D); v.write(DATA, 0);
 	}
 
+	// The default face. A host terminal (coco-thing) replaces what "the
+	// built-in face" stands for with its user's face, and every way the
+	// firmware goes back to the default must land on that, not on Spleen:
+	// buffer 0, a killed selection, and a console reset. The face is
+	// chosen against the code's symmetries: neither Spleen nor solid nor
+	// the same for every glyph or row, so drawing the wrong face, glyph or
+	// row cannot pass.
+	{
+		static const uint8_t ESC = 0x1B;
+		static uint8_t face[256 * CHAR_H];
+		for (int g = 0; g < 256; g++)
+			for (int r = 0; r < CHAR_H; r++)
+				face[g * CHAR_H + r] =
+				    (uint8_t)(g ^ (r * 0x11) ^ 0xA5);
+
+		// The cell at (col, 0) shows glyph `ch` of `face`, the
+		// first `len` bytes of it (beyond that, blank), maybe bold.
+		auto face_cell = [&](int col, uint8_t ch, uint32_t len,
+		    bool bold) {
+			vidterm_cursor_hide();
+			for (int gy = 0; gy < CHAR_H; gy++) {
+				const uint32_t at = (uint32_t)ch * CHAR_H +
+				    (uint32_t)gy;
+				uint8_t m = at < len ? face[at] : 0u;
+				if (bold)
+					m = (uint8_t)(m | (m >> 1));
+				for (int gx = 0; gx < CHAR_W; gx++) {
+					const uint8_t want =
+					    (m & (0x80 >> gx)) ? 0xFF : 0x00;
+					if (video_framebuffer[gy][col * CHAR_W
+					    + gx] != want)
+						return false;
+				}
+			}
+			return true;
+		};
+		// Print `ch` at column `col` of the top row.
+		auto put = [&](int col, uint8_t ch) {
+			v.write(DATA, 0x02); v.write(DATA, (Byte)(0x20 + col));
+			v.write(DATA, 0x20);
+			v.write(DATA, ch);
+			settle(v);
+		};
+
+		v.write(STAT, VID_CTL_RESET);
+		settle(v);
+		v.write(DATA, 0x0C);
+		settle(v);
+		vidterm_set_default_font(face, sizeof(face));
+		put(0, 'A');
+		CHECK(face_cell(0, 'A', sizeof(face), false));
+		put(1, 0x9C);
+		CHECK(face_cell(1, 0x9C, sizeof(face), false));
+
+		// A loaded face, solid: selected, it draws; buffer 0 then
+		// brings back the default face, not Spleen.
+		v.write(DATA, ESC); v.write(DATA, 0x29);
+		v.write(DATA, 2); v.write(DATA, 1);
+		v.write(DATA, 0x10); v.write(DATA, 0x00);
+		v.write(DATA, ESC); v.write(DATA, 0x2B);
+		v.write(DATA, 2); v.write(DATA, 1); v.write(DATA, 1);
+		v.write(DATA, 0); v.write(DATA, 8);
+		v.write(DATA, 0); v.write(DATA, 16);
+		v.write(DATA, 0x10); v.write(DATA, 0x00);
+		for (int i = 0; i < 4096; i++) {
+			v.write(DATA, 0xFF);
+			if ((i & 0x7F) == 0x7F)
+				settle(v);
+		}
+		for (int t = 0; t < 32; t++)
+			settle(v);
+		v.write(DATA, ESC); v.write(DATA, 0x3A);
+		v.write(DATA, 2); v.write(DATA, 1);
+		put(2, 'A');
+		CHECK(!face_cell(2, 'A', sizeof(face), false));
+		v.write(DATA, ESC); v.write(DATA, 0x3A);
+		v.write(DATA, 2); v.write(DATA, 0);
+		put(3, 'A');
+		CHECK(face_cell(3, 'A', sizeof(face), false));
+
+		// Killing the selected buffer drops back to the default face.
+		v.write(DATA, ESC); v.write(DATA, 0x3A);
+		v.write(DATA, 2); v.write(DATA, 1);
+		v.write(DATA, ESC); v.write(DATA, 0x2A);
+		v.write(DATA, 2); v.write(DATA, 1);
+		put(4, 'B');
+		CHECK(face_cell(4, 'B', sizeof(face), false));
+
+		// So does a console reset, and the default outlives it.
+		v.write(STAT, VID_CTL_RESET);
+		settle(v);
+		v.write(DATA, 0x0C);
+		settle(v);
+		put(0, 'C');
+		CHECK(face_cell(0, 'C', sizeof(face), false));
+
+		// Bold smears the default face as it does any other.
+		v.write(DATA, ESC); v.write(DATA, 0x3D); v.write(DATA, 1);
+		put(1, 'C');
+		CHECK(face_cell(1, 'C', sizeof(face), true));
+		v.write(DATA, ESC); v.write(DATA, 0x3D); v.write(DATA, 0);
+
+		// A short default face: the glyphs past its end are blank,
+		// and the ones before it are drawn.
+		const uint32_t short_len = 'A' * CHAR_H;
+		vidterm_set_default_font(face, short_len);
+		put(2, 'A');
+		CHECK(face_cell(2, 'A', short_len, false));
+		put(3, '@');
+		CHECK(face_cell(3, '@', short_len, false));
+
+		// NULL brings back the built-in face.
+		vidterm_set_default_font(NULL, 0);
+		put(4, 'A');
+		CHECK(check_cell(4, 0, 'A'));
+	}
+
 	// Get/put buffers: define, load, stamp, capture, and use as a fill
 	// pattern. The round trip is the test that matters -- a block taken
 	// off the screen and put back somewhere else must arrive intact.
