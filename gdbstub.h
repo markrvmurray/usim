@@ -21,10 +21,11 @@
 //	its instruction fetches, and stop after the instruction that made
 //	the access, with the PC at the next.
 //
-//	"monitor" commands (qRcmd) reach the stub's own (help, trace,
-//	cycles) and then the machine's, through the monitor hook. A
-//	machine can also change what the debugger's memory accesses
-//	reach, as usim09pt does to look through another DAT task.
+//	"monitor" commands (qRcmd) run from a Monitor: the machine's own,
+//	shared with whatever else offers its commands, or else one the
+//	stub makes with just the CPU's. A machine can also change what the
+//	debugger's memory accesses reach, as usim09pt does to look through
+//	another DAT task.
 //
 //	The end of the program is a stop first, with the machine still
 //	inspectable; continuing from there reports the exit status. An
@@ -36,14 +37,18 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "mc6809.h"
+#include "monitor.h"
 
 class GdbStub {
 
 	mc6809&			cpu;
+	std::unique_ptr<Monitor> own_commands;		// when the machine has none
+	Monitor&		commands;
 	int			fd = -1;
 	bool			ack = true;		// until QStartNoAckMode
 	std::vector<bool>	breakpoints;		// by address
@@ -82,21 +87,20 @@ class GdbStub {
 	// Serve packets until the client resumes (true) or ends (false).
 	bool			serve(const std::string& stop);
 	void			close_fd();
+	void			init();
 
 public:
 	static const int	DEFAULT_PORT = 2159;	// as MAME's
 
+	// With just the CPU's monitor commands, or with a machine's
 	explicit		GdbStub(mc6809& cpu);
+				GdbStub(mc6809& cpu, Monitor& commands);
 
 	// What the debugger's memory reads and writes reach: by default the
 	// CPU's address space as it stands, without cycles or side effects.
 	std::function<Byte(Word)>	read_memory;
 	std::function<void(Word, Byte)>	write_memory;
 
-	// The machine's monitor commands: true if it knows cmd, with its
-	// output (lines ending in newlines) in out.
-	std::function<bool(const std::string& cmd, std::string& out)> monitor;
-	std::string			monitor_help;	// its lines for "help"
 				~GdbStub();
 
 	// Wait for one client. Port 0 takes any free port; port_file, if

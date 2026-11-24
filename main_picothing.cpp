@@ -1268,16 +1268,91 @@ int main(int argc, char* argv[])
 		return DETECTOR_STOP;
 	};
 
+	// The machine's debug commands: the CPU's, and a look at the DAT
+	// and through it. view_task is the task the debugger looks through.
+	int view_task = -1;		// -1 = whichever the CPU has
+	Monitor commands;
+	add_cpu_commands(commands, cpu);
+	auto dat_map = [&](unsigned t, std::string& out) {
+		char buf[32];
+		snprintf(buf, sizeof buf, "task %u:", t);
+		out += buf;
+		for (unsigned s = 0; s < 7; s++) {
+			Byte e = datram->peek((Word)(0xFE00 + (t << 3) + s));
+			if (e == 0xFF)
+				snprintf(buf, sizeof buf, "  $%04X ----", s << 13);
+			else
+				snprintf(buf, sizeof buf, "  $%04X=%02X", s << 13, (unsigned)e);
+			out += buf;
+		}
+		out += "  ($E000 fixed)\n";
+	};
+	// a task number, 0-31, or a message saying it is not one
+	auto task_arg = [](const std::string& arg, unsigned& t, std::string& out) {
+		char* end;
+		unsigned long n = strtoul(arg.c_str(), &end, 10);
+		if (arg.empty() || *end || n > 31) {
+			out += "tasks are 0-31\n";
+			return false;
+		}
+		t = (unsigned)n;
+		return true;
+	};
+	commands.add("task",
+		"task              the CPU's DAT task and the debugger's\n"
+		"task N            look at memory through task N (0-31)\n"
+		"task cpu          look through whichever task the CPU has\n",
+		[&](const std::string& args, std::string& out) {
+			unsigned t;
+			if (args.empty()) {
+				char buf[80];
+				snprintf(buf, sizeof buf, "CPU task %u; debugger sees %s\n",
+					(unsigned)datram->get_task(),
+					view_task >= 0 ? ("task " + std::to_string(view_task)).c_str()
+						       : "the CPU's task");
+				out += buf;
+			} else if (args == "cpu") {
+				view_task = -1;
+			} else if (task_arg(args, t, out)) {
+				view_task = (int)t;
+			}
+		});
+	commands.add("dat", "dat [N]           task N's page map (default: the debugger's)\n",
+		[&](const std::string& args, std::string& out) {
+			unsigned t = view_task >= 0 ? (unsigned)view_task : datram->get_task();
+			if (args.empty() || task_arg(args, t, out))
+				dat_map(t, out);
+		});
+	commands.add("phys", "phys ADDR [LEN]   physical memory, bypassing the DAT\n",
+		[&](const std::string& args, std::string& out) {
+			unsigned long addr, len = 64;
+			if (sscanf(args.c_str(), "%lx %lx", &addr, &len) < 1) {
+				out += "usage: phys ADDR [LEN] (hex)\n";
+				return;
+			}
+			len = std::min(len, 4096ul);
+			char buf[16];
+			for (unsigned long i = 0; i < len; i += 16) {
+				snprintf(buf, sizeof buf, "%06lX:", addr + i);
+				out += buf;
+				for (unsigned long j = i; j < len && j < i + 16; j++) {
+					snprintf(buf, sizeof buf, " %02X",
+						(unsigned)datram->read_physical(addr + j));
+					out += buf;
+				}
+				out += "\n";
+			}
+		});
+
 	// --gdb: the debugger takes over before the first instruction. An
 	// invalid instruction becomes a stop it can inspect, after the
 	// post-mortem above, rather than an abort.
 	std::unique_ptr<GdbStub> gdb;
 	bool invalid_hit = false;
-	int view_task = -1;		// the debugger's DAT task; -1 = the CPU's
 	if (gdb_port_file && gdb_port < 0)
 		gdb_port = 0;		// a port file implies --gdb=0
 	if (gdb_port >= 0) {
-		gdb = std::make_unique<GdbStub>(cpu);
+		gdb = std::make_unique<GdbStub>(cpu, commands);
 
 		// $0000-$FEFF through the chosen task; the I/O page as is
 		gdb->read_memory = [&](Word a) -> Byte {
@@ -1290,68 +1365,6 @@ int main(int argc, char* argv[])
 				datram->poke_task((Byte)view_task, a, v);
 			else
 				cpu.debug_write(a, v);
-		};
-
-		gdb->monitor_help =
-			"task              the CPU's DAT task and the debugger's\n"
-			"task N            look at memory through task N (0-31)\n"
-			"task cpu          look through whichever task the CPU has\n"
-			"dat [N]           task N's page map (default: the debugger's)\n"
-			"phys ADDR [LEN]   physical memory, bypassing the DAT\n";
-		gdb->monitor = [&](const std::string& cmd, std::string& out) {
-			char buf[160];
-			unsigned long n, len = 64;
-			auto map = [&](unsigned t) {
-				snprintf(buf, sizeof buf, "task %u:", t);
-				out += buf;
-				for (unsigned s = 0; s < 7; s++) {
-					Byte e = datram->peek((Word)(0xFE00 + (t << 3) + s));
-					if (e == 0xFF)
-						snprintf(buf, sizeof buf, "  $%04X ----", s << 13);
-					else
-						snprintf(buf, sizeof buf, "  $%04X=%02X", s << 13, (unsigned)e);
-					out += buf;
-				}
-				out += "  ($E000 fixed)\n";
-			};
-			const unsigned shown = view_task >= 0 ? (unsigned)view_task
-							      : datram->get_task();
-			if (cmd == "task") {
-				snprintf(buf, sizeof buf, "CPU task %u; debugger sees %s\n",
-					(unsigned)datram->get_task(),
-					view_task >= 0 ? ("task " + std::to_string(view_task)).c_str()
-						       : "the CPU's task");
-				out = buf;
-			} else if (cmd == "task cpu") {
-				view_task = -1;
-			} else if (sscanf(cmd.c_str(), "task %lu", &n) == 1) {
-				if (n > 31)
-					out = "tasks are 0-31\n";
-				else
-					view_task = (int)n;
-			} else if (cmd == "dat") {
-				map(shown);
-			} else if (sscanf(cmd.c_str(), "dat %lu", &n) == 1) {
-				if (n > 31)
-					out = "tasks are 0-31\n";
-				else
-					map((unsigned)n);
-			} else if (sscanf(cmd.c_str(), "phys %lx %lx", &n, &len) >= 1) {
-				len = std::min(len, 4096ul);
-				for (unsigned long i = 0; i < len; i += 16) {
-					snprintf(buf, sizeof buf, "%06lX:", n + i);
-					out += buf;
-					for (unsigned long j = i; j < len && j < i + 16; j++) {
-						snprintf(buf, sizeof buf, " %02X",
-							(unsigned)datram->read_physical(n + j));
-						out += buf;
-					}
-					out += "\n";
-				}
-			} else {
-				return false;
-			}
-			return true;
 		};
 
 		if (!gdb->listen(gdb_port, gdb_port_file))

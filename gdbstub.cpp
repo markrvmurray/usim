@@ -97,12 +97,32 @@ static bool parse_hex(const std::string& s, size_t& pos, unsigned long& value)
 	return pos > start;
 }
 
+static std::unique_ptr<Monitor> cpu_commands(mc6809& cpu)
+{
+	auto m = std::make_unique<Monitor>();
+	add_cpu_commands(*m, cpu);
+	return m;
+}
+
 GdbStub::GdbStub(mc6809& cpu)
-	: cpu(cpu), breakpoints(0x10000, false),
+	: cpu(cpu), own_commands(cpu_commands(cpu)), commands(*own_commands),
+	  breakpoints(0x10000, false),
 	  watch_flags(0x10000, 0), watch_access(0x10000, false)
 {
-	read_memory = [&cpu](Word a) { return cpu.debug_read(a); };
-	write_memory = [&cpu](Word a, Byte v) { cpu.debug_write(a, v); };
+	init();
+}
+
+GdbStub::GdbStub(mc6809& cpu, Monitor& commands)
+	: cpu(cpu), commands(commands), breakpoints(0x10000, false),
+	  watch_flags(0x10000, 0), watch_access(0x10000, false)
+{
+	init();
+}
+
+void GdbStub::init()
+{
+	read_memory = [this](Word a) { return cpu.debug_read(a); };
+	write_memory = [this](Word a, Byte v) { cpu.debug_write(a, v); };
 }
 
 GdbStub::~GdbStub()
@@ -395,20 +415,8 @@ std::string GdbStub::watch_reason(const USim::WatchHit& hit) const
 std::string GdbStub::monitor_command(const std::string& cmd)
 {
 	std::string out;
-	if (cmd == "help" || cmd.empty()) {
-		out =	"help              this list\n"
-			"trace on|off      the instruction trace, to stderr\n"
-			"cycles            the CPU's total cycles\n";
-		out += monitor_help;
-	} else if (cmd == "trace on") {
-		cpu.tron();
-	} else if (cmd == "trace off") {
-		cpu.troff();
-	} else if (cmd == "cycles") {
-		out = std::to_string(cpu.get_total_cycles()) + "\n";
-	} else if (!(monitor && monitor(cmd, out))) {
+	if (!commands.run(cmd, out))
 		out = "unknown command: " + cmd + " (try \"monitor help\")\n";
-	}
 	return out;
 }
 

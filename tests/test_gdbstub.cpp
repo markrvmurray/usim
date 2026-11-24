@@ -150,12 +150,18 @@ struct Client {
 // Runs code under the stub with a client attached
 struct Session {
 	Machine		m;
-	GdbStub		gdb;
+	std::unique_ptr<GdbStub> stub;
+	GdbStub&	gdb;
 	Client		c;
 	int		result = 0;
 	std::thread	emu;
 
-	Session(std::initializer_list<Byte> code) : m(code), gdb(m.cpu)
+	// A stub with just the CPU's monitor commands, or with a machine's
+	Session(std::initializer_list<Byte> code, Monitor* commands = nullptr)
+		: m(code),
+		  stub(commands ? std::make_unique<GdbStub>(m.cpu, *commands)
+				: std::make_unique<GdbStub>(m.cpu)),
+		  gdb(*stub)
 	{
 		int sv[2];
 		if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
@@ -338,33 +344,49 @@ static void test_watchpoints()
 
 static void test_monitor()
 {
-	Session s({ 0x12, 0x20, 0xFE });	// NOP; BRA *
-	Client& c = s.c;
 	bool ok;
-	std::string peeked;
+	std::string out;
+	{
+		// a stub of its own: the CPU's commands and no others
+		Session s({ 0x12, 0x20, 0xFE });	// NOP; BRA *
+		Client& c = s.c;
+		c.cmd("?");
+		out = c.monitor("help", ok);
+		expect("the CPU's commands", ok && has(out, "trace on|off") &&
+			has(out, "cycles") && !has(out, "the machine's command"), out);
+		out = c.monitor("cycles", ok);
+		expect("cycles", ok && out == "0\n", out);
+		c.cmd("s");
+		// the total lags the instruction just run (USim folds it in
+		// at the next tick), so only that it moves is certain
+		out = c.monitor("cycles", ok);
+		expect("cycles after a NOP", ok && strtoul(out.c_str(), nullptr, 10) > 0, out);
+		out = c.monitor("trace sideways", ok);
+		expect("a command's own usage", ok && out == "usage: trace on|off\n", out);
+		out = c.monitor("hello", ok);
+		expect("no machine commands", ok && has(out, "unknown command: hello"), out);
+		c.send("k");
+		expect("kill", s.finish() == -1);
+	}
 
-	// a machine's own command, and its view of memory
-	s.gdb.monitor_help = "poke VALUE        the machine's command\n";
-	s.gdb.monitor = [](const std::string& cmd, std::string& out) {
-		if (cmd != "hello")
-			return false;
-		out = "hello from the machine\n";
-		return true;
-	};
+	// a machine's commands, shared with the stub, and its view of memory
+	Monitor commands;
+	commands.add("hello", "hello             the machine's command\n",
+		[](const std::string& args, std::string& out) {
+			out += "hello from the machine" + (args.empty() ? "" : ", " + args) + "\n";
+		});
+	Session s({ 0x12, 0x20, 0xFE }, &commands);
+	Client& c = s.c;
+	add_cpu_commands(commands, s.m.cpu);
 	s.gdb.read_memory = [](Word a) { return (Byte)(a & 0xff); };
 
 	c.cmd("?");
-	std::string out = c.monitor("help", ok);
+	out = c.monitor("help", ok);
 	expect("help", ok && has(out, "trace on|off") && has(out, "the machine's command"), out);
-	out = c.monitor("cycles", ok);
-	expect("cycles", ok && out == "0\n", out);
-	c.cmd("s");
-	// the total lags the instruction just run (USim folds it in at
-	// the next tick), so only that it moves is certain
-	out = c.monitor("cycles", ok);
-	expect("cycles after a NOP", ok && strtoul(out.c_str(), nullptr, 10) > 0, out);
 	out = c.monitor("hello", ok);
 	expect("machine command", ok && out == "hello from the machine\n", out);
+	out = c.monitor("  hello   there  ", ok);
+	expect("its arguments", ok && out == "hello from the machine, there\n", out);
 	out = c.monitor("frobnicate", ok);
 	expect("unknown command", ok && has(out, "unknown command: frobnicate"), out);
 	std::string r = c.cmd("m1234,2");
