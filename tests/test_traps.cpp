@@ -4,7 +4,8 @@
 //	stops on a jump onto a $00 sled whatever else is set, and only
 //	then; the UniFLEX-only checks stay out of other guests' way; and a
 //	detector's stop is reported as a suspicion, distinct from a crash,
-//	in both its headline and its exit status.
+//	in both its headline and its exit status. And no post-mortem reads
+//	memory as UniFLEX's unless the guest is UniFLEX.
 //
 //	vim: ts=8 sw=8 noet:
 //
@@ -144,6 +145,8 @@ int main()
 	expect("--trap-uniflex flags it, as a suspicion", rc == 3 &&
 		has(out, "==== HEURISTIC STOP (not a confirmed crash): UniFLEX") &&
 		!has(out, "CRASH POST-MORTEM"), out);
+	expect("--trap-uniflex implies a UniFLEX guest",
+		has(out, "-- UniFLEX (--guest=uniflex) --") && has(out, "task table"), out);
 
 	// a jump onto zeroed RAM, with nothing else to engage the step loop
 	const std::string sled = program("sled", {
@@ -163,6 +166,17 @@ int main()
 	expect("an invalid instruction is a crash",
 		has(out, "==== CRASH POST-MORTEM: invalid instruction ====") &&
 		!has(out, "HEURISTIC"), out);
+	expect("a guest not said to be UniFLEX gets no UniFLEX post-mortem",
+		has(out, "recent executed PCs") && !has(out, "UniFLEX") &&
+		!has(out, "user block") && !has(out, "task table") &&
+		!has(out, "kernel-stack"), out);
+	rc = run({ "--guest=uniflex", "--timeout=50", invalid }, out);
+	expect("--guest=uniflex adds UniFLEX's structures",
+		has(out, "-- UniFLEX (--guest=uniflex) --") && has(out, "user block") &&
+		has(out, "task table"), out);
+	rc = run({ "--guest=generic", "--detect-dbl", "--timeout=50", invalid }, out);
+	expect("a UniFLEX-only option contradicts --guest=generic", rc == 1 &&
+		has(out, "--detect-dbl is UniFLEX-only, but --guest=generic"), out);
 
 	std::string cleanup = std::string("rm -rf ") + dir;
 	(void)!system(cleanup.c_str());

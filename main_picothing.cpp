@@ -72,6 +72,10 @@
 //	                     terminal program or a file-transfer program such
 //	                     as Kermit can log in and drive the console.
 //	                     Excludes --input.
+//	  --guest=uniflex|generic  what the diagnostics may assume the guest
+//	                     is (default generic): only uniflex reads memory
+//	                     as an OS's own structures; UniFLEX-only options
+//	                     imply it
 //	  --gdb[=PORT]       wait for lldb or gdb on localhost:PORT (default
 //	                     2159; 0 takes any free port) and run under its
 //	                     control (see gdbstub.h). Its memory accesses
@@ -265,11 +269,19 @@ static void usage(const char* prog)
 		"  --trace             per-instruction CPU trace\n"
 		"  --trace-from=N      enable trace at instruction N (windowed)\n"
 		"  --trace-to=N        disable trace at instruction N\n"
+		"  --guest=uniflex|generic  what the diagnostics may assume the guest\n"
+		"                      is (default generic). Only uniflex has its\n"
+		"                      own: the post-mortem's user block, kernel\n"
+		"                      stack and task table, the kernel-stack low-\n"
+		"                      water, and the UniFLEX-only options below,\n"
+		"                      any of which implies --guest=uniflex.\n"
 		"  --trace-task=ADDR   restrict trace+brk to instructions whose ACTIVE\n"
 		"                      task TCB == ADDR (utask at $BF5B). Cuts through\n"
 		"                      the relasmb/kernel PC overlap to trace one task.\n"
+		"                      UniFLEX only.\n"
 		"  --trace-procs       log kernel fork/exec/exit (TCB + exec'd fnumbr)\n"
 		"                      so the program-at-TCB is knowable over time.\n"
+		"                      UniFLEX only.\n"
 		"  --tick=N            cycles per 50Hz timer tick (default 20000).\n"
 		"                      Lower = more frequent IRQs: an amplifier for\n"
 		"                      timer-IRQ-vs-kernel-window timing races.\n"
@@ -284,6 +296,20 @@ static void usage(const char* prog)
 		"  --trap-spin         stop when UniFLEX's trap entries ($E400,\n"
 		"                      $E42F) come densely: a trap spiral. UniFLEX\n"
 		"                      only.\n"
+		"  --detect-dbl        stop when two live tasks own one user-block\n"
+		"                      page. UniFLEX only.\n"
+		"  --detect-stray      stop on a store into a sleeping task's saved\n"
+		"                      frame, or into kernel bank 0's DAT slot.\n"
+		"                      UniFLEX only.\n"
+		"  --detect-free       stop when the kernel frees a page another live\n"
+		"                      task still owns, logging the pages it hands\n"
+		"                      out on the way. UniFLEX only.\n"
+		"  --detect-iostk      log I/O copies into the user-block/system-\n"
+		"                      stack page. UniFLEX only.\n"
+		"  --detect-srise      log user S rising into the system-stack zone.\n"
+		"                      UniFLEX only.\n"
+		"  --detect-sphi       log S corrupted into $FF00 and above.\n"
+		"                      UniFLEX only.\n"
 		"                      A detector's stop prints a post-mortem headed\n"
 		"                      HEURISTIC STOP, and the run exits 3.\n"
 		"  --shadow            track the last-writer (PC+cycle) of every\n"
@@ -371,6 +397,11 @@ int main(int argc, char* argv[])
 	bool			trap_sled = false;	// dump at first wild transfer onto a $00 sled
 	bool			trap_spin = false;	// dump when trampoline entries go dense (spiral start)
 	bool			trap_uniflex = false;	// UniFLEX kernel invariants (its trampoline layout)
+	// --guest: what the diagnostics may assume the guest is. Only UniFLEX
+	// has guest-specific ones; without it, nothing reads memory as any
+	// particular OS's. -1 = not given, else the Guest value.
+	enum Guest { GENERIC, UNIFLEX };
+	int			guest = -1;
 	bool			detect_dbl = false;	// U-067 Detector A: page double-allocation
 	bool			detect_stray = false;	// Detector B: stray write into another task / DAT
 	bool			detect_free = false;	// getpag/givpag of a live task page
@@ -438,6 +469,10 @@ int main(int argc, char* argv[])
 			trap_spin = true;
 		} else if (strcmp(argv[i], "--trap-uniflex") == 0) {
 			trap_uniflex = true;
+		} else if (strcmp(argv[i], "--guest=uniflex") == 0) {
+			guest = UNIFLEX;
+		} else if (strcmp(argv[i], "--guest=generic") == 0) {
+			guest = GENERIC;
 		} else if (strcmp(argv[i], "--detect-dbl") == 0) {
 			detect_dbl = true;
 		} else if (strcmp(argv[i], "--detect-stray") == 0) {
@@ -571,6 +606,21 @@ int main(int argc, char* argv[])
 	}
 
 	// A scripted console and a PTY console both want the console ACIA.
+	// The options that read UniFLEX's structures imply it is the guest,
+	// and contradict a guest said to be something else.
+	const char* uniflex_opt = trap_uniflex ? "--trap-uniflex"
+		: trap_spin ? "--trap-spin" : trace_task >= 0 ? "--trace-task"
+		: trace_procs ? "--trace-procs" : detect_dbl ? "--detect-dbl"
+		: detect_stray ? "--detect-stray" : detect_free ? "--detect-free"
+		: detect_iostk ? "--detect-iostk" : detect_srise ? "--detect-srise"
+		: detect_sphi ? "--detect-sphi" : nullptr;
+	if (uniflex_opt && guest == GENERIC) {
+		fprintf(stderr, "%s: %s is UniFLEX-only, but --guest=generic\n",
+			argv[0], uniflex_opt);
+		return EXIT_FAILURE;
+	}
+	const bool uniflex = guest == UNIFLEX || uniflex_opt;
+
 	if (console_pty_enable && have_input) {
 		fprintf(stderr, "%s: --console-pty and --input are exclusive\n", argv[0]);
 		return EXIT_FAILURE;
@@ -1078,13 +1128,6 @@ int main(int argc, char* argv[])
 			fprintf(stderr, " %02X",
 				(unsigned)datram->peek((Word)(0xFE00 + (t << 3) + s)));
 		fprintf(stderr, "\n");
-		fprintf(stderr, "user block $BF40-$BFF7 (current task %u):\n", (unsigned)t);
-		for (Word a = 0xBF40; a <= 0xBFF0; a += 16) {
-			fprintf(stderr, "  $%04X:", (unsigned)a);
-			for (int i = 0; i < 16; i++)
-				fprintf(stderr, " %02X", (unsigned)datram->peek((Word)(a + i)));
-			fprintf(stderr, "\n");
-		}
 		// Slot-0 page (current bank) start: is the program text present or zero?
 		fprintf(stderr, "slot-0 page $0000-$003F (current bank):\n");
 		for (Word a = 0x0000; a <= 0x0030; a += 16) {
@@ -1162,18 +1205,6 @@ int main(int argc, char* argv[])
 			if ((j & 15) == 15) fprintf(stderr, "\n");
 		}
 		fprintf(stderr, "\n");
-		// Stale kernel-stack call-chain: SYSSTK=$BF40 grows down; after the
-		// offending syscall returned, $BF40-down still holds its return-address
-		// chain as stale data. Scan for words pointing into kernel text
-		// ($4000-$8D17) -- those are the bsr/jsr return addresses of the path
-		// that produced the corrupt frame. (Current bank slot 5 == this task's
-		// user-block page == where the kernel stack lives.)
-		fprintf(stderr, "stale kernel-stack call-chain ($BF3E down to $BD00, kernel-text words):\n");
-		for (Word a = 0xBF3E; a >= 0xBD00 && a <= 0xBF3E; a -= 1) {
-			Word w = (Word)((datram->peek(a) << 8) | datram->peek((Word)(a + 1)));
-			if (w >= 0x4000 && w <= 0x8D17)
-				fprintf(stderr, "  [$%04X] = $%04X\n", (unsigned)a, (unsigned)w);
-		}
 		fprintf(stderr, "recent control-flow jumps (from->to, oldest->newest):\n");
 		for (size_t j = 0; j < JMP_RING; j++) {
 			size_t k = (jmp_pos + j) % JMP_RING;
@@ -1182,19 +1213,43 @@ int main(int argc, char* argv[])
 				(unsigned)jmp_from[k], (unsigned)jmp_to[k]);
 		}
 		do_dumps();
-		fprintf(stderr, "kernel-stack low-water: min S=$%04X at PC=$%04X cyc=%llu (SYSSTK=$BF40)\n", (unsigned)min_ksp, (unsigned)min_ksp_pc,
-			(unsigned long long)min_ksp_cyc);
-		{
-			auto rp=[&](unsigned a){ return (unsigned)datram->read_physical(a); };
-			unsigned tb=(rp(0x50)<<8)|rp(0x51), te=(rp(0x52)<<8)|rp(0x53);
-			unsigned ut=(datram->peek(0xBF5B)<<8)|datram->peek(0xBF5C);
-			unsigned cur=(tb&&te>tb&&ut>=tb&&ut<te)?(ut-tb)/29:999;
-			fprintf(stderr, "task table (cur=task#%u, utask=$%04X):\n", cur, ut);
-			if (tb>=0x100 && te>tb && te<=0x3FFF && (te-tb)%29==0)
-				for (unsigned e=tb,i=0; e<te; e+=29,i++)
-					if (rp(e+5))
-						fprintf(stderr, "  task#%u tsutop=$%02X tsstat=%u tsmode=$%02X%s\n",
-							i, rp(e+4), rp(e+5), rp(e+6), i==cur?"  <-- current":""), fprintf(stderr, "      tstid=$%04X tstidp=$%04X\n", (rp(e+10)<<8)|rp(e+11), (rp(e+12)<<8)|rp(e+13));
+		// UniFLEX's structures, at its fixed addresses: meaningless, and
+		// misleading, under any other guest.
+		if (uniflex) {
+			fprintf(stderr, "-- UniFLEX (--guest=uniflex) --\n");
+			fprintf(stderr, "user block $BF40-$BFF7 (current task %u):\n", (unsigned)t);
+			for (Word a = 0xBF40; a <= 0xBFF0; a += 16) {
+				fprintf(stderr, "  $%04X:", (unsigned)a);
+				for (int i = 0; i < 16; i++)
+					fprintf(stderr, " %02X", (unsigned)datram->peek((Word)(a + i)));
+				fprintf(stderr, "\n");
+			}
+			// Stale kernel-stack call-chain: SYSSTK=$BF40 grows down; after the
+			// offending syscall returned, $BF40-down still holds its return-address
+			// chain as stale data. Scan for words pointing into kernel text
+			// ($4000-$8D17) -- those are the bsr/jsr return addresses of the path
+			// that produced the corrupt frame. (Current bank slot 5 == this task's
+			// user-block page == where the kernel stack lives.)
+			fprintf(stderr, "stale kernel-stack call-chain ($BF3E down to $BD00, kernel-text words):\n");
+			for (Word a = 0xBF3E; a >= 0xBD00 && a <= 0xBF3E; a -= 1) {
+				Word w = (Word)((datram->peek(a) << 8) | datram->peek((Word)(a + 1)));
+				if (w >= 0x4000 && w <= 0x8D17)
+					fprintf(stderr, "  [$%04X] = $%04X\n", (unsigned)a, (unsigned)w);
+			}
+			fprintf(stderr, "kernel-stack low-water: min S=$%04X at PC=$%04X cyc=%llu (SYSSTK=$BF40)\n", (unsigned)min_ksp, (unsigned)min_ksp_pc,
+				(unsigned long long)min_ksp_cyc);
+			{
+				auto rp=[&](unsigned a){ return (unsigned)datram->read_physical(a); };
+				unsigned tb=(rp(0x50)<<8)|rp(0x51), te=(rp(0x52)<<8)|rp(0x53);
+				unsigned ut=(datram->peek(0xBF5B)<<8)|datram->peek(0xBF5C);
+				unsigned cur=(tb&&te>tb&&ut>=tb&&ut<te)?(ut-tb)/29:999;
+				fprintf(stderr, "task table (cur=task#%u, utask=$%04X):\n", cur, ut);
+				if (tb>=0x100 && te>tb && te<=0x3FFF && (te-tb)%29==0)
+					for (unsigned e=tb,i=0; e<te; e+=29,i++)
+						if (rp(e+5))
+							fprintf(stderr, "  task#%u tsutop=$%02X tsstat=%u tsmode=$%02X%s\n",
+								i, rp(e+4), rp(e+5), rp(e+6), i==cur?"  <-- current":""), fprintf(stderr, "      tstid=$%04X tstidp=$%04X\n", (rp(e+10)<<8)|rp(e+11), (rp(e+12)<<8)|rp(e+13));
+			}
 		}
 		dump_pc_hist();
 		fprintf(stderr, "==== END POST-MORTEM ====\n");
@@ -1548,7 +1603,7 @@ int main(int argc, char* argv[])
 				// Kernel-stack low-water: track min S while in kernel context
 				// (TRUSER @ $FDFA == 0). If it descends into the user frames,
 				// the kernel stack is overflowing into saved user state.
-				if (datram->peek(0xFDFA) == 0) {
+				if (uniflex && datram->peek(0xFDFA) == 0) {
 					Word sp = cpu.get_s();
 					// plausible kernel-stack range only (skip boot S=0 and spiral wild-lows)
 					// only while executing REAL kernel text ($4000-$8D17); skip the
@@ -1727,8 +1782,8 @@ int main(int argc, char* argv[])
 			++count;
 		}
 		do_dumps();
-		// U-067: report the genuine kernel-stack low-water at clean exit
-		// (depth = SYSSTK $BF40 - min S). Sizes the relocated kernel stack.
+		// UniFLEX: the kernel-stack low-water at a clean exit (depth =
+		// SYSSTK $BF40 - min S), which sizes its relocated kernel stack.
 		if (min_ksp != 0xFFFF)
 			fprintf(stderr, "kernel-stack low-water (clean exit): min S=$%04X "
 				"depth=%u at PC=$%04X cyc=%llu\n", (unsigned)min_ksp,
