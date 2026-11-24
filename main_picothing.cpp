@@ -71,7 +71,14 @@
 //	                     pseudo-terminal instead of stdin/stdout, so a
 //	                     terminal program or a file-transfer program such
 //	                     as Kermit can log in and drive the console.
-//	                     Excludes --input.
+//	                     Excludes --input. The emulator's own terminal is
+//	                     left as it was.
+//	  --aux-pty=PATH, --console-pty=PATH
+//	                     the same, and a symlink at PATH to the pty for
+//	                     the run, so a client can be pointed at one name
+//	                     and find every run there. PATH.lock holds it:
+//	                     another running emulator's PATH is refused, one
+//	                     a dead run left is replaced. Both go at exit.
 //	  --guest=uniflex|generic  what the diagnostics may assume the guest
 //	                     is (default generic): only uniflex reads memory
 //	                     as an OS's own structures; UniFLEX-only options
@@ -351,10 +358,13 @@ static void usage(const char* prog)
 		"                      start the RTC at this time and advance it\n"
 		"                      with guest cycles (1MHz), not the host, and\n"
 		"                      with no file: reproducible with --input\n"
-		"  --aux-pty           back the aux ACIA ($FFC6-7) with a host PTY\n"
+		"  --aux-pty[=PATH]    back the aux ACIA ($FFC6-7) with a host PTY\n"
 		"                      (prints the /dev/ttysNNN slave path at startup)\n"
-		"  --console-pty       back the console ACIA ($FFC4-5) with a host PTY\n"
-		"                      instead of stdin/stdout (excludes --input)\n"
+		"  --console-pty[=PATH]  back the console ACIA ($FFC4-5) with a host\n"
+		"                      PTY instead of stdin/stdout (excludes --input)\n"
+		"                      PATH: also a symlink to the PTY there, for the\n"
+		"                      run, so a client finds each run at one name;\n"
+		"                      another running emulator's PATH is refused\n"
 		"  --input=STR         deterministic scripted console input; bytes\n"
 		"                      released on guest CYCLE count (reproducible).\n"
 		"                      \\r \\n \\t \\0 \\\\ escapes honoured.\n"
@@ -416,6 +426,8 @@ int main(int argc, char* argv[])
 	bool			brk_gated = false;
 	bool			aux_pty_enable = false;	// --aux-pty: PTY-back the aux ACIA
 	bool			console_pty_enable = false;	// --console-pty: PTY-back the console ACIA
+	const char*		aux_pty_link = nullptr;		// --aux-pty=PATH: a fixed name for it
+	const char*		console_pty_link = nullptr;	// --console-pty=PATH
 	bool			use_hd6309 = false;	// --hd6309: run as an HD6309
 	bool			md_native = false;	// --md-native: MD bit 0 at reset
 	unsigned		pc_hist_top = 0;	// --pc-hist: top clusters to print (0 = disabled)
@@ -533,8 +545,14 @@ int main(int argc, char* argv[])
 			slave_path = argv[++i];
 		} else if (strcmp(argv[i], "--aux-pty") == 0) {
 			aux_pty_enable = true;
+		} else if (strncmp(argv[i], "--aux-pty=", 10) == 0 && argv[i][10]) {
+			aux_pty_enable = true;
+			aux_pty_link = argv[i] + 10;
 		} else if (strcmp(argv[i], "--console-pty") == 0) {
 			console_pty_enable = true;
+		} else if (strncmp(argv[i], "--console-pty=", 14) == 0 && argv[i][14]) {
+			console_pty_enable = true;
+			console_pty_link = argv[i] + 14;
 		} else if (strcmp(argv[i], "--gdb") == 0) {
 			gdb_port = GdbStub::DEFAULT_PORT;
 		} else if (strncmp(argv[i], "--gdb=", 6) == 0) {
@@ -660,21 +678,33 @@ int main(int argc, char* argv[])
 	// deterministic cycle-scheduled ScriptTerminal with --input (for
 	// reproducible runs / trace diffs). Both subclass mc6850_impl and
 	// send output to stdout. --console-pty instead hands the console to
-	// a host pseudo-terminal, as --aux-pty does for the aux ACIA; if the
-	// PTY fails to open, the Terminal is used so the emulator still boots.
-	std::unique_ptr<Terminal>	console_owned;
-	if (have_input)
-		console_owned = std::make_unique<ScriptTerminal>(cpu, input_script, input_first, input_step);
-	else
-		console_owned = std::make_unique<Terminal>(cpu);
+	// a host pseudo-terminal, as --aux-pty does for the aux ACIA, and
+	// leaves the emulator's own terminal alone: a Terminal would take
+	// it over (raw, no echo) though the guest never reads it. If the
+	// PTY fails to open, the Terminal is used so the emulator still
+	// boots -- unless a fixed path was asked for, which a client is
+	// waiting on.
 	std::unique_ptr<PtySerial>	console_pty;
-	mc6850_impl*			console_impl = console_owned.get();
+	std::unique_ptr<Terminal>	console_owned;
+	mc6850_impl*			console_impl = nullptr;
 	if (console_pty_enable) {
 		console_pty = std::make_unique<PtySerial>("console");
+		if (console_pty->ok() && console_pty_link &&
+		    !console_pty->publish(console_pty_link))
+			return EXIT_FAILURE;
 		if (console_pty->ok())
 			console_impl = console_pty.get();
+		else if (console_pty_link)
+			return EXIT_FAILURE;
 		else
 			fprintf(stderr, "ptyserial: falling back to the stdin/stdout console\n");
+	}
+	if (!console_impl) {
+		if (have_input)
+			console_owned = std::make_unique<ScriptTerminal>(cpu, input_script, input_first, input_step);
+		else
+			console_owned = std::make_unique<Terminal>(cpu);
+		console_impl = console_owned.get();
 	}
 
 	// Auxiliary ACIA backend: null by default (discards TX, no RX), or a
@@ -687,8 +717,12 @@ int main(int argc, char* argv[])
 	mc6850_impl*			aux_impl = &aux_null;
 	if (aux_pty_enable) {
 		aux_pty = std::make_unique<PtySerial>("DriveWire");
+		if (aux_pty->ok() && aux_pty_link && !aux_pty->publish(aux_pty_link))
+			return EXIT_FAILURE;
 		if (aux_pty->ok())
 			aux_impl = aux_pty.get();
+		else if (aux_pty_link)
+			return EXIT_FAILURE;
 		else
 			fprintf(stderr, "ptyserial: falling back to null aux ACIA\n");
 	}

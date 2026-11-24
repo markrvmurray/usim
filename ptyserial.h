@@ -10,6 +10,14 @@
 //	(8-bit, no echo, no CR/LF translation, no signals) so a binary
 //	protocol passes through untouched.
 //
+//	The slave's name changes from run to run. publish() also gives it
+//	a fixed one: a symlink at a path of the caller's choosing, so a
+//	client can be pointed at it once and find each run's pty there.
+//	The link is owned through a lock on PATH.lock, held for the run:
+//	a link another live emulator owns is refused, never taken over,
+//	and one left by a run that died is replaced. Both are removed when
+//	the emulator exits, also when a signal ends it.
+//
 //	vim: ts=8 sw=8 noet:
 //
 
@@ -37,6 +45,10 @@ protected:
 
 	void		configure_raw(int fd);
 
+	std::string	link_path;	// publish()'s symlink, while it is ours
+	int		lock_fd = -1;	// the flock on link_path + ".lock"
+	void		unpublish();
+
 public:
 	virtual bool	poll_read() override;
 	virtual Byte	read() override;
@@ -44,6 +56,10 @@ public:
 
 	bool		ok() const { return master_fd >= 0; }
 	const std::string& name() const { return slave_name; }
+
+	// Make path a symlink to the slave, as described above. False,
+	// with the reason on stderr, if it cannot be had.
+	bool		publish(const std::string& path);
 
 public:
 	// label is only used in the startup banner (e.g. "DriveWire").
