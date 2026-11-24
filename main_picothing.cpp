@@ -77,8 +77,11 @@
 //	                     stdout, the guest held at reset until "run":
 //	                     run, stop, step, regs, mem, break, delete, reset,
 //	                     quit, and the debugger's monitor commands. Ctrl-C
-//	                     stops the guest. Needs --console-pty, which
-//	                     leaves stdin and stdout to it.
+//	                     stops the guest. "gdb [PORT]" hands it to lldb or
+//	                     gdb, and takes it back when the debugger detaches
+//	                     (kill ends the emulator, as with --gdb); with
+//	                     --gdb the debugger has it first. Needs
+//	                     --console-pty, which leaves stdin and stdout to it.
 //	  --aux-pty=PATH, --console-pty=PATH
 //	                     the same, and a symlink at PATH to the pty for
 //	                     the run, so a client can be pointed at one name
@@ -370,7 +373,8 @@ static void usage(const char* prog)
 		"                      (prints the /dev/ttysNNN slave path at startup)\n"
 		"  --prompt            commands on stdin/stdout, the guest held at\n"
 		"                      reset until \"run\" (\"help\" lists them);\n"
-		"                      needs --console-pty. Ctrl-C stops the guest\n"
+		"                      needs --console-pty. Ctrl-C stops the guest;\n"
+		"                      \"gdb\" hands it to a debugger till it detaches\n"
 		"  --console-pty[=PATH]  back the console ACIA ($FFC4-5) with a host\n"
 		"                      PTY instead of stdin/stdout (excludes --input)\n"
 		"                      PATH: also a symlink to the PTY there, for the\n"
@@ -656,10 +660,6 @@ int main(int argc, char* argv[])
 	if (prompt_enable && !console_pty_enable) {
 		fprintf(stderr, "%s: --prompt needs the console off stdin "
 			"(--console-pty)\n", argv[0]);
-		return EXIT_FAILURE;
-	}
-	if (prompt_enable && (gdb_port >= 0 || gdb_port_file)) {
-		fprintf(stderr, "%s: --prompt and --gdb cannot be used together\n", argv[0]);
 		return EXIT_FAILURE;
 	}
 	if (console_pty_enable && have_input) {
@@ -1401,33 +1401,37 @@ int main(int argc, char* argv[])
 			}
 		});
 
-	// --gdb: the debugger takes over before the first instruction. An
-	// invalid instruction becomes a stop it can inspect, after the
-	// post-mortem above, rather than an abort.
+	// The debugger's view of memory, and the prompt's: $0000-$FEFF
+	// through the chosen task, the I/O page as is.
+	auto view_read = [&](Word a) -> Byte {
+		if (view_task >= 0 && a < 0xFF00)
+			return datram->peek_task((Byte)view_task, a);
+		return cpu.debug_read(a);
+	};
+	auto view_write = [&](Word a, Byte v) {
+		if (view_task >= 0 && a < 0xFF00)
+			datram->poke_task((Byte)view_task, a, v);
+		else
+			cpu.debug_write(a, v);
+	};
+
+	// A debugger, attached by --gdb before the first instruction or by
+	// the prompt's "gdb" at any stop. An invalid instruction becomes a
+	// stop it can inspect, after the post-mortem above, rather than an
+	// abort.
 	std::unique_ptr<GdbStub> gdb;
 	bool invalid_hit = false;
-	if (gdb_port_file && gdb_port < 0)
-		gdb_port = 0;		// a port file implies --gdb=0
-	if (gdb_port >= 0) {
+	auto attach_debugger = [&](int port, const char* port_file) {
 		gdb = std::make_unique<GdbStub>(cpu, commands);
-
-		// $0000-$FEFF through the chosen task; the I/O page as is
-		gdb->read_memory = [&](Word a) -> Byte {
-			if (view_task >= 0 && a < 0xFF00)
-				return datram->peek_task((Byte)view_task, a);
-			return cpu.debug_read(a);
-		};
-		gdb->write_memory = [&](Word a, Byte v) {
-			if (view_task >= 0 && a < 0xFF00)
-				datram->poke_task((Byte)view_task, a, v);
-			else
-				cpu.debug_write(a, v);
-		};
-
-		if (!gdb->listen(gdb_port, gdb_port_file))
-			return EXIT_FAILURE;
+		gdb->read_memory = view_read;
+		gdb->write_memory = view_write;
+		if (!gdb->listen(port, port_file)) {
+			gdb.reset();
+			return false;
+		}
 		cpu.abort = [&]() { invalid_hit = true; };
-	}
+		return true;
+	};
 
 	// --prompt: commands on the emulator's own terminal, the guest held
 	// at reset until "run". Ctrl-C stops the guest instead of being
@@ -1436,15 +1440,23 @@ int main(int argc, char* argv[])
 	if (prompt_enable) {
 		prompt = std::make_unique<Prompt>(cpu, commands);
 		prompt->name = "usim09pt";
-		prompt->read_memory = [&](Word a) -> Byte {
-			if (view_task >= 0 && a < 0xFF00)
-				return datram->peek_task((Byte)view_task, a);
-			return cpu.debug_read(a);
-		};
+		prompt->read_memory = view_read;
 		if (video_window)
 			prompt->idle = [&]() { (void)picovideo_display_service(video_scale); };
+		prompt->attach = [&](int port) {
+			return attach_debugger(port < 0 ? GdbStub::DEFAULT_PORT : port, nullptr);
+		};
 		Prompt::catch_interrupts();
 		cpu.abort = [&]() { invalid_hit = true; };
+	}
+
+	if (gdb_port_file && gdb_port < 0)
+		gdb_port = 0;		// a port file implies --gdb=0
+	if (gdb_port >= 0) {
+		if (!attach_debugger(gdb_port, gdb_port_file))
+			return EXIT_FAILURE;
+		if (prompt)
+			prompt->debugger_attached();
 	}
 
 	// Step loop is engaged when any of --timeout, --watch, --dump, --brk
@@ -1470,12 +1482,19 @@ int main(int argc, char* argv[])
 	if (stepping) {
 		unsigned long count = 0;
 		while (timeout == 0 || count < timeout) {
+			// The prompt first: a debugger its "gdb" attaches must
+			// see this instruction before it runs.
+			if (prompt && !prompt->before_insn())
+				return EXIT_SUCCESS;
 			if (gdb && !gdb->before_insn()) {
 				fprintf(stderr, "%s: killed by the debugger\n", argv[0]);
 				return EXIT_FAILURE;
 			}
-			if (prompt && !prompt->before_insn())
-				return EXIT_SUCCESS;
+			// a debugger that detached gives the CPU back to the prompt
+			if (gdb && !gdb->connected() && prompt) {
+				gdb.reset();
+				prompt->debugger_detached();
+			}
 			// Windowed trace: enable per-instruction trace for the
 			// instruction-count window [trace_from, trace_to). Lets a
 			// long multitasking run be traced in a tight window without

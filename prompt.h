@@ -15,6 +15,11 @@
 //	input stops nothing while the CPU runs, so a script can say "run"
 //	and let the run end its own way; at the prompt it means "quit".
 //
+//	"gdb" hands the CPU to a debugger, through the machine's attach
+//	hook. The debugger has it until it detaches, when the prompt takes
+//	it back, running as the debugger left it; meanwhile the prompt
+//	reads nothing, and Ctrl-C here does nothing.
+//
 //	vim: ts=8 sw=8 noet:
 //
 
@@ -44,6 +49,16 @@ public:
 
 	std::string			name = "usim";	// shown in the prompt
 
+	// The machine's way to let a debugger in: wait on localhost:port
+	// (-1: its usual port; 0: any free one), saying where, and true
+	// once one is attached. Without it there is no "gdb" command.
+	std::function<bool(int port)>	attach;
+
+	// A debugger has the CPU now (attached by other means than "gdb",
+	// say at startup), or has let it go, leaving it running.
+	void		debugger_attached();
+	void		debugger_detached();
+
 	// Before every instruction. False once told to quit.
 	bool		before_insn();
 
@@ -60,7 +75,7 @@ private:
 	int		in_fd;
 	FILE*		out;
 
-	enum State { STOPPED, RUNNING, FAULTED, QUIT };
+	enum State { STOPPED, RUNNING, FAULTED, DEBUGGER, QUIT };
 	State		state = STOPPED;
 	bool		started = false;	// the first before_insn() has been
 	bool		counting = false;	// step N: steps_left is in force

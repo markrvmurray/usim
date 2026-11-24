@@ -4,8 +4,9 @@
 //	at its terminal would: the guest held at reset until "run", the
 //	console on its pty meanwhile silent; stop, step, breakpoints,
 //	registers and memory; Ctrl-C; the machine's own commands beside
-//	the prompt's; the end of input; an invalid instruction; and the
-//	options it cannot go with.
+//	the prompt's; the end of input; an invalid instruction; the option
+//	it cannot go without; and a debugger, taking the CPU from the
+//	prompt and giving it back.
 //
 //	vim: ts=8 sw=8 noet:
 //
@@ -24,8 +25,11 @@
 #include <string>
 #include <vector>
 
+#include <arpa/inet.h>
 #include <fcntl.h>
+#include <netinet/in.h>
 #include <poll.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -91,6 +95,7 @@ struct Emulator {
 			exit(EXIT_FAILURE);
 		}
 		const std::string err = at("stderr");
+		unlink(err.c_str());	// nothing of the last run's
 		pid = fork();
 		if (pid == 0) {
 			dup2(in[0], 0);
@@ -210,6 +215,69 @@ static std::string console(int fd, size_t n, int ms)
 	}
 	return got;
 }
+
+// The port a debugger is awaited on, from the emulator's stderr,
+// waiting up to 10s for it to say
+static int debugger_port()
+{
+	for (int i = 0; i < 200; i++, usleep(50000)) {
+		const std::string err = errors();
+		size_t p = err.find("debugger on localhost:");
+		if (p != std::string::npos)
+			return atoi(err.c_str() + p + strlen("debugger on localhost:"));
+	}
+	return -1;
+}
+
+// A debugger, as far as these tests need one: the remote protocol by
+// hand over TCP
+struct Debugger {
+	int		fd = -1;
+
+	explicit Debugger(int port)
+	{
+		fd = socket(AF_INET, SOCK_STREAM, 0);
+		sockaddr_in a{};
+		a.sin_family = AF_INET;
+		a.sin_port = htons((uint16_t)port);
+		inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+		if (port <= 0 || connect(fd, (sockaddr*)&a, sizeof a) != 0) {
+			close(fd);
+			fd = -1;
+		}
+	}
+	~Debugger()
+	{
+		if (fd >= 0)
+			close(fd);
+	}
+	// A packet's reply payload, or "<none>"
+	std::string cmd(const std::string& payload)
+	{
+		unsigned sum = 0;
+		for (unsigned char c : payload)
+			sum += c;
+		char tail[8];
+		snprintf(tail, sizeof tail, "#%02x", sum & 0xff);
+		const std::string pkt = "$" + payload + tail;
+		(void)!write(fd, pkt.data(), pkt.size());
+		std::string in;
+		for (int i = 0; i < 200; i++) {
+			size_t d = in.find('$'), h = in.find('#', d == std::string::npos ? 0 : d);
+			if (d != std::string::npos && h != std::string::npos && in.size() >= h + 3)
+				return in.substr(d + 1, h - d - 1);
+			struct pollfd p = { fd, POLLIN, 0 };
+			if (poll(&p, 1, 50) > 0) {
+				char buf[256];
+				ssize_t r = read(fd, buf, sizeof buf);
+				if (r <= 0)
+					break;
+				in.append(buf, (size_t)r);
+			}
+		}
+		return "<none>";
+	}
+};
 
 int main()
 {
@@ -369,10 +437,85 @@ int main()
 			has(errors(), "--prompt needs the console off stdin"), errors());
 	}
 	{
-		Emulator e({ "--console-pty", "--prompt", "--gdb=0", hello });
+		// "gdb": the debugger has the CPU until it detaches
+		Emulator e({ "--console-pty=" + con, "--prompt", "--timeout=50000000", hello });
+		e.upto("usim09pt> ");
+		out = e.cmd("gdb x");
+		expect("gdb, wrongly", has(out, "usage: gdb [PORT]"), out);
+		e.send("gdb 0");
+		out = e.upto("(Ctrl-C gives up)\n");
+		expect("waits for a debugger", !has(out, "never saw"), out);
+		Debugger d(debugger_port());
+		expect("a debugger attaches", d.fd >= 0, errors());
+		out = e.upto("gives it back here\n");
+		expect("the prompt says so", has(out, "the debugger has the CPU"), out);
+		std::string r = d.cmd("p6");
+		expect("the debugger finds the CPU where the prompt left it", r == "e000", r);
+		e.send("regs");		// read only once the debugger lets go
+		r = d.cmd("D");
+		expect("it detaches", r == "OK", r);
+		out = e.upto("DP:00\n");
+		expect("the prompt has the CPU back, running",
+			has(out, "the debugger has let go: running") && has(out, "PC:E0"), out);
+		int fd = open(con.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+		expect("the guest runs on", console(fd, 2, 5000) == "hi");
+		close(fd);
+		out = e.cmd("stop");
+		expect("and stops when told", has(out, "stopped at $E013"), out);
+
+		// Ctrl-C while waiting gives up
+		e.send("gdb 0");
+		e.upto("(Ctrl-C gives up)\n");
+		usleep(200000);
+		kill(e.pid, SIGINT);
+		out = e.upto("usim09pt> ");
+		expect("Ctrl-C gives up waiting", has(out, "no debugger attached"), out);
+		out = e.cmd("regs");
+		expect("and the prompt goes on", has(out, "PC:E013"), out);
+
+		e.send("run");
+		e.send("gdb 0");
+		out = e.upto("stop it first\n");
+		expect("not while running", has(out, "running: stop it first"), out);
+		e.cmd("stop");
+
+		// a kill ends the emulator, as it does under --gdb
+		const size_t before = errors().size();
+		e.send("gdb 0");
+		e.upto("(Ctrl-C gives up)\n");
+		int port = -1;
+		for (int i = 0; i < 200 && port < 0; i++, usleep(50000)) {
+			const std::string err = errors().substr(before);
+			size_t p = err.find("debugger on localhost:");
+			if (p != std::string::npos)
+				port = atoi(err.c_str() + p + strlen("debugger on localhost:"));
+		}
+		Debugger k(port);
+		expect("a second debugger attaches", k.fd >= 0, errors());
+		k.cmd("k");
 		int rc = e.finish();
-		expect("--prompt and --gdb", rc == 1 &&
-			has(errors(), "--prompt and --gdb cannot be used together"), errors());
+		expect("its kill ends the emulator", rc == 1 &&
+			has(errors(), "killed by the debugger"), std::to_string(rc) + "\n" + errors());
+	}
+	{
+		// --gdb with --prompt: the debugger first, then the prompt
+		Emulator e({ "--console-pty=" + con, "--prompt", "--gdb=0", hello });
+		Debugger d(debugger_port());
+		expect("--gdb with --prompt waits for the debugger", d.fd >= 0, errors());
+		out = e.upto("gives it back here\n");
+		expect("the debugger has it first", has(out, "the debugger has the CPU") &&
+			!has(out, "held at reset"), out);
+		std::string r = d.cmd("D");
+		expect("it detaches", r == "OK", r);
+		out = e.upto("Ctrl-C stops it)\n");
+		expect("then the prompt has it, running", has(out, "the debugger has let go") &&
+			!has(out, "held at reset"), out);
+		out = e.cmd("stop");
+		expect("stop", has(out, "stopped at $E0") &&	// wherever it had got to
+			!has(out, "held at reset"), out);
+		e.send("quit");
+		int rc = e.finish();
+		expect("quit", rc == 0, std::to_string(rc) + "\n" + errors());
 	}
 
 	std::string cleanup = std::string("rm -rf ") + dir;

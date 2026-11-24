@@ -174,6 +174,34 @@ Prompt::Prompt(mc6809& cpu, const Monitor& machine, int in_fd, FILE* out)
 			state = STOPPED;
 			o += regs();
 		});
+	own.add("gdb", "gdb [PORT]        hand the CPU to lldb or gdb, on localhost:PORT\n"
+		       "                  (0: any free port) until it detaches\n",
+		[this](const std::string& args, std::string& o) {
+			int port = -1;
+			if (!args.empty()) {
+				char* end;
+				unsigned long n = strtoul(args.c_str(), &end, 10);
+				if (*end || n > 65535) {
+					o += "usage: gdb [PORT] (decimal)\n";
+					return;
+				}
+				port = (int)n;
+			}
+			if (!attach)
+				o += "no debugger can attach here\n";
+			else if (state == RUNNING)
+				o += "running: stop it first\n";
+			else if (state == FAULTED)
+				o += "the CPU cannot go on past an invalid instruction\n";
+			else {
+				say("waiting for a debugger (Ctrl-C gives up)\n");
+				if (attach(port))
+					debugger_attached();
+				else
+					o += "no debugger attached\n";
+				interrupted = 0;
+			}
+		});
 	own.add("quit", "quit              end the emulator\n",
 		[this](const std::string&, std::string&) { state = QUIT; });
 }
@@ -197,6 +225,22 @@ std::string Prompt::regs() const
 		cpu.get_pc(), flags, cpu.get_s(), cpu.get_u(), cpu.get_a(),
 		cpu.get_b(), cpu.get_x(), cpu.get_y(), cpu.get_dp());
 	return buf;
+}
+
+void Prompt::debugger_attached()
+{
+	state = DEBUGGER;
+	counting = false;
+	started = true;		// it was never held here
+	say("the debugger has the CPU; detaching it gives it back here\n");
+}
+
+void Prompt::debugger_detached()
+{
+	state = RUNNING;
+	counting = false;
+	interrupted = 0;
+	say("the debugger has let go: running (\"stop\" or Ctrl-C stops it)\n");
 }
 
 void Prompt::stop(const std::string& why)
@@ -260,7 +304,7 @@ bool Prompt::serve()
 				run_line(line);
 			if (state == QUIT)
 				return false;
-			if (state == RUNNING)
+			if (state == RUNNING || state == DEBUGGER)
 				return true;
 			say(name + "> ");
 		}
@@ -281,6 +325,10 @@ bool Prompt::before_insn()
 {
 	if (state == QUIT)
 		return false;
+	if (state == DEBUGGER) {
+		interrupted = 0;	// Ctrl-C here is not the debugger's
+		return true;
+	}
 	if (!started) {
 		started = true;
 		say("held at reset at $" + hex(cpu.get_pc(), 4) + "\n" + regs() +
