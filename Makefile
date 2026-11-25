@@ -156,11 +156,12 @@ picovideo_display.o: picovideo_display.cpp
 test: tests/test6809 tests/test6809.bin tests/test6309 tests/test6309.bin \
       tests/test_mmu_tick tests/test_system_watchpoint tests/test_picoide \
       tests/test_picortc tests/test_cycles6309 tests/test_picovideo \
-      tests/test_picovideo_keys tests/cycletest09 tests/cycletest09.bin tests/test_exgtfr \
+      tests/test_picovideo_keys tests/cycletest09 tests/cycletest09.bin tests/test_exgtfr tests/test_neg \
       tests/test_prefix tests/test_monitor tests/test_gdbstub tests/test_peek tests/test_traps tests/test_ptylink tests/test_prompt usim09pt
 	./tests/test6809
 	./tests/cycletest09
 	./tests/test_exgtfr
+	./tests/test_neg
 	./tests/test_prefix
 	./tests/test_monitor
 	./tests/test_gdbstub
@@ -193,6 +194,9 @@ tests/test_picortc: tests/test_picortc.cpp $(LIB)
 
 tests/test_exgtfr: tests/test_exgtfr.cpp $(LIB)
 	$(CXX) $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_exgtfr.cpp -L. -lusim -o $(@)
+
+tests/test_neg: tests/test_neg.cpp $(LIB)
+	$(CXX) $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_neg.cpp -L. -lusim -o $(@)
 
 tests/test_prefix: tests/test_prefix.cpp $(LIB)
 	$(CXX) $(CPPFLAGS) $(CCFLAGS) $(LDFLAGS) tests/test_prefix.cpp -L. -lusim -o $(@)
@@ -324,7 +328,7 @@ cycles6309: tests/test6309 tests/test6309.bin
 
 .PHONY: clean
 clean:
-	$(RM) $(BIN) $(LIB) *.o *.d tests/test_mmu_tick tests/*.o tests/*.d tests/test6809.bin tests/test_system_watchpoint tests/test_picoide tests/test_picortc tests/test_exgtfr tests/test_prefix tests/test_monitor tests/test_gdbstub tests/test_peek tests/test_traps tests/test_ptylink tests/test_prompt tests/test_cycles6309 tests/test_picovideo tests/test_picovideo_keys tests/cycletest09.bin
+	$(RM) $(BIN) $(LIB) *.o *.d tests/test_mmu_tick tests/*.o tests/*.d tests/test6809.bin tests/test_system_watchpoint tests/test_picoide tests/test_picortc tests/test_exgtfr tests/test_neg tests/test_prefix tests/test_monitor tests/test_gdbstub tests/test_peek tests/test_traps tests/test_ptylink tests/test_prompt tests/test_cycles6309 tests/test_picovideo tests/test_picovideo_keys tests/cycletest09.bin
 
 # Compiler-generated header dependencies (see CPPFLAGS -MMD -MP). Pulling
 # these in means editing any header recompiles exactly the objects that

@@ -13,6 +13,7 @@ tests/test_system_watchpoint
 tests/test_picoide
 tests/test_picortc
 tests/test_exgtfr
+tests/test_neg
 tests/test_prefix
 tests/test_monitor
 tests/test_gdbstub
