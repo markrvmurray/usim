@@ -22,9 +22,8 @@ As well as a C++20 compiler, `usim09pt` needs:
 - **The `pico-thing-video` firmware sources.** The video device is drawn by
   the video firmware's own renderer, compiled unchanged from that tree. The
   Makefile looks for it at `~/GitHub/PICO/pico-thing-video`; set
-  `PICOVIDEO=/path/to/it` to point elsewhere. That repository is not yet
-  public, so for now `usim09pt` and `make test` build only where it is
-  checked out.
+  `PICOVIDEO=/path/to/it` to point elsewhere. The sources are at
+  https://github.com/markrvmurray/pico-thing-video.
 
 `usim09` and `usim09batch` need neither.
 
